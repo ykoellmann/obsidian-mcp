@@ -22,3 +22,5 @@ example-vault/
 
 # Lock files for file operations (vault per-file locks)
 *.md.lock
+
+.idea/
