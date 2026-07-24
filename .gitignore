@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+dist/
+*.egg-info/
+
+# Caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Environment
+.env
+
+# Example vault (local only – jeder nutzt seinen eigenen Vault)
+example-vault/
+
+# Lock files for file operations (vault per-file locks)
+*.md.lock

@@ -1,0 +1,46 @@
+[project]
+name = "second-brain-mcp"
+version = "0.1.0"
+description = "MCP server for Obsidian vaults – read, write, search, backlinks"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=2.0",
+    "python-frontmatter>=1.1",
+    "watchdog>=4.0",
+    "filelock>=3.13",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+second-brain-mcp = "second_brain_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/second_brain_mcp"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["second_brain_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
