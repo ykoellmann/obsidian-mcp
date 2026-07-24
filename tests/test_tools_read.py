@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from obsidian_mcp.tools.read import get_note_outline, list_notes, read_note, render_note, search_notes
+from obsidian_mcp.tools.read import (
+    get_note_outline,
+    list_notes,
+    read_note,
+    render_note,
+    search_notes,
+)
 
 # ── list_notes ──────────────────────────────────────────────────────────────
 

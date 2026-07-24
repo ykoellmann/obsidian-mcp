@@ -5,9 +5,15 @@ on:
     tags: ['v*']
 
 jobs:
+  # ── CI gate ─────────────────────────────────────────────────────────────────
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
   # ── PyPI ────────────────────────────────────────────────────────────────────
   publish-pypi:
     name: Publish to PyPI
+    needs: ci
     runs-on: ubuntu-latest
     permissions:
       id-token: write  # required for trusted publishing
@@ -30,6 +36,7 @@ jobs:
   # ── Docker → GHCR ───────────────────────────────────────────────────────────
   publish-docker:
     name: Publish Docker image to GHCR
+    needs: ci
     runs-on: ubuntu-latest
     permissions:
       contents: read
