@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from second_brain_mcp.domain.parser import (
+from obsidian_mcp.domain.parser import (
     parse_note,
 )
 

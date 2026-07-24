@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-import second_brain_mcp.config as cfg_mod
-from second_brain_mcp.domain.index import VaultIndex
+import obsidian_mcp.config as cfg_mod
+from obsidian_mcp.domain.index import VaultIndex
 
 
 @pytest.fixture

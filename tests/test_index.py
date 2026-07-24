@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from second_brain_mcp.domain.index import IndexBuildingError, VaultIndex
+from obsidian_mcp.domain.index import IndexBuildingError, VaultIndex
 
 FIXTURES = Path(__file__).parent / "fixtures" / "sample_vault"
 

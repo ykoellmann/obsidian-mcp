@@ -1,13 +1,13 @@
 
 import pytest
 
-from second_brain_mcp.storage.filesystem import (
+from obsidian_mcp.storage.filesystem import (
     PathTraversalError,
     read_file,
     validate_path,
     write_file_atomic,
 )
-from second_brain_mcp.storage.locking import LockTimeoutError, acquire_lock
+from obsidian_mcp.storage.locking import LockTimeoutError, acquire_lock
 
 
 def test_validate_path_ok(tmp_path):

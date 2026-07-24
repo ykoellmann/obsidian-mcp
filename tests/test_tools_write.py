@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from second_brain_mcp.tools.write import move_note
+from obsidian_mcp.tools.write import move_note
 
 
 def test_move_note_renames_file(tmp_path, vault_factory):

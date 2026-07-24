@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 
 
 _DEFAULT_INSTRUCTIONS = """\
-You are connected to **second-brain-mcp**, an MCP server for an Obsidian knowledge vault.
+You are connected to **obsidian-mcp**, an MCP server for an Obsidian knowledge vault.
 
 ## First Steps
 Call `get_vault_conventions_tool()` first — it reads `_AI_INSTRUCTIONS.md` from the vault
@@ -268,7 +268,7 @@ _cfg = None
 _index: VaultIndex | None = None
 _watcher = None
 
-mcp = FastMCP(name="second-brain", instructions=_load_instructions())
+mcp = FastMCP(name="obsidian-mcp", instructions=_load_instructions())
 
 
 # ── Read ──────────────────────────────────────────────────────────────────────
@@ -727,7 +727,7 @@ def main() -> None:
     _watcher = VaultWatcher(_cfg.vault_path)
     threading.Thread(target=_index.build, daemon=True).start()
     _watcher.start(on_change=_index.update)
-    logger.info("Starting second-brain-mcp (transport=%s)", _cfg.transport)
+    logger.info("Starting obsidian-mcp (transport=%s)", _cfg.transport)
     mcp.run(transport=_cfg.transport)
 
 

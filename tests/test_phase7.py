@@ -4,9 +4,9 @@ from datetime import date
 
 import yaml
 
-from second_brain_mcp.tools.query import get_periodic_note, list_all_tags
-from second_brain_mcp.tools.templates import create_from_template, list_templates
-from second_brain_mcp.tools.write import manage_tags
+from obsidian_mcp.tools.query import get_periodic_note, list_all_tags
+from obsidian_mcp.tools.templates import create_from_template, list_templates
+from obsidian_mcp.tools.write import manage_tags
 
 # ── manage_tags ───────────────────────────────────────────────────────────────
 

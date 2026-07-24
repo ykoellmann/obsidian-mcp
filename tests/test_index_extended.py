@@ -1,6 +1,6 @@
 
 
-from second_brain_mcp.domain.index import VaultIndex
+from obsidian_mcp.domain.index import VaultIndex
 
 
 def test_alias_resolution(tmp_path):

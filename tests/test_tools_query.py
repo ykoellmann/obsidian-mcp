@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from second_brain_mcp.tools.query import (
+from obsidian_mcp.tools.query import (
     get_broken_links,
     get_link_graph,
     get_orphans,
@@ -8,7 +8,7 @@ from second_brain_mcp.tools.query import (
     get_tasks,
     get_vault_stats,
 )
-from second_brain_mcp.tools.read import list_notes, search_notes
+from obsidian_mcp.tools.read import list_notes, search_notes
 
 # --- broken links ---
 

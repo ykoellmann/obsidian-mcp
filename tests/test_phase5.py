@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from second_brain_mcp.tools.query import query_notes
-from second_brain_mcp.tools.read import get_note_outline, render_note, search_notes
+from obsidian_mcp.tools.query import query_notes
+from obsidian_mcp.tools.read import get_note_outline, render_note, search_notes
 
 # ── query_notes ───────────────────────────────────────────────────────────────
 

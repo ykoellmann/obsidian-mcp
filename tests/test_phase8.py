@@ -5,9 +5,9 @@ import json
 
 import pytest
 
-from second_brain_mcp.tools.canvas import patch_canvas, write_canvas
-from second_brain_mcp.tools.query import query_notes
-from second_brain_mcp.tools.read import read_note
+from obsidian_mcp.tools.canvas import patch_canvas, write_canvas
+from obsidian_mcp.tools.query import query_notes
+from obsidian_mcp.tools.read import read_note
 
 # ── write_canvas ──────────────────────────────────────────────────────────────
 

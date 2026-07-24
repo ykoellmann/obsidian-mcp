@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import pytest
 
-from second_brain_mcp.tools.folders import (
+from obsidian_mcp.tools.folders import (
     create_folder,
     delete_folder,
     list_folder,
     rename_folder,
 )
-from second_brain_mcp.tools.read import get_note_outline
+from obsidian_mcp.tools.read import get_note_outline
 
 # ── create_folder ─────────────────────────────────────────────────────────────
 

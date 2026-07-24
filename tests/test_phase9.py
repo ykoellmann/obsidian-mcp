@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from second_brain_mcp.tools.kanban import (
+from obsidian_mcp.tools.kanban import (
     add_kanban_card,
     create_kanban_board,
     delete_kanban_card,
@@ -207,8 +207,8 @@ def test_delete_kanban_card_not_found_raises(vault_factory):
 
 def test_vault_note_resource_reads_content(vault_factory):
     vault_factory({"note.md": "# Hello\nWorld"})
-    from second_brain_mcp.config import get_config
-    from second_brain_mcp.storage.filesystem import read_file
+    from obsidian_mcp.config import get_config
+    from obsidian_mcp.storage.filesystem import read_file
     cfg = get_config()
     content = read_file(cfg.vault_path, "note.md")
     assert "Hello" in content
@@ -220,7 +220,7 @@ def test_vault_stats_resource(vault_factory):
         "a.md": "Links to [[b]]",
         "b.md": "No outlinks",
     })
-    from second_brain_mcp.tools.query import get_vault_stats
+    from obsidian_mcp.tools.query import get_vault_stats
     stats = get_vault_stats(idx)
     assert stats["total_notes"] == 2
     assert stats["index_ready"] is True
@@ -231,7 +231,7 @@ def test_vault_tags_resource(vault_factory):
         "a.md": "---\ntags: [python]\n---\n",
         "b.md": "---\ntags: [python, rust]\n---\n",
     })
-    from second_brain_mcp.tools.query import list_all_tags
+    from obsidian_mcp.tools.query import list_all_tags
     tags = list_all_tags(idx, sort_by="count")
     by_name = {t["tag"]: t["count"] for t in tags}
     assert by_name["python"] == 2

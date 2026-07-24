@@ -4,8 +4,8 @@ import base64
 
 import pytest
 
-from second_brain_mcp.tools.attachments import add_attachment, list_attachments, read_attachment
-from second_brain_mcp.tools.write import append_to_note, delete_note, patch_frontmatter, patch_note
+from obsidian_mcp.tools.attachments import add_attachment, list_attachments, read_attachment
+from obsidian_mcp.tools.write import append_to_note, delete_note, patch_frontmatter, patch_note
 
 # ── delete_note ───────────────────────────────────────────────────────────────
 

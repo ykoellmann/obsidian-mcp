@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from second_brain_mcp.domain.parser import extract_wikilinks, parse_note
+from obsidian_mcp.domain.parser import extract_wikilinks, parse_note
 
 FIXTURES = Path(__file__).parent / "fixtures" / "sample_vault"
 

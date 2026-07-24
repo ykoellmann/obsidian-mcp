@@ -1,45 +1,139 @@
-# second-brain-mcp
+# obsidian-mcp
 
-MCP server for Obsidian vaults – read, write, search, backlinks.
+An MCP (Model Context Protocol) server for [Obsidian](https://obsidian.md) vaults. Connects Claude (or any MCP client) directly to your vault — read, write, search, navigate links, and manage notes, canvases, and kanban boards.
 
-## Quick Start
+## Features
+
+- **Read & Search** — read notes, search full-text (exact/regex/fuzzy), render embedded transclusions, inspect note outlines
+- **Write** — create/overwrite notes, patch sections, append content, update frontmatter, manage tags, move notes with automatic wikilink rewriting
+- **Folders** — list, create, delete, rename folders; renaming rewrites path-based wikilinks vault-wide
+- **Query & Graph** — backlinks, broken links, orphan detection, BFS link graph, vault stats, task collection across vault
+- **Dataview-like queries** — filter notes by tags, status, frontmatter fields, or inline fields (`key:: value`)
+- **Periodic Notes** — read/preview daily, weekly, monthly, quarterly, yearly journal notes from templates
+- **Canvas** — read, create, and patch Obsidian Canvas (`.canvas`) files
+- **Kanban** — read, create, and manipulate Obsidian Kanban boards (columns and cards)
+- **Attachments** — list, read (text or base64), and add binary files
+- **Templates** — render Obsidian templates with built-in (`{{date}}`, `{{title}}`, …) and custom variables
+- **MCP Resources** — expose vault notes, stats, and tags as MCP resources for direct context injection
+
+## Installation
+
+Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv).
 
 ```bash
-cp .env.example .env
-# Edit .env: set VAULT_PATH to your vault's absolute path
-
+git clone https://github.com/ykoellmann/obsidian-mcp.git
+cd obsidian-mcp
 uv sync
-uv run python -m second_brain_mcp.server
 ```
 
 ## Configuration
 
-See `.env.example` for all options.
+Copy `.env.example` to `.env` and set your vault path:
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `VAULT_PATH` | yes | – | Absolute path to your Obsidian vault |
-| `READ_ONLY` | no | `false` | Disable all write tools |
-| `WRITE_PATHS` | no | (all) | Comma-separated allowed write paths |
-| `EXCLUDE_PATHS` | no | `private,.obsidian` | Paths to exclude |
-| `TRANSPORT` | no | `stdio` | `stdio` or `streamable-http` |
-| `AUTH_TOKEN` | if http | – | Token for `streamable-http` transport |
+```env
+VAULT_PATH=/path/to/your/obsidian/vault
+# Optional:
+# READ_ONLY=true            # prevent all writes
+# WRITE_PATHS=Notes/,Inbox/ # restrict writes to specific folders
+# TRANSPORT=stdio           # stdio (default) or sse
+```
+
+## Usage with Claude Code
+
+Add to your MCP config (e.g. `~/.claude/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/obsidian-mcp", "run", "obsidian-mcp"],
+      "env": {
+        "VAULT_PATH": "/path/to/your/obsidian/vault"
+      }
+    }
+  }
+}
+```
+
+## Usage with Claude Desktop
+
+Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/obsidian-mcp", "run", "obsidian-mcp"],
+      "env": {
+        "VAULT_PATH": "/path/to/your/obsidian/vault"
+      }
+    }
+  }
+}
+```
 
 ## Docker
 
 ```bash
-HOST_VAULT_PATH=/path/to/vault AUTH_TOKEN=secret docker compose up
+# Edit docker-compose.yml to set VAULT_PATH and the volume mount, then:
+docker compose up
 ```
 
-## Tools
+## Vault Conventions
 
-| Tool | Description |
+Create `_AI_INSTRUCTIONS.md` in your vault root to define conventions for the AI (folder structure, tag schema, naming rules). The server loads this file at startup and uses it as the system instructions — if absent, built-in Obsidian syntax guidance is used instead.
+
+## Tool Reference
+
+| Category | Tools |
 |---|---|
-| `list_notes_tool` | List all .md files in vault (or subfolder) |
-| `read_note_tool` | Read a note with frontmatter, tags, wikilinks |
-| `search_notes_tool` | Full-text search, optional tag filter |
-| `write_note_tool` | Create or overwrite a note |
-| `patch_note_tool` | Replace a named section (## Heading) |
-| `get_backlinks_tool` | All notes linking to a given note |
-| `get_notes_by_tag_tool` | All notes with a given tag |
-| `get_vault_conventions_tool` | Read `_AI_INSTRUCTIONS.md` from vault root |
+| **Read** | `list_notes`, `read_note`, `search_notes`, `render_note`, `get_note_outline` |
+| **Write** | `write_note`, `patch_note`, `delete_note`, `append_to_note`, `patch_frontmatter`, `manage_tags`, `move_note` |
+| **Folders** | `list_folder`, `create_folder`, `delete_folder`, `rename_folder` |
+| **Query** | `query_notes`, `get_backlinks`, `get_broken_links`, `get_orphans`, `get_link_graph`, `get_vault_stats`, `get_tasks`, `resolve_alias` |
+| **Tags** | `get_notes_by_tag`, `get_tag_tree`, `list_all_tags` |
+| **Periodic** | `get_daily_note`, `get_periodic_note` |
+| **Canvas** | `list_canvases`, `read_canvas`, `write_canvas`, `patch_canvas` |
+| **Kanban** | `read_kanban`, `create_kanban_board`, `add_kanban_card`, `move_kanban_card`, `delete_kanban_card` |
+| **Attachments** | `list_attachments`, `read_attachment`, `add_attachment` |
+| **Templates** | `list_templates`, `create_from_template` |
+
+Full parameter documentation is embedded in the server and shown automatically to connected AI clients.
+
+## Architecture
+
+```
+src/obsidian_mcp/
+├── config.py          # env-based config (VAULT_PATH, READ_ONLY, WRITE_PATHS)
+├── server.py          # FastMCP entry point, tool and resource registrations
+├── domain/
+│   ├── models.py      # Note dataclass (frontmatter, tags, wikilinks, tasks, …)
+│   ├── parser.py      # Markdown parser (YAML frontmatter, wikilinks, block refs, …)
+│   └── index.py       # VaultIndex — alias resolution, backlinks, tag tree, BFS
+├── storage/
+│   ├── filesystem.py  # atomic writes (temp + os.replace), path validation
+│   ├── locking.py     # per-file filelock to prevent concurrent write conflicts
+│   └── watcher.py     # watchdog-based vault change detection (polling fallback)
+└── tools/
+    ├── read.py        # read_note, search_notes, render_note, get_note_outline
+    ├── write.py       # write_note, patch_note, move_note, manage_tags, …
+    ├── query.py       # graph tools, task aggregation, periodic notes, query_notes
+    ├── folders.py     # folder management
+    ├── canvas.py      # Obsidian Canvas (.canvas JSON) tools
+    ├── kanban.py      # Obsidian Kanban plugin tools
+    ├── attachments.py # binary and text attachment handling
+    └── templates.py   # template rendering with variable substitution
+```
+
+## Development
+
+```bash
+uv run pytest                  # run tests (238 tests)
+uv run ruff check src/ tests/  # lint
+```
+
+## License
+
+MIT
