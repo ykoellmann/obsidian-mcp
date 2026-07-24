@@ -1,0 +1,238 @@
+"""Phase 9: Kanban board tools + MCP Resources."""
+from __future__ import annotations
+
+import pytest
+
+from second_brain_mcp.tools.kanban import (
+    add_kanban_card,
+    create_kanban_board,
+    delete_kanban_card,
+    move_kanban_card,
+    read_kanban,
+)
+
+_BOARD = """\
+---
+kanban-plugin: basic
+---
+
+## Backlog
+
+- [ ] Task A
+- [ ] Task B
+
+## In Progress
+
+- [ ] Task C
+
+## Done
+
+- [x] Task D
+"""
+
+
+# ── create_kanban_board ───────────────────────────────────────────────────────
+
+def test_create_kanban_board(tmp_path, vault_factory):
+    vault_factory({})
+    result = create_kanban_board("board.md", ["Backlog", "In Progress", "Done"])
+    assert result["status"] == "created"
+    assert (tmp_path / "board.md").exists()
+    content = (tmp_path / "board.md").read_text()
+    assert "kanban-plugin: basic" in content
+    assert "## Backlog" in content
+    assert "## Done" in content
+
+
+def test_create_kanban_board_readable(vault_factory):
+    vault_factory({})
+    create_kanban_board("board.md", ["Todo", "Done"])
+    board = read_kanban("board.md")
+    assert len(board["columns"]) == 2
+    assert board["columns"][0]["name"] == "Todo"
+
+
+# ── read_kanban ───────────────────────────────────────────────────────────────
+
+def test_read_kanban_columns(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    board = read_kanban("board.md")
+    names = [c["name"] for c in board["columns"]]
+    assert "Backlog" in names
+    assert "In Progress" in names
+    assert "Done" in names
+
+
+def test_read_kanban_cards(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    board = read_kanban("board.md")
+    backlog = next(c for c in board["columns"] if c["name"] == "Backlog")
+    assert len(backlog["cards"]) == 2
+    assert any(c["text"] == "Task A" for c in backlog["cards"])
+    assert all(not c["done"] for c in backlog["cards"])
+
+
+def test_read_kanban_done_flag(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    board = read_kanban("board.md")
+    done_col = next(c for c in board["columns"] if c["name"] == "Done")
+    assert done_col["cards"][0]["done"] is True
+
+
+def test_read_kanban_total_cards(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    board = read_kanban("board.md")
+    assert board["total_cards"] == 4
+
+
+def test_read_kanban_missing_raises(vault_factory):
+    vault_factory({})
+    with pytest.raises(FileNotFoundError):
+        read_kanban("ghost.md")
+
+
+def test_read_kanban_not_a_board_raises(vault_factory):
+    vault_factory({"note.md": "# Just a regular note\n"})
+    with pytest.raises(ValueError, match="kanban-plugin"):
+        read_kanban("note.md")
+
+
+# ── add_kanban_card ───────────────────────────────────────────────────────────
+
+def test_add_kanban_card_open(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    add_kanban_card("board.md", "Backlog", "New Task")
+    board = read_kanban("board.md")
+    backlog = next(c for c in board["columns"] if c["name"] == "Backlog")
+    assert any(c["text"] == "New Task" for c in backlog["cards"])
+
+
+def test_add_kanban_card_done(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    add_kanban_card("board.md", "Done", "Already done", done=True)
+    board = read_kanban("board.md")
+    done_col = next(c for c in board["columns"] if c["name"] == "Done")
+    new_card = next(c for c in done_col["cards"] if c["text"] == "Already done")
+    assert new_card["done"] is True
+
+
+def test_add_kanban_card_inserted_at_top(tmp_path, vault_factory):
+    vault_factory({"board.md": _BOARD})
+    add_kanban_card("board.md", "Backlog", "First card")
+    content = (tmp_path / "board.md").read_text()
+    assert content.index("First card") < content.index("Task A")
+
+
+def test_add_kanban_card_wrong_column_raises(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    with pytest.raises(ValueError, match="not found"):
+        add_kanban_card("board.md", "Nonexistent", "Card")
+
+
+# ── move_kanban_card ──────────────────────────────────────────────────────────
+
+def test_move_kanban_card_basic(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    result = move_kanban_card("board.md", "Task A", "Backlog", "In Progress")
+    assert result["status"] == "moved"
+    board = read_kanban("board.md")
+    backlog = next(c for c in board["columns"] if c["name"] == "Backlog")
+    in_progress = next(c for c in board["columns"] if c["name"] == "In Progress")
+    assert not any(c["text"] == "Task A" for c in backlog["cards"])
+    assert any(c["text"] == "Task A" for c in in_progress["cards"])
+
+
+def test_move_kanban_card_updates_done_state(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    move_kanban_card("board.md", "Task A", "Backlog", "Done", done=True)
+    board = read_kanban("board.md")
+    done_col = next(c for c in board["columns"] if c["name"] == "Done")
+    moved = next(c for c in done_col["cards"] if c["text"] == "Task A")
+    assert moved["done"] is True
+
+
+def test_move_kanban_card_preserves_done_state_by_default(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    move_kanban_card("board.md", "Task D", "Done", "Backlog")
+    board = read_kanban("board.md")
+    backlog = next(c for c in board["columns"] if c["name"] == "Backlog")
+    moved = next(c for c in backlog["cards"] if c["text"] == "Task D")
+    assert moved["done"] is True  # original state preserved
+
+
+def test_move_kanban_card_not_found_raises(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    with pytest.raises(ValueError):
+        move_kanban_card("board.md", "Ghost Task", "Backlog", "Done")
+
+
+def test_move_kanban_card_wrong_column_raises(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    with pytest.raises(ValueError):
+        move_kanban_card("board.md", "Task A", "In Progress", "Done")  # Task A is in Backlog
+
+
+# ── delete_kanban_card ────────────────────────────────────────────────────────
+
+def test_delete_kanban_card(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    delete_kanban_card("board.md", "Task A")
+    board = read_kanban("board.md")
+    all_cards = [c["text"] for col in board["columns"] for c in col["cards"]]
+    assert "Task A" not in all_cards
+    assert "Task B" in all_cards
+
+
+def test_delete_kanban_card_with_column(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    delete_kanban_card("board.md", "Task A", column="Backlog")
+    board = read_kanban("board.md")
+    backlog = next(c for c in board["columns"] if c["name"] == "Backlog")
+    assert not any(c["text"] == "Task A" for c in backlog["cards"])
+
+
+def test_delete_kanban_card_wrong_column_raises(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    with pytest.raises(ValueError):
+        delete_kanban_card("board.md", "Task A", column="Done")  # not there
+
+
+def test_delete_kanban_card_not_found_raises(vault_factory):
+    vault_factory({"board.md": _BOARD})
+    with pytest.raises(ValueError):
+        delete_kanban_card("board.md", "Nonexistent Task")
+
+
+# ── MCP Resources (underlying functions) ─────────────────────────────────────
+
+def test_vault_note_resource_reads_content(vault_factory):
+    vault_factory({"note.md": "# Hello\nWorld"})
+    from second_brain_mcp.config import get_config
+    from second_brain_mcp.storage.filesystem import read_file
+    cfg = get_config()
+    content = read_file(cfg.vault_path, "note.md")
+    assert "Hello" in content
+    assert "World" in content
+
+
+def test_vault_stats_resource(vault_factory):
+    idx = vault_factory({
+        "a.md": "Links to [[b]]",
+        "b.md": "No outlinks",
+    })
+    from second_brain_mcp.tools.query import get_vault_stats
+    stats = get_vault_stats(idx)
+    assert stats["total_notes"] == 2
+    assert stats["index_ready"] is True
+
+
+def test_vault_tags_resource(vault_factory):
+    idx = vault_factory({
+        "a.md": "---\ntags: [python]\n---\n",
+        "b.md": "---\ntags: [python, rust]\n---\n",
+    })
+    from second_brain_mcp.tools.query import list_all_tags
+    tags = list_all_tags(idx, sort_by="count")
+    by_name = {t["tag"]: t["count"] for t in tags}
+    assert by_name["python"] == 2
+    assert by_name["rust"] == 1
