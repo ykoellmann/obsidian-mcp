@@ -2,6 +2,22 @@
 
 An MCP (Model Context Protocol) server for [Obsidian](https://obsidian.md) vaults. Connects Claude (or any MCP client) directly to your vault — read, write, search, navigate links, and manage notes, canvases, and kanban boards.
 
+## Why obsidian-mcp?
+
+The official Obsidian MCP plugin requires the Obsidian desktop app to be running and only works on the same machine. **obsidian-mcp is a standalone server** — no Obsidian app needed.
+
+The intended setup is to host obsidian-mcp on a server or NAS where your vault is continuously synced (via [Syncthing](https://syncthing.net), [git](https://github.com/denolehov/obsidian-git), [rclone](https://rclone.org), or [Obsidian Sync](https://obsidian.md/sync)). Claude then connects to that server over the network, so:
+
+- **Always up to date** — the server sees every change your Obsidian app writes, immediately
+- **Access from anywhere** — connect from Claude Desktop, Claude Code, or any MCP client on any machine, without the vault being present locally
+- **Multiple clients** — several Claude sessions can read the vault simultaneously; writes are serialized with per-file locking
+- **No app dependency** — the server runs headless and starts automatically (systemd, Docker, etc.)
+
+```
+[Obsidian app]  ──sync──►  [vault on server]  ◄──MCP──  [Claude on any machine]
+  (phone/laptop)              (NAS / VPS)                  (Claude Desktop / Code)
+```
+
 ## Features
 
 - **Read & Search** — read notes, search full-text (exact/regex/fuzzy), render embedded transclusions, inspect note outlines
@@ -81,9 +97,53 @@ Add to `claude_desktop_config.json`:
 docker compose up
 ```
 
-## Vault Conventions
+## Remote Setup (Recommended)
 
-Create `_AI_INSTRUCTIONS.md` in your vault root to define conventions for the AI (folder structure, tag schema, naming rules). The server loads this file at startup and uses it as the system instructions — if absent, built-in Obsidian syntax guidance is used instead.
+Run obsidian-mcp on a server and connect to it remotely via SSE transport:
+
+**On the server:**
+```env
+VAULT_PATH=/data/vault
+TRANSPORT=sse
+```
+```bash
+docker compose up -d   # or: uv run obsidian-mcp
+```
+
+**In your MCP client config (anywhere on the network):**
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "type": "sse",
+      "url": "http://your-server:8000/sse"
+    }
+  }
+}
+```
+
+Keep the vault synced on the server with Syncthing, git+cron, rclone, or Obsidian Sync — obsidian-mcp picks up changes automatically via its file watcher.
+
+## Vault Conventions (Customization)
+
+Create `_AI_INSTRUCTIONS.md` in your vault root to teach the AI how your specific vault is organized:
+
+```markdown
+## Structure
+- `Notes/` — evergreen notes and concepts
+- `Projects/` — active and archived projects (tag: #project/active, #project/done)
+- `Journal/` — daily notes (YYYY-MM-DD.md)
+
+## Frontmatter Schema
+- status: active | done | inbox
+- tags: nested with / (e.g. #concept/programming)
+
+## Conventions
+- Link by stem only, never by full path
+- Every note needs a created: date in frontmatter
+```
+
+The server loads this file at startup and sends it to the AI as system instructions. Without it, built-in generic Obsidian syntax guidance is used. The `_AI_INSTRUCTIONS.md` is the right place for everything vault-specific — folder layout, tag schema, naming conventions, and any workflow rules.
 
 ## Tool Reference
 

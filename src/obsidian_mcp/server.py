@@ -59,30 +59,32 @@ logger = logging.getLogger(__name__)
 
 
 _DEFAULT_INSTRUCTIONS = """\
-You are connected to **obsidian-mcp**, an MCP server for an Obsidian knowledge vault.
+You are connected to **obsidian-mcp**, an MCP server for an Obsidian vault.
 
-## First Steps
-Call `get_vault_conventions_tool()` first — it reads `_AI_INSTRUCTIONS.md` from the vault
-and tells you the folder structure, tag conventions, and naming rules for this vault.
-Use `search_notes_tool` or `query_notes_tool` before writing to avoid creating duplicates.
+## Vault Conventions
+Call `get_vault_conventions_tool()` first. If the vault has an `_AI_INSTRUCTIONS.md`,
+it defines the folder structure, tag schema, and naming rules for this specific vault.
+If it doesn't exist, explore the vault with `list_folder_tool()` and `list_notes_tool()`
+to understand the structure before writing anything.
+Always use `search_notes_tool` or `query_notes_tool` before creating notes to avoid duplicates.
 
 ## Tool Reference
 
 ### Reading & Search
-- `list_notes_tool(folder, include_meta)` — list Markdown notes; include_meta=True adds title/tags/status/mtime
+- `list_notes_tool(folder, include_meta)` — list notes; include_meta=True adds title/tags/status/mtime
 - `read_note_tool(path)` — full note: content, frontmatter, tags, wikilinks, tasks, inline_fields
-- `get_note_outline_tool(path)` — structure only (headings, block refs, frontmatter keys, inline_fields) — efficient for large notes
+- `get_note_outline_tool(path)` — headings, block refs, frontmatter keys — efficient for large notes
 - `search_notes_tool(query, tag, mode, limit)` — full-text search with snippets; mode: exact|regex|fuzzy
 - `render_note_tool(path, depth)` — resolves ![[embed]] transclusions inline
 
 ### Writing
 - `write_note_tool(path, content)` — create or overwrite a note
-- `patch_note_tool(path, section, new_content, mode, target_type)` — edit one section without touching the rest;
+- `patch_note_tool(path, section, new_content, mode, target_type)` — edit one section;
   mode: replace|insert_before|insert_after|append — target_type: heading|block_ref
-- `append_to_note_tool(path, content, section, create)` — append to end or under a specific heading
+- `append_to_note_tool(path, content, section, create)` — append to end or under a heading
 - `patch_frontmatter_tool(path, updates, merge_arrays)` — update YAML keys without touching the body
-- `manage_tags_tool(path, add, remove)` — add/remove tags (frontmatter + inline #tags)
-- `delete_note_tool(path, trash)` — trash=True (default) moves to .trash/ instead of deleting
+- `manage_tags_tool(path, add, remove)` — add/remove tags in frontmatter and inline
+- `delete_note_tool(path, trash)` — trash=True (default) moves to .trash/
 - `move_note_tool(from_path, to_path)` — rename/move + rewrites all wikilinks vault-wide
 
 ### Folders
@@ -92,162 +94,117 @@ Use `search_notes_tool` or `query_notes_tool` before writing to avoid creating d
 - `rename_folder_tool(from_path, to_path)` — rename + rewrites path-based wikilinks
 
 ### Querying & Graph
-- `query_notes_tool(tags, status, frontmatter_filter, inline_field_filter, sort_by, limit, folder)` — Dataview-like multi-filter
-- `get_backlinks_tool(path)` — all notes that link to this note
+- `query_notes_tool(tags, status, frontmatter_filter, inline_field_filter, sort_by, limit, folder)` — Dataview-like filter
+- `get_backlinks_tool(path)` — notes that link to this note
 - `get_broken_links_tool()` — wikilinks pointing to non-existent notes
 - `get_orphans_tool(exclude_folders)` — notes with no incoming backlinks
 - `get_link_graph_tool(root, depth, direction)` — BFS link graph; direction: outgoing|incoming|both
 - `get_vault_stats_tool()` — note/link counts, orphans, most-linked notes
-- `get_tasks_tool(status, folder, tag)` — tasks across the vault; status: open|done|all
+- `get_tasks_tool(status, folder, tag)` — tasks across vault; status: open|done|all
 - `get_notes_by_tag_tool(tag)`, `get_tag_tree_tool()`, `list_all_tags_tool(sort_by)`
-- `get_daily_note_tool(date)` / `get_periodic_note_tool(period, date)` — Journal notes; date: today|yesterday|YYYY-MM-DD
-- `resolve_alias_tool(name)` — alias or filename stem → canonical vault path
+- `get_daily_note_tool(date)` / `get_periodic_note_tool(period, date)` — periodic notes; date: today|yesterday|YYYY-MM-DD
+- `resolve_alias_tool(name)` — alias or stem → canonical vault path
 
 ### Attachments
 - `list_attachments_tool(folder)`, `read_attachment_tool(path)`, `add_attachment_tool(path, content_base64)`
 
 ### Templates
-- `list_templates_tool()` — templates in Templates/
-- `create_from_template_tool(template_path, output_path, variables)` — render template with {{date}}, {{title}}, {{week}} etc.
+- `list_templates_tool()`, `create_from_template_tool(template_path, output_path, variables)`
+- Built-in variables: `{{date}}`, `{{title}}`, `{{week}}`, `{{month}}`, `{{year}}`, `{{weekday}}`, `{{time}}`
 
-### Canvas (Obsidian visual boards — .canvas files)
+### Canvas (.canvas files)
 - `list_canvases_tool()`, `read_canvas_tool(path)`
-- `write_canvas_tool(path, nodes, edges)` — create/overwrite; node types: text|file|group|link
-- `patch_canvas_tool(path, add_nodes, update_nodes, delete_node_ids, add_edges, delete_edge_ids)` — surgical updates
+- `write_canvas_tool(path, nodes, edges)` — node types: text|file|group|link
+- `patch_canvas_tool(path, add_nodes, update_nodes, delete_node_ids, add_edges, delete_edge_ids)`
 
 ### Kanban (Obsidian Kanban plugin)
 - `read_kanban_tool(path)`, `create_kanban_board_tool(path, columns)`
-- `add_kanban_card_tool(path, column, text, done)` — inserts at top of column
-- `move_kanban_card_tool(path, card_text, from_column, to_column, done)`
-- `delete_kanban_card_tool(path, card_text, column)`
+- `add_kanban_card_tool(path, column, text, done)`, `move_kanban_card_tool(...)`, `delete_kanban_card_tool(...)`
 
-## MCP Resources (usable as context without tool calls)
-- `vault://notes/{path}` — raw content of any vault note
+## MCP Resources
+- `vault://notes/{path}` — raw note content as context
 - `vault://stats` — live vault statistics
-- `vault://tags` — all tags with note counts
+- `vault://tags` — all tags with counts
 
 ---
 
 ## Obsidian Markdown Syntax
 
 ### Frontmatter
-Always at the very top of the file, fenced by `---`:
 ```yaml
 ---
 title: Note Title
 aliases: [Short Name, Other Alias]
-tags: [projekt/aktiv, konzept/ki/llm]
+tags: [category/sub, other-tag]
 status: active
-created: 2026-07-23
+created: 2026-01-01
 ---
 ```
 
 ### Headings
-Use `##`, `###`, `####` inside note bodies. Never `#` — that level is the implicit note title.
+Use `##`, `###`, `####` inside notes. Avoid `#` — it's the implicit document title level.
 
 ### Wikilinks
 | Syntax | Meaning |
 |---|---|
-| `[[Note Name]]` | link by filename stem (no .md extension) |
-| `[[Note Name\\|Display Text]]` | link with custom display text |
-| `[[Note Name#Heading]]` | link to a specific heading |
-| `[[Note Name^block-id]]` | link to a specific block |
-| `![[Note Name]]` | embed (transclude) full note |
-| `![[Note Name#Heading]]` | embed a specific section |
+| `[[Note Name]]` | link by filename stem |
+| `[[Note Name\|Display Text]]` | link with alias |
+| `[[Note Name#Heading]]` | link to heading |
+| `[[Note Name^block-id]]` | link to block |
+| `![[Note Name]]` | embed/transclude note |
 
-All resolution is case-insensitive and alias-aware. Prefer stem links over path links
-(e.g. `[[Projektidee]]` not `[[Projekte/Projektidee]]`) — they survive folder renames.
+Links are case-insensitive and alias-aware. Prefer stem links (`[[Note]]` not `[[Folder/Note]]`) — they survive folder renames.
 
 ### Block References
-Mark a paragraph with a unique ID at line end:
 ```
-This is a key insight worth referencing later. ^key-insight
+Important paragraph. ^my-block-id
 ```
-Then link to it from anywhere: `[[Note Name^key-insight]]`
-Block IDs: lowercase letters, digits, hyphens only.
+Reference with `[[Note^my-block-id]]`. IDs: lowercase letters, digits, hyphens.
 
 ### Tags
-- In frontmatter: `tags: [projekt/aktiv, konzept/ki]`
-- Inline in body: `#konzept/wissensmanagement`
-- Nested hierarchy with `/` — e.g. `#ressource/buch/python`
+- Frontmatter: `tags: [category/sub]`
+- Inline: `#category/sub`
+- Nested with `/` for hierarchy.
 
 ### Tasks
 ```markdown
 - [ ] Open task
-- [x] Completed task
+- [x] Done task
 ```
-`get_tasks_tool()` collects tasks across the entire vault, filterable by folder/tag/status.
 
 ### Callouts
 ```markdown
-> [!NOTE] Optional title
-> Content here.
+> [!NOTE] Title
+> Content.
 
-> [!WARNING] Watch out
-> Something to be careful about.
+> [!WARNING], [!TIP], [!IMPORTANT], [!QUESTION] also supported.
 ```
-Supported types: NOTE, TIP, WARNING, IMPORTANT, QUESTION (case-insensitive).
 
 ### Dataview Inline Fields
-Key-value pairs anywhere in the note body (not in frontmatter):
 ```
 rating:: 8
 due date:: 2026-08-01
-author:: Jane Doe
 ```
-- Keys may contain spaces and slashes
-- Accessible via `read_note_tool` → `inline_fields`
-- Filterable via `query_notes_tool(inline_field_filter={"rating": "8"})`
-
-### Embeds & Transclusion
-- `![[Note]]` — full note
-- `![[Note#Section]]` — specific heading section
-- `render_note_tool(path)` resolves all embeds inline
+Accessible via `read_note_tool` → `inline_fields`, filterable in `query_notes_tool`.
 
 ---
 
 ## Supported Plugin Formats
 
-### Obsidian Kanban
-Notes with `kanban-plugin: basic` in frontmatter are Kanban boards:
-```markdown
----
-kanban-plugin: basic
----
+### Kanban
+Frontmatter `kanban-plugin: basic`, columns as `## Name`, cards as `- [ ] text`.
+Always use the kanban tools instead of editing raw Markdown.
 
-## Backlog
+### Canvas
+`.canvas` files: JSON with `nodes` (text/file/group/link) and `edges`. IDs auto-generated.
 
-- [ ] Task A
-- [ ] Task B
+### Dataview
+Only `key:: value` inline fields are parsed server-side. DQL block queries are Obsidian-app-only.
 
-## In Progress
-
-- [ ] Task C
-
-## Done
-
-- [x] Task D
-```
-Use the kanban tools — never edit the raw Markdown directly.
-
-### Obsidian Canvas
-`.canvas` files are JSON with `nodes` and `edges` arrays. Node types:
-- `text` — free text card (needs `text`, `x`, `y`)
-- `file` — embedded vault note (needs `file`, `x`, `y`, `width`, `height`)
-- `group` — grouping box (needs `label`, `x`, `y`, `width`, `height`)
-- `link` — web URL card (needs `url`, `x`, `y`)
-
-IDs are auto-generated if omitted. Use the canvas tools for all modifications.
-
-### Dataview (inline fields only)
-`key:: value` syntax in note bodies is parsed by this server.
-Full DQL block queries (`\`\`\`dataview`) are not executed server-side — they are rendered
-by the Obsidian app only.
-
-### Periodic Notes / Journal
-Daily notes live in `Journal/YYYY-MM-DD.md`, weekly in `Journal/Weekly/YYYY-Www.md`, etc.
-Templates in `Templates/Daily-Note-Template.md` (and Weekly-/Monthly-/Quarterly-/Yearly-).
-Use `{{date}}`, `{{title}}`, `{{week}}`, `{{month}}`, `{{year}}`, `{{weekday}}` in templates.
+### Periodic Notes
+Default paths: `Journal/YYYY-MM-DD.md` (daily), `Journal/Weekly/YYYY-Www.md`, etc.
+Check `_AI_INSTRUCTIONS.md` — the vault may use different paths.
+Templates use `{{date}}`, `{{title}}`, `{{week}}` etc.
 """
 
 
