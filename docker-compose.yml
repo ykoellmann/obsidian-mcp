@@ -1,0 +1,15 @@
+services:
+  second-brain-mcp:
+    build: .
+    restart: unless-stopped
+    environment:
+      - VAULT_PATH=/vault
+      - READ_ONLY=${READ_ONLY:-false}
+      - WRITE_PATHS=${WRITE_PATHS:-}
+      - EXCLUDE_PATHS=${EXCLUDE_PATHS:-private,.obsidian}
+      - AUTH_TOKEN=${AUTH_TOKEN}
+      - TRANSPORT=streamable-http
+    volumes:
+      - ${HOST_VAULT_PATH}:/vault
+    ports:
+      - "8080:8080"

@@ -1,0 +1,5 @@
+services:
+  inotify-spike:
+    build: .
+    volumes:
+      - ./testdir:/watch
