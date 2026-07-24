@@ -9,8 +9,9 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "Uncommitted changes — commit or stash first." && exit 1
 fi
 
-# Bump version in pyproject.toml
-sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+# Bump version in pyproject.toml (portable GNU/BSD sed -i)
+sed -i.bak "s/^version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+rm -f pyproject.toml.bak
 
 git add pyproject.toml
 git commit -m "chore: release v$VERSION"
