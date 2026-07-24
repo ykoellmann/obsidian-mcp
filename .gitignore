@@ -14,6 +14,9 @@ dist/
 # Environment
 .env
 
+# Local planning notes
+plan.md
+
 # Example vault (local only – jeder nutzt seinen eigenen Vault)
 example-vault/
 
