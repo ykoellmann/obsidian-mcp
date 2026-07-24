@@ -101,28 +101,41 @@ docker compose up
 
 ## Remote Setup (Recommended)
 
-Run obsidian-mcp on a server and connect to it remotely via SSE transport:
+Run obsidian-mcp on a server and connect to it remotely via SSE transport.
 
-**On the server:**
+**1. Generate an API key:**
+```bash
+openssl rand -hex 32
+```
+
+**2. Configure the server** (`docker-compose.yml` or `.env`):
 ```env
 VAULT_PATH=/data/vault
 TRANSPORT=sse
+API_KEY=your-generated-key
 ```
+
+**3. Start:**
 ```bash
 docker compose up -d   # or: uv run obsidian-mcp
 ```
 
-**In your MCP client config (anywhere on the network):**
+**4. Connect from your MCP client** (anywhere on the network):
 ```json
 {
   "mcpServers": {
     "obsidian": {
       "type": "sse",
-      "url": "http://your-server:8000/sse"
+      "url": "https://your-server/sse",
+      "headers": {
+        "Authorization": "Bearer your-generated-key"
+      }
     }
   }
 }
 ```
+
+> **Security:** Always put a TLS-terminating reverse proxy (e.g. [Caddy](https://caddyserver.com)) in front when exposing to the internet. `API_KEY` is not needed for stdio transport (local use only).
 
 Keep the vault synced on the server with Syncthing, git+cron, rclone, or Obsidian Sync — obsidian-mcp picks up changes automatically via its file watcher.
 

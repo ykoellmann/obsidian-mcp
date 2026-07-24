@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 
 from fastmcp import FastMCP
+from fastmcp.server.auth import AccessToken, AuthProvider
 
 from .config import get_config
 from .domain.index import VaultIndex
@@ -219,13 +221,34 @@ def _load_instructions() -> str:
     return _DEFAULT_INSTRUCTIONS
 
 
+class _APIKeyAuthProvider(AuthProvider):
+    """Simple static API-key auth. Clients must send: Authorization: Bearer <key>."""
+
+    def __init__(self, api_key: str) -> None:
+        super().__init__()
+        self._key = api_key
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if token == self._key:
+            return AccessToken(token=token, client_id="api-key", scopes=[])
+        return None
+
+
+def _build_auth() -> _APIKeyAuthProvider | None:
+    key = os.environ.get("API_KEY") or os.environ.get("OBSIDIAN_MCP_API_KEY")
+    if key:
+        logger.info("API key auth enabled")
+        return _APIKeyAuthProvider(key)
+    return None
+
+
 # Initialized in main() — None at import time so the module can be imported
 # without VAULT_PATH set (e.g. during testing or linting).
 _cfg = None
 _index: VaultIndex | None = None
 _watcher = None
 
-mcp = FastMCP(name="obsidian-mcp", instructions=_load_instructions())
+mcp = FastMCP(name="obsidian-mcp", instructions=_load_instructions(), auth=_build_auth())
 
 
 # ── Read ──────────────────────────────────────────────────────────────────────
