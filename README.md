@@ -38,7 +38,7 @@ The intended setup is to host obsidian-mcp on a server or NAS where your vault i
 
 **Via uvx (no clone needed):**
 ```bash
-VAULT_PATH=/your/vault uvx obsidian-mcp
+VAULT_PATH=/your/vault uvx obsidian-remote-mcp
 ```
 
 **Via Docker (no Python needed):**
@@ -51,7 +51,7 @@ docker compose up -d   # see docker-compose.yml
 git clone https://github.com/ykoellmann/obsidian-mcp.git
 cd obsidian-mcp
 uv sync
-uv run obsidian-mcp
+uv run obsidian-remote-mcp
 ```
 
 ## Configuration
@@ -75,7 +75,7 @@ Add to your MCP config (e.g. `~/.claude/mcp.json`):
   "mcpServers": {
     "obsidian": {
       "command": "uv",
-      "args": ["--directory", "/path/to/obsidian-mcp", "run", "obsidian-mcp"],
+      "args": ["--directory", "/path/to/obsidian-mcp", "run", "obsidian-remote-mcp"],
       "env": {
         "VAULT_PATH": "/path/to/your/obsidian/vault"
       }
@@ -93,7 +93,7 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "obsidian": {
       "command": "uv",
-      "args": ["--directory", "/path/to/obsidian-mcp", "run", "obsidian-mcp"],
+      "args": ["--directory", "/path/to/obsidian-mcp", "run", "obsidian-remote-mcp"],
       "env": {
         "VAULT_PATH": "/path/to/your/obsidian/vault"
       }
@@ -132,7 +132,7 @@ API_KEY=your-generated-key
 
 **3. Start:**
 ```bash
-docker compose up -d   # or: uv run obsidian-mcp
+docker compose up -d   # or: uv run obsidian-remote-mcp
 ```
 
 **4. Connect from your MCP client** (anywhere on the network):
