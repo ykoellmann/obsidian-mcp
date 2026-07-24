@@ -8,4 +8,4 @@ COPY src/ src/
 
 RUN uv pip install --system --no-cache .
 
-ENTRYPOINT ["obsidian-mcp"]
+ENTRYPOINT ["obsidian-remote-mcp"]
