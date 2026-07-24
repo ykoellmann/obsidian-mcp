@@ -1,4 +1,3 @@
-"""Phase 9: Kanban board tools + MCP Resources."""
 from __future__ import annotations
 
 import pytest
@@ -31,7 +30,7 @@ kanban-plugin: basic
 """
 
 
-# ── create_kanban_board ───────────────────────────────────────────────────────
+# ── create_kanban_board ───────────────────────────────────────────────────
 
 def test_create_kanban_board(tmp_path, vault_factory):
     vault_factory({})
@@ -52,7 +51,7 @@ def test_create_kanban_board_readable(vault_factory):
     assert board["columns"][0]["name"] == "Todo"
 
 
-# ── read_kanban ───────────────────────────────────────────────────────────────
+# ── read_kanban ───────────────────────────────────────────────────────────
 
 def test_read_kanban_columns(vault_factory):
     vault_factory({"board.md": _BOARD})
@@ -97,7 +96,7 @@ def test_read_kanban_not_a_board_raises(vault_factory):
         read_kanban("note.md")
 
 
-# ── add_kanban_card ───────────────────────────────────────────────────────────
+# ── add_kanban_card ───────────────────────────────────────────────────────
 
 def test_add_kanban_card_open(vault_factory):
     vault_factory({"board.md": _BOARD})
@@ -129,7 +128,7 @@ def test_add_kanban_card_wrong_column_raises(vault_factory):
         add_kanban_card("board.md", "Nonexistent", "Card")
 
 
-# ── move_kanban_card ──────────────────────────────────────────────────────────
+# ── move_kanban_card ──────────────────────────────────────────────────────
 
 def test_move_kanban_card_basic(vault_factory):
     vault_factory({"board.md": _BOARD})
@@ -172,7 +171,7 @@ def test_move_kanban_card_wrong_column_raises(vault_factory):
         move_kanban_card("board.md", "Task A", "In Progress", "Done")  # Task A is in Backlog
 
 
-# ── delete_kanban_card ────────────────────────────────────────────────────────
+# ── delete_kanban_card ────────────────────────────────────────────────────
 
 def test_delete_kanban_card(vault_factory):
     vault_factory({"board.md": _BOARD})
@@ -201,38 +200,3 @@ def test_delete_kanban_card_not_found_raises(vault_factory):
     vault_factory({"board.md": _BOARD})
     with pytest.raises(ValueError):
         delete_kanban_card("board.md", "Nonexistent Task")
-
-
-# ── MCP Resources (underlying functions) ─────────────────────────────────────
-
-def test_vault_note_resource_reads_content(vault_factory):
-    vault_factory({"note.md": "# Hello\nWorld"})
-    from obsidian_mcp.config import get_config
-    from obsidian_mcp.storage.filesystem import read_file
-    cfg = get_config()
-    content = read_file(cfg.vault_path, "note.md")
-    assert "Hello" in content
-    assert "World" in content
-
-
-def test_vault_stats_resource(vault_factory):
-    idx = vault_factory({
-        "a.md": "Links to [[b]]",
-        "b.md": "No outlinks",
-    })
-    from obsidian_mcp.tools.query import get_vault_stats
-    stats = get_vault_stats(idx)
-    assert stats["total_notes"] == 2
-    assert stats["index_ready"] is True
-
-
-def test_vault_tags_resource(vault_factory):
-    idx = vault_factory({
-        "a.md": "---\ntags: [python]\n---\n",
-        "b.md": "---\ntags: [python, rust]\n---\n",
-    })
-    from obsidian_mcp.tools.query import list_all_tags
-    tags = list_all_tags(idx, sort_by="count")
-    by_name = {t["tag"]: t["count"] for t in tags}
-    assert by_name["python"] == 2
-    assert by_name["rust"] == 1

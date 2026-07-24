@@ -15,8 +15,10 @@ class Config:
     read_only: bool
     write_paths: list[str]
     exclude_paths: list[str]
-    auth_token: str
     transport: str
+    host: str
+    port: int
+    api_key: str
 
     def __init__(self) -> None:
         raw_vault = os.environ.get("VAULT_PATH", "")
@@ -35,10 +37,15 @@ class Config:
         self.exclude_paths = [p.strip() for p in raw_exclude.split(",") if p.strip()]
 
         self.transport = os.environ.get("TRANSPORT", "stdio")
-        self.auth_token = os.environ.get("AUTH_TOKEN", "")
+        self.host = os.environ.get("HOST", "0.0.0.0")
+        self.port = int(os.environ.get("PORT", "8000"))
+        self.api_key = os.environ.get("API_KEY") or os.environ.get("OBSIDIAN_MCP_API_KEY") or ""
 
-        if self.transport == "streamable-http" and not self.auth_token:
-            raise ConfigError("AUTH_TOKEN is required when TRANSPORT=streamable-http")
+        if self.transport != "stdio" and not self.api_key:
+            raise ConfigError(
+                f"API_KEY is required when TRANSPORT={self.transport} "
+                "(the server would otherwise be reachable without authentication)"
+            )
 
 
 _config: Config | None = None

@@ -1,15 +1,47 @@
-"""Phase 8: Canvas write tools + Dataview inline fields."""
 from __future__ import annotations
 
 import json
 
 import pytest
 
-from obsidian_mcp.tools.canvas import patch_canvas, write_canvas
-from obsidian_mcp.tools.query import query_notes
-from obsidian_mcp.tools.read import read_note
+from obsidian_mcp.tools.canvas import list_canvases, patch_canvas, read_canvas, write_canvas
 
-# ── write_canvas ──────────────────────────────────────────────────────────────
+# ── list_canvases / read_canvas ───────────────────────────────────────────
+
+def test_list_canvases_finds_canvas(tmp_path, vault_factory):
+    vault_factory({})
+    (tmp_path / "board.canvas").write_text('{"nodes":[],"edges":[]}')
+    canvases = list_canvases()
+    assert "board.canvas" in canvases
+
+
+def test_read_canvas_basic(tmp_path, vault_factory):
+    vault_factory({})
+    data = {
+        "nodes": [{"id": "1", "type": "text", "text": "Hello", "x": 0, "y": 0}],
+        "edges": [],
+    }
+    (tmp_path / "board.canvas").write_text(json.dumps(data))
+    result = read_canvas("board.canvas")
+    assert result["path"] == "board.canvas"
+    assert len(result["nodes"]) == 1
+    assert result["nodes"][0]["text"] == "Hello"
+
+
+def test_read_canvas_missing_raises(vault_factory):
+    vault_factory({})
+    with pytest.raises(FileNotFoundError):
+        read_canvas("ghost.canvas")
+
+
+def test_read_canvas_invalid_json_raises(tmp_path, vault_factory):
+    vault_factory({})
+    (tmp_path / "bad.canvas").write_text("NOT JSON {{{")
+    with pytest.raises(ValueError, match="Invalid canvas JSON"):
+        read_canvas("bad.canvas")
+
+
+# ── write_canvas ──────────────────────────────────────────────────────────
 
 def test_write_canvas_creates_file(tmp_path, vault_factory):
     vault_factory({})
@@ -75,7 +107,7 @@ def test_write_canvas_overwrites_existing(tmp_path, vault_factory):
     assert data["nodes"][0]["text"] == "New"
 
 
-# ── patch_canvas ──────────────────────────────────────────────────────────────
+# ── patch_canvas ──────────────────────────────────────────────────────────
 
 def test_patch_canvas_add_node(tmp_path, vault_factory):
     vault_factory({})
@@ -147,64 +179,3 @@ def test_patch_canvas_missing_raises(vault_factory):
     vault_factory({})
     with pytest.raises(FileNotFoundError):
         patch_canvas("ghost.canvas", add_nodes=[])
-
-
-# ── inline fields — parser ────────────────────────────────────────────────────
-
-def test_read_note_includes_inline_fields(vault_factory):
-    vault_factory({"note.md": "# Title\n\nrating:: 8\nauthor:: Jane\n\nOther text."})
-    result = read_note("note.md")
-    assert result["inline_fields"]["rating"] == "8"
-    assert result["inline_fields"]["author"] == "Jane"
-
-
-def test_inline_fields_not_in_frontmatter(vault_factory):
-    vault_factory({"note.md": "---\ntitle: Test\n---\nrating:: 9\n"})
-    result = read_note("note.md")
-    assert "rating" not in result["frontmatter"]
-    assert result["inline_fields"]["rating"] == "9"
-
-
-def test_inline_fields_empty_when_none(vault_factory):
-    vault_factory({"note.md": "# Just a title\nNo inline fields here."})
-    result = read_note("note.md")
-    assert result["inline_fields"] == {}
-
-
-def test_inline_fields_multi_word_key(vault_factory):
-    vault_factory({"note.md": "due date:: 2026-07-30\n"})
-    result = read_note("note.md")
-    assert result["inline_fields"]["due date"] == "2026-07-30"
-
-
-# ── inline fields — query ─────────────────────────────────────────────────────
-
-def test_query_notes_inline_field_filter(vault_factory):
-    idx = vault_factory({
-        "a.md": "rating:: 8\nOther text",
-        "b.md": "rating:: 5\nOther text",
-        "c.md": "No inline fields",
-    })
-    results = query_notes(idx, inline_field_filter={"rating": "8"})
-    assert len(results) == 1
-    assert results[0]["path"] == "a.md"
-
-
-def test_query_notes_inline_fields_in_result(vault_factory):
-    idx = vault_factory({"note.md": "priority:: high\ncategory:: work\n"})
-    results = query_notes(idx)
-    assert len(results) == 1
-    fields = results[0]["inline_fields"]
-    assert fields["priority"] == "high"
-    assert fields["category"] == "work"
-
-
-def test_query_notes_combined_filter(vault_factory):
-    idx = vault_factory({
-        "a.md": "---\ntags: [project]\n---\npriority:: high\n",
-        "b.md": "---\ntags: [project]\n---\npriority:: low\n",
-        "c.md": "priority:: high\n",
-    })
-    results = query_notes(idx, tags=["project"], inline_field_filter={"priority": "high"})
-    assert len(results) == 1
-    assert results[0]["path"] == "a.md"

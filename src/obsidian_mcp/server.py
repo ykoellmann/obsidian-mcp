@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import threading
@@ -60,7 +61,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message
 logger = logging.getLogger(__name__)
 
 
-_DEFAULT_INSTRUCTIONS = """\
+_DEFAULT_INSTRUCTIONS = r"""\
 You are connected to **obsidian-mcp**, an MCP server for an Obsidian vault.
 
 ## Vault Conventions
@@ -229,8 +230,9 @@ class _APIKeyAuthProvider(AuthProvider):
         self._key = api_key
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        if token == self._key:
+        if hmac.compare_digest(token, self._key):
             return AccessToken(token=token, client_id="api-key", scopes=[])
+        logger.warning("Rejected request with invalid API key")
         return None
 
 
@@ -707,8 +709,15 @@ def main() -> None:
     _watcher = VaultWatcher(_cfg.vault_path)
     threading.Thread(target=_index.build, daemon=True).start()
     _watcher.start(on_change=_index.update)
-    logger.info("Starting obsidian-mcp (transport=%s)", _cfg.transport)
-    mcp.run(transport=_cfg.transport)
+    if _cfg.transport == "stdio":
+        logger.info("Starting obsidian-mcp (transport=stdio)")
+        mcp.run(transport=_cfg.transport)
+    else:
+        logger.info(
+            "Starting obsidian-mcp (transport=%s, host=%s, port=%d)",
+            _cfg.transport, _cfg.host, _cfg.port,
+        )
+        mcp.run(transport=_cfg.transport, host=_cfg.host, port=_cfg.port)
 
 
 if __name__ == "__main__":

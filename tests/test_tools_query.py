@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+from datetime import date
+
+import pytest
+
 from obsidian_mcp.tools.query import (
     get_broken_links,
     get_link_graph,
     get_orphans,
+    get_periodic_note,
     get_tag_tree,
     get_tasks,
     get_vault_stats,
+    list_all_tags,
+    query_notes,
+    resolve_alias,
 )
-from obsidian_mcp.tools.read import list_notes, search_notes
 
-# --- broken links ---
+# ── get_broken_links ──────────────────────────────────────────────────────
 
 def test_broken_links_detected(vault_factory):
     idx = vault_factory({
@@ -30,7 +37,7 @@ def test_broken_links_empty_when_all_ok(vault_factory):
     assert get_broken_links(idx) == []
 
 
-# --- orphans ---
+# ── get_orphans ───────────────────────────────────────────────────────────
 
 def test_orphans_detected(vault_factory):
     idx = vault_factory({
@@ -53,7 +60,7 @@ def test_orphans_exclude_folders(vault_factory):
     assert not any("Journal" in o for o in orphans)
 
 
-# --- link graph ---
+# ── get_link_graph ────────────────────────────────────────────────────────
 
 def test_link_graph_basic(vault_factory):
     idx = vault_factory({
@@ -80,7 +87,7 @@ def test_link_graph_depth_limit(vault_factory):
     assert "grandchild.md" not in node_paths
 
 
-# --- vault stats ---
+# ── get_vault_stats ───────────────────────────────────────────────────────
 
 def test_vault_stats(vault_factory):
     idx = vault_factory({
@@ -96,7 +103,7 @@ def test_vault_stats(vault_factory):
     assert stats["index_ready"] is True
 
 
-# --- tasks ---
+# ── get_tasks ─────────────────────────────────────────────────────────────
 
 def test_get_tasks_open(vault_factory):
     idx = vault_factory({"tasks.md": "- [ ] Open task\n- [x] Done task\n"})
@@ -119,7 +126,7 @@ def test_get_tasks_all(vault_factory):
     assert len(all_tasks) == 2
 
 
-# --- tag tree ---
+# ── get_tag_tree ──────────────────────────────────────────────────────────
 
 def test_tag_tree_structure(vault_factory):
     idx = vault_factory({
@@ -132,52 +139,204 @@ def test_tag_tree_structure(vault_factory):
     assert "projekt" in tree
 
 
-# --- search with snippets ---
+# ── list_all_tags ─────────────────────────────────────────────────────────
 
-def test_search_returns_snippets(vault_factory):
-    vault_factory({"note.md": "Line 1\nThis has the keyword here\nLine 3\n"})
-    results = search_notes("keyword")
-    assert len(results) == 1
-    assert results[0]["path"] == "note.md"
-    assert results[0]["score"] > 0
-    assert len(results[0]["snippets"]) > 0
-    assert results[0]["snippets"][0]["line"] == 2
-
-
-def test_search_ranking(vault_factory):
-    vault_factory({
-        "exact.md": "python",
-        "phrase.md": "I love python programming",
-        "substring.md": "pythonista",
+def test_list_all_tags_counts(vault_factory):
+    idx = vault_factory({
+        "a.md": "---\ntags: [python, tech]\n---\n",
+        "b.md": "---\ntags: [python]\n---\n",
+        "c.md": "---\ntags: [tech]\n---\n",
     })
-    results = search_notes("python")
-    scores = {r["path"]: r["score"] for r in results}
-    assert scores.get("exact.md", 0) >= scores.get("substring.md", 0)
+    result = list_all_tags(idx)
+    by_tag = {r["tag"]: r["count"] for r in result}
+    assert by_tag["python"] == 2
+    assert by_tag["tech"] == 2
 
 
-def test_search_regex_mode(vault_factory):
-    vault_factory({"note.md": "foo123bar\nbaz456qux\n"})
-    results = search_notes(r"foo\d+bar", mode="regex")
-    assert len(results) == 1
+def test_list_all_tags_sort_by_name(vault_factory):
+    idx = vault_factory({"a.md": "---\ntags: [zebra, apple]\n---\n"})
+    result = list_all_tags(idx, sort_by="name")
+    tags = [r["tag"] for r in result]
+    assert tags == sorted(tags)
 
 
-def test_search_tag_filter(vault_factory):
-    vault_factory({
-        "tagged.md": "---\ntags: [python]\n---\nsome python content",
-        "untagged.md": "some python content",
+def test_list_all_tags_sort_by_count(vault_factory):
+    idx = vault_factory({
+        "a.md": "---\ntags: [popular]\n---\n",
+        "b.md": "---\ntags: [popular]\n---\n",
+        "c.md": "---\ntags: [rare]\n---\n",
     })
-    results = search_notes("python", tag="python")
+    result = list_all_tags(idx, sort_by="count")
+    assert result[0]["tag"] == "popular"
+
+
+# ── resolve_alias ─────────────────────────────────────────────────────────
+
+def test_resolve_alias_found(vault_factory):
+    idx = vault_factory({"Python Tips.md": "---\naliases: [Python]\n---\n"})
+    assert resolve_alias("Python", idx) == "Python Tips.md"
+
+
+def test_resolve_alias_not_found_returns_none(vault_factory):
+    idx = vault_factory({})
+    assert resolve_alias("DoesNotExist", idx) is None
+
+
+# ── get_periodic_note ─────────────────────────────────────────────────────
+
+def test_periodic_daily_exists(vault_factory):
+    today = date.today().isoformat()
+    idx = vault_factory({f"Journal/{today}.md": "---\ntags: [journal]\n---\nToday's note"})
+    result = get_periodic_note(idx, period="daily", date_str="today")
+    assert result["exists"] is True
+    assert "Today's note" in result["content"]
+
+
+def test_periodic_daily_not_exists(vault_factory):
+    idx = vault_factory({})
+    result = get_periodic_note(idx, period="daily", date_str="today")
+    assert result["exists"] is False
+    assert result["path"].startswith("Journal/")
+
+
+def test_periodic_weekly_path(vault_factory):
+    idx = vault_factory({})
+    result = get_periodic_note(idx, period="weekly", date_str="today")
+    assert result["path"].startswith("Journal/Weekly/")
+    assert "-W" in result["date"]
+
+
+def test_periodic_monthly_path(vault_factory):
+    idx = vault_factory({})
+    result = get_periodic_note(idx, period="monthly", date_str="2026-07-23")
+    assert result["date"] == "2026-07"
+    assert "Monthly" in result["path"]
+
+
+def test_periodic_quarterly_path(vault_factory):
+    idx = vault_factory({})
+    result = get_periodic_note(idx, period="quarterly", date_str="2026-07-23")
+    assert result["date"] == "2026-Q3"
+    assert "Quarterly" in result["path"]
+
+
+def test_periodic_yearly_path(vault_factory):
+    idx = vault_factory({})
+    result = get_periodic_note(idx, period="yearly", date_str="2026-07-23")
+    assert result["date"] == "2026"
+    assert "Yearly" in result["path"]
+
+
+def test_periodic_invalid_period(vault_factory):
+    idx = vault_factory({})
+    with pytest.raises(ValueError):
+        get_periodic_note(idx, period="hourly")
+
+
+def test_periodic_uses_template(vault_factory):
+    idx = vault_factory({
+        "Templates/Weekly-Note-Template.md": "---\ntags: [journal]\n---\n## Week {{date}}\n"
+    })
+    result = get_periodic_note(idx, period="weekly", date_str="2026-07-23")
+    assert result["exists"] is False
+    assert "Week" in result["content"]
+    assert "{{date}}" not in result["content"]
+
+
+# ── query_notes ───────────────────────────────────────────────────────────
+
+def test_query_notes_by_tag(vault_factory):
+    idx = vault_factory({
+        "a.md": "---\ntags: [projekt/aktiv]\nstatus: active\n---\n",
+        "b.md": "---\ntags: [notiz]\n---\n",
+    })
+    results = query_notes(idx, tags=["projekt/aktiv"])
     assert len(results) == 1
-    assert results[0]["path"] == "tagged.md"
+    assert results[0]["path"] == "a.md"
 
 
-# --- list_notes with meta ---
-
-def test_list_notes_with_meta(vault_factory):
-    vault_factory({"note.md": "---\ntitle: My Note\ntags: [foo]\nstatus: active\n---\nContent"})
-    results = list_notes(include_meta=True)
+def test_query_notes_by_status(vault_factory):
+    idx = vault_factory({
+        "a.md": "---\nstatus: active\n---\n",
+        "b.md": "---\nstatus: done\n---\n",
+        "c.md": "No frontmatter\n",
+    })
+    results = query_notes(idx, status="active")
     assert len(results) == 1
-    assert results[0]["path"] == "note.md"
-    assert results[0]["title"] == "My Note"
-    assert "foo" in results[0]["tags"]
-    assert results[0]["status"] == "active"
+    assert results[0]["path"] == "a.md"
+
+
+def test_query_notes_frontmatter_filter(vault_factory):
+    idx = vault_factory({
+        "a.md": "---\nprioritaet: 1\n---\n",
+        "b.md": "---\nprioritaet: 5\n---\n",
+    })
+    results = query_notes(idx, frontmatter_filter={"prioritaet": 1})
+    assert len(results) == 1
+    assert results[0]["path"] == "a.md"
+
+
+def test_query_notes_sort_by_title(vault_factory):
+    idx = vault_factory({
+        "z.md": "---\ntitle: Zebra\n---\n",
+        "a.md": "---\ntitle: Apple\n---\n",
+    })
+    results = query_notes(idx, sort_by="title")
+    assert results[0]["title"] == "Apple"
+    assert results[1]["title"] == "Zebra"
+
+
+def test_query_notes_sort_desc(vault_factory):
+    idx = vault_factory({
+        "z.md": "---\ntitle: Zebra\n---\n",
+        "a.md": "---\ntitle: Apple\n---\n",
+    })
+    results = query_notes(idx, sort_by="title", sort_desc=True)
+    assert results[0]["title"] == "Zebra"
+
+
+def test_query_notes_limit(vault_factory):
+    idx = vault_factory({f"{i}.md": f"Note {i}" for i in range(10)})
+    results = query_notes(idx, limit=3)
+    assert len(results) == 3
+
+
+def test_query_notes_folder_filter(vault_factory):
+    idx = vault_factory({
+        "Projekte/p.md": "---\nstatus: active\n---\n",
+        "Notizen/n.md": "---\nstatus: active\n---\n",
+    })
+    results = query_notes(idx, folder="Projekte")
+    assert len(results) == 1
+    assert "Projekte" in results[0]["path"]
+
+
+def test_query_notes_inline_field_filter(vault_factory):
+    idx = vault_factory({
+        "a.md": "rating:: 8\nOther text",
+        "b.md": "rating:: 5\nOther text",
+        "c.md": "No inline fields",
+    })
+    results = query_notes(idx, inline_field_filter={"rating": "8"})
+    assert len(results) == 1
+    assert results[0]["path"] == "a.md"
+
+
+def test_query_notes_inline_fields_in_result(vault_factory):
+    idx = vault_factory({"note.md": "priority:: high\ncategory:: work\n"})
+    results = query_notes(idx)
+    assert len(results) == 1
+    fields = results[0]["inline_fields"]
+    assert fields["priority"] == "high"
+    assert fields["category"] == "work"
+
+
+def test_query_notes_combined_filter(vault_factory):
+    idx = vault_factory({
+        "a.md": "---\ntags: [project]\n---\npriority:: high\n",
+        "b.md": "---\ntags: [project]\n---\npriority:: low\n",
+        "c.md": "priority:: high\n",
+    })
+    results = query_notes(idx, tags=["project"], inline_field_filter={"priority": "high"})
+    assert len(results) == 1
+    assert results[0]["path"] == "a.md"

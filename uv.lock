@@ -649,8 +649,8 @@ wheels = [
 ]
 
 [[package]]
-name = "obsidian-mcp"
-version = "0.1.0"
+name = "obsidian-remote-mcp"
+version = "0.1.5"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },

@@ -1,17 +1,10 @@
-"""Phase 10: Folder management + get_note_outline inline_fields."""
 from __future__ import annotations
 
 import pytest
 
-from obsidian_mcp.tools.folders import (
-    create_folder,
-    delete_folder,
-    list_folder,
-    rename_folder,
-)
-from obsidian_mcp.tools.read import get_note_outline
+from obsidian_mcp.tools.folders import create_folder, delete_folder, list_folder, rename_folder
 
-# ── create_folder ─────────────────────────────────────────────────────────────
+# ── create_folder ─────────────────────────────────────────────────────────
 
 def test_create_folder_basic(tmp_path, vault_factory):
     vault_factory({})
@@ -39,7 +32,7 @@ def test_create_folder_over_file_raises(tmp_path, vault_factory):
         create_folder("note.md")
 
 
-# ── delete_folder ─────────────────────────────────────────────────────────────
+# ── delete_folder ─────────────────────────────────────────────────────────
 
 def test_delete_folder_to_trash(tmp_path, vault_factory):
     vault_factory({"Temp/note.md": "content"})
@@ -69,7 +62,7 @@ def test_delete_folder_not_a_dir_raises(vault_factory):
         delete_folder("note.md")
 
 
-# ── list_folder ───────────────────────────────────────────────────────────────
+# ── list_folder ───────────────────────────────────────────────────────────
 
 def test_list_folder_root(vault_factory):
     vault_factory({
@@ -117,7 +110,7 @@ def test_list_folder_non_dir_raises(vault_factory):
         list_folder("note.md")
 
 
-# ── rename_folder ─────────────────────────────────────────────────────────────
+# ── rename_folder ─────────────────────────────────────────────────────────
 
 def test_rename_folder_basic(tmp_path, vault_factory):
     vault_factory({"Projekte/note.md": "content"})
@@ -197,26 +190,3 @@ def test_rename_folder_updates_index(vault_factory):
     all_notes = idx.get_all_notes()
     assert "Projects/note.md" in all_notes
     assert "Projekte/note.md" not in all_notes
-
-
-# ── get_note_outline inline_fields ────────────────────────────────────────────
-
-def test_outline_includes_inline_fields(vault_factory):
-    vault_factory({"note.md": "# Title\n\nrating:: 9\nauthor:: Alice\n"})
-    result = get_note_outline("note.md")
-    assert "inline_fields" in result
-    assert result["inline_fields"]["rating"] == "9"
-    assert result["inline_fields"]["author"] == "Alice"
-
-
-def test_outline_inline_fields_empty_when_none(vault_factory):
-    vault_factory({"note.md": "# Title\n\nJust text, no inline fields.\n"})
-    result = get_note_outline("note.md")
-    assert result["inline_fields"] == {}
-
-
-def test_outline_inline_fields_independent_of_frontmatter(vault_factory):
-    vault_factory({"note.md": "---\ntitle: Test\n---\npriority:: high\n"})
-    result = get_note_outline("note.md")
-    assert result["inline_fields"]["priority"] == "high"
-    assert "priority" not in result["frontmatter_keys"]

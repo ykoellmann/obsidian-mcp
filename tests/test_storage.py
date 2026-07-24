@@ -53,3 +53,12 @@ def test_lock_timeout(tmp_path):
     with pytest.raises(LockTimeoutError):
         acquire_lock(str(tmp_path / "note.md"), timeout=0.1)
     lock1.release()
+
+
+def test_read_file_via_config_vault_path(vault_factory):
+    vault_factory({"note.md": "# Hello\nWorld"})
+    from obsidian_mcp.config import get_config
+    cfg = get_config()
+    content = read_file(cfg.vault_path, "note.md")
+    assert "Hello" in content
+    assert "World" in content
