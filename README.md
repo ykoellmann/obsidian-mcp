@@ -36,12 +36,22 @@ The intended setup is to host obsidian-mcp on a server or NAS where your vault i
 
 ## Installation
 
-Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv).
+**Via uvx (no clone needed):**
+```bash
+VAULT_PATH=/your/vault uvx obsidian-mcp
+```
 
+**Via Docker (no Python needed):**
+```bash
+docker compose up -d   # see docker-compose.yml
+```
+
+**From source:**
 ```bash
 git clone https://github.com/ykoellmann/obsidian-mcp.git
 cd obsidian-mcp
 uv sync
+uv run obsidian-mcp
 ```
 
 ## Configuration
@@ -95,9 +105,14 @@ Add to `claude_desktop_config.json`:
 ## Docker
 
 ```bash
-# Edit docker-compose.yml to set VAULT_PATH and the volume mount, then:
-docker compose up
+# 1. Copy and edit the environment variables
+cp .env.example .env
+
+# 2. Set HOST_VAULT_PATH and API_KEY in .env, then:
+docker compose up -d
 ```
+
+The `docker-compose.yml` pulls the pre-built image from GHCR — no cloning or building required. To build locally instead, swap `image:` for `build: .` in the compose file.
 
 ## Remote Setup (Recommended)
 

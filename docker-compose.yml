@@ -1,15 +1,17 @@
 services:
-  second-brain-mcp:
-    build: .
+  obsidian-mcp:
+    image: ghcr.io/ykoellmann/obsidian-mcp:latest
+    # To build locally instead: comment out 'image' and uncomment 'build'
+    # build: .
     restart: unless-stopped
     environment:
       - VAULT_PATH=/vault
+      - TRANSPORT=sse
       - READ_ONLY=${READ_ONLY:-false}
       - WRITE_PATHS=${WRITE_PATHS:-}
       - EXCLUDE_PATHS=${EXCLUDE_PATHS:-private,.obsidian}
-      - AUTH_TOKEN=${AUTH_TOKEN}
-      - TRANSPORT=streamable-http
+      - API_KEY=${API_KEY:-}
     volumes:
       - ${HOST_VAULT_PATH}:/vault
     ports:
-      - "8080:8080"
+      - "8000:8000"

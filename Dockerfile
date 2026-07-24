@@ -1,6 +1,11 @@
 FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/
+
 WORKDIR /app
-COPY pyproject.toml .
-RUN pip install uv && uv pip install --system .
+COPY pyproject.toml uv.lock ./
 COPY src/ src/
-ENTRYPOINT ["python", "-m", "second_brain_mcp.server"]
+
+RUN uv pip install --system --no-cache .
+
+ENTRYPOINT ["obsidian-mcp"]
