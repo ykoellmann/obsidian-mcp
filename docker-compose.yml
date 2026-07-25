@@ -13,6 +13,7 @@ services:
       - WRITE_PATHS=${WRITE_PATHS:-}
       - EXCLUDE_PATHS=${EXCLUDE_PATHS:-private,.obsidian}
       - API_KEY=${API_KEY:-}
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
     volumes:
       - ${HOST_VAULT_PATH}:/vault
     ports:

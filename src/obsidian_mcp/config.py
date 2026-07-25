@@ -19,6 +19,7 @@ class Config:
     host: str
     port: int
     api_key: str
+    public_base_url: str
 
     def __init__(self) -> None:
         raw_vault = os.environ.get("VAULT_PATH", "")
@@ -40,6 +41,7 @@ class Config:
         self.host = os.environ.get("HOST", "0.0.0.0")
         self.port = int(os.environ.get("PORT", "8000"))
         self.api_key = os.environ.get("API_KEY") or os.environ.get("OBSIDIAN_MCP_API_KEY") or ""
+        self.public_base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
         if self.transport != "stdio" and not self.api_key:
             raise ConfigError(

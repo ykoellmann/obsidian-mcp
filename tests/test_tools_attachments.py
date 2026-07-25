@@ -91,6 +91,41 @@ def test_create_attachment_token_round_trip(vault_factory, monkeypatch):
     assert verify_attachment_token("secret", "PUT", "file.png", token["expires_at"], token["sig"])
 
 
+def test_create_attachment_token_no_url_without_public_base_url(vault_factory, monkeypatch):
+    monkeypatch.setenv("API_KEY", "secret")
+    vault_factory({})
+    token = create_attachment_token("file.png")
+    assert "url" not in token
+
+
+def test_create_attachment_token_includes_url_when_configured(vault_factory, monkeypatch):
+    monkeypatch.setenv("API_KEY", "secret")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://obsidian.example.com")
+    vault_factory({})
+    token = create_attachment_token("docs/file.pdf", method="PUT", expires_in=60)
+    expected = (
+        f"https://obsidian.example.com/attachments/docs/file.pdf"
+        f"?exp={token['expires_at']}&sig={token['sig']}"
+    )
+    assert token["url"] == expected
+
+
+def test_create_attachment_token_url_strips_trailing_slash(vault_factory, monkeypatch):
+    monkeypatch.setenv("API_KEY", "secret")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://obsidian.example.com/")
+    vault_factory({})
+    token = create_attachment_token("file.png")
+    assert token["url"].startswith("https://obsidian.example.com/attachments/file.png?")
+
+
+def test_create_attachment_token_url_encodes_path(vault_factory, monkeypatch):
+    monkeypatch.setenv("API_KEY", "secret")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://obsidian.example.com")
+    vault_factory({})
+    token = create_attachment_token("My Photos/image one.png")
+    assert "My%20Photos/image%20one.png" in token["url"]
+
+
 def test_verify_attachment_token_rejects_wrong_key(vault_factory, monkeypatch):
     monkeypatch.setenv("API_KEY", "secret")
     vault_factory({})

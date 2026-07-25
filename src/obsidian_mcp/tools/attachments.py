@@ -6,6 +6,7 @@ import hmac
 import mimetypes
 import time
 from pathlib import Path
+from urllib.parse import quote, urlencode
 
 from ..config import get_config
 from ..storage.filesystem import validate_path, write_file_atomic_bytes
@@ -120,6 +121,8 @@ def create_attachment_token(path: str, method: str = "PUT", expires_in: int = 30
     Lets a client fetch or upload a file's raw bytes directly over HTTP
     without ever being handed the server's long-lived master API_KEY — the
     token is scoped to this exact path and method, and expires on its own.
+    If PUBLIC_BASE_URL is configured, the ready-to-use request URL is
+    included so the caller never has to guess host/port/scheme itself.
     """
     cfg = get_config()
     if not cfg.api_key:
@@ -132,7 +135,12 @@ def create_attachment_token(path: str, method: str = "PUT", expires_in: int = 30
     expires_in = max(1, min(int(expires_in), _MAX_TOKEN_TTL))
     expires_at = int(time.time()) + expires_in
     sig = _sign_attachment_token(cfg.api_key, method, path, expires_at)
-    return {"path": path, "method": method, "expires_at": expires_at, "sig": sig}
+    result = {"path": path, "method": method, "expires_at": expires_at, "sig": sig}
+    if cfg.public_base_url:
+        quoted_path = quote(path, safe="/")
+        query = urlencode({"exp": expires_at, "sig": sig})
+        result["url"] = f"{cfg.public_base_url}/attachments/{quoted_path}?{query}"
+    return result
 
 
 def verify_attachment_token(api_key: str, method: str, path: str, expires_at: str | int, sig: str) -> bool:

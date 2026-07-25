@@ -540,7 +540,9 @@ def create_attachment_token_tool(path: str, method: str = "PUT", expires_in: int
     server's master API_KEY. method: 'PUT' (upload) or 'GET' (download).
     expires_in: seconds until the token expires (default 300, max 3600).
 
-    Returns {path, method, expires_at, sig}. Call the route as:
+    Returns {path, method, expires_at, sig, url?}. If the server has
+    PUBLIC_BASE_URL configured, `url` is the ready-to-use request URL —
+    otherwise build it yourself as:
         curl -X PUT --data-binary @file.png \\
             "http://host:port/attachments/{path}?exp={expires_at}&sig={sig}"
     The token only authorizes this exact path + method and stops working after expires_at."""
