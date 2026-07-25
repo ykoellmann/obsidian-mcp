@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import hmac
 import logging
+import mimetypes
 import os
 import threading
 
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, AuthProvider
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 from .config import get_config
 from .domain.index import VaultIndex
-from .storage.filesystem import read_file
+from .storage.filesystem import PathTraversalError, read_file, validate_path
 from .storage.watcher import VaultWatcher
-from .tools.attachments import add_attachment, list_attachments, read_attachment
+from .tools.attachments import (
+    add_attachment,
+    list_attachments,
+    read_attachment,
+    write_attachment_bytes,
+)
 from .tools.canvas import list_canvases, patch_canvas, read_canvas, write_canvas
 from .tools.folders import (
     create_folder,
@@ -110,6 +118,8 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 
 ### Attachments
 - `list_attachments_tool(folder)`, `read_attachment_tool(path)`, `add_attachment_tool(path, content_base64)`
+- For large/many binary files, `GET`/`PUT /attachments/{path}` (raw bytes, same bearer token) reads/writes
+  directly on disk without routing content through an MCP tool call.
 
 ### Templates
 - `list_templates_tool()`, `create_from_template_tool(template_path, output_path, variables)`
@@ -518,6 +528,54 @@ def add_attachment_tool(path: str, content_base64: str) -> dict:
     """Write a binary attachment (image, PDF, etc.) to the vault from base64-encoded content.
     Returns {path, status, size_bytes, mime_type}."""
     return add_attachment(path, content_base64)
+
+
+def _check_bearer_token(request: Request, cfg) -> bool:
+    if not cfg.api_key:
+        return True
+    token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+    return hmac.compare_digest(token, cfg.api_key)
+
+
+@mcp.custom_route("/attachments/{path:path}", methods=["PUT", "GET"])
+async def attachment_route(request: Request) -> Response:
+    """Direct binary upload/download, outside the MCP tool-call channel.
+
+    add_attachment_tool/read_attachment_tool move file content as base64
+    inside a tool call/result, which forces the bytes through whatever
+    client/model is driving the MCP session — expensive and risky for large
+    or many files. This route lets a client PUT/GET raw bytes straight to/from
+    disk instead. Same bearer-token auth as the rest of the server.
+
+    Usage:
+        curl -X PUT --data-binary @file.png \\
+            -H "Authorization: Bearer <API_KEY>" http://host:port/attachments/path/to/file.png
+        curl -o file.png \\
+            -H "Authorization: Bearer <API_KEY>" http://host:port/attachments/path/to/file.png
+    """
+    cfg = get_config()
+    if not _check_bearer_token(request, cfg):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    path = request.path_params["path"]
+
+    if request.method == "GET":
+        try:
+            target = validate_path(cfg.vault_path, path)
+            data = target.read_bytes()
+        except FileNotFoundError:
+            return JSONResponse({"error": f"Attachment not found: {path!r}"}, status_code=404)
+        except PathTraversalError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        mime, _ = mimetypes.guess_type(path)
+        return Response(data, media_type=mime or "application/octet-stream")
+
+    data = await request.body()
+    try:
+        result = write_attachment_bytes(path, data)
+    except (ValueError, PathTraversalError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result)
 
 
 # ── Templates ─────────────────────────────────────────────────────────────────

@@ -68,20 +68,19 @@ def read_attachment(path: str) -> dict:
     }
 
 
-def add_attachment(path: str, content_base64: str) -> dict:
-    """Write a binary attachment from a base64-encoded string.
-    Use this to add images, PDFs, or other binary files to the vault."""
+def write_attachment_bytes(path: str, data: bytes) -> dict:
+    """Write raw bytes as a binary attachment.
+
+    Shared by add_attachment (decodes base64 from an MCP tool call) and the
+    server's direct HTTP upload route (raw bytes, no MCP tool-call/base64
+    round trip needed).
+    """
     cfg = get_config()
     validate_path(cfg.vault_path, path)
 
     # Refuse .md through this path to keep write_note as the canonical text entrypoint
     if Path(path).suffix.lower() == ".md":
         raise ValueError("Use write_note_tool for Markdown files, not add_attachment_tool")
-
-    try:
-        data = base64.b64decode(content_base64, validate=True)
-    except Exception as exc:
-        raise ValueError(f"Invalid base64 content: {exc}") from exc
 
     write_file_atomic_bytes(cfg.vault_path, path, data)
 
@@ -92,3 +91,14 @@ def add_attachment(path: str, content_base64: str) -> dict:
         "size_bytes": len(data),
         "mime_type": mime or "application/octet-stream",
     }
+
+
+def add_attachment(path: str, content_base64: str) -> dict:
+    """Write a binary attachment from a base64-encoded string.
+    Use this to add images, PDFs, or other binary files to the vault."""
+    try:
+        data = base64.b64decode(content_base64, validate=True)
+    except Exception as exc:
+        raise ValueError(f"Invalid base64 content: {exc}") from exc
+
+    return write_attachment_bytes(path, data)
