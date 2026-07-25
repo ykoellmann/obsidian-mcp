@@ -6,10 +6,13 @@ bypassing the MCP tool-call/base64 channel entirely.
 """
 from __future__ import annotations
 
+import time
+
 import httpx
 import pytest
 
 from obsidian_mcp import server
+from obsidian_mcp.tools.attachments import create_attachment_token
 
 
 def _client():
@@ -111,6 +114,87 @@ async def test_download_route_rejects_wrong_key(tmp_path, vault_factory, monkeyp
         resp = await client.get(
             "/attachments/file.png",
             headers={"Authorization": "Bearer wrong-key"},
+        )
+
+    assert resp.status_code == 401
+
+
+# ── scoped tokens (no master key exposed) ────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_scoped_token_authorizes_upload(tmp_path, vault_factory, monkeypatch):
+    monkeypatch.setenv("API_KEY", "master-key")
+    vault_factory({})
+    token = create_attachment_token("docs/file.pdf", method="PUT", expires_in=60)
+
+    async with _client() as client:
+        resp = await client.put(
+            f"/attachments/docs/file.pdf?exp={token['expires_at']}&sig={token['sig']}",
+            content=b"PDF-CONTENT",
+        )
+
+    assert resp.status_code == 200
+    assert (tmp_path / "docs" / "file.pdf").read_bytes() == b"PDF-CONTENT"
+
+
+@pytest.mark.asyncio
+async def test_scoped_token_authorizes_download(tmp_path, vault_factory, monkeypatch):
+    monkeypatch.setenv("API_KEY", "master-key")
+    vault_factory({})
+    (tmp_path / "file.png").write_bytes(b"image-bytes")
+    token = create_attachment_token("file.png", method="GET", expires_in=60)
+
+    async with _client() as client:
+        resp = await client.get(f"/attachments/file.png?exp={token['expires_at']}&sig={token['sig']}")
+
+    assert resp.status_code == 200
+    assert resp.content == b"image-bytes"
+
+
+@pytest.mark.asyncio
+async def test_scoped_token_rejected_for_wrong_path(tmp_path, vault_factory, monkeypatch):
+    monkeypatch.setenv("API_KEY", "master-key")
+    vault_factory({})
+    token = create_attachment_token("allowed.png", method="PUT", expires_in=60)
+
+    async with _client() as client:
+        resp = await client.put(
+            f"/attachments/other.png?exp={token['expires_at']}&sig={token['sig']}",
+            content=b"data",
+        )
+
+    assert resp.status_code == 401
+    assert not (tmp_path / "other.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_scoped_token_rejected_for_wrong_method(tmp_path, vault_factory, monkeypatch):
+    monkeypatch.setenv("API_KEY", "master-key")
+    vault_factory({})
+    # token minted for GET must not authorize a PUT (would let a read-only
+    # token overwrite the file it was meant only to expose for reading)
+    token = create_attachment_token("file.png", method="GET", expires_in=60)
+
+    async with _client() as client:
+        resp = await client.put(
+            f"/attachments/file.png?exp={token['expires_at']}&sig={token['sig']}",
+            content=b"data",
+        )
+
+    assert resp.status_code == 401
+    assert not (tmp_path / "file.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_scoped_token_rejected_when_expired(tmp_path, vault_factory, monkeypatch):
+    monkeypatch.setenv("API_KEY", "master-key")
+    vault_factory({})
+    token = create_attachment_token("file.png", method="PUT", expires_in=1)
+
+    async with _client() as client:
+        resp = await client.put(
+            f"/attachments/file.png?exp={int(time.time()) - 10}&sig={token['sig']}",
+            content=b"data",
         )
 
     assert resp.status_code == 401

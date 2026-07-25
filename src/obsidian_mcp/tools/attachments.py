@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import mimetypes
+import time
 from pathlib import Path
 
 from ..config import get_config
 from ..storage.filesystem import validate_path, write_file_atomic_bytes
 
 _TEXT_SUFFIXES = {".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".css", ".js", ".ts"}
+_MAX_TOKEN_TTL = 3600
 
 
 def list_attachments(folder: str = "") -> list[dict]:
@@ -102,3 +106,42 @@ def add_attachment(path: str, content_base64: str) -> dict:
         raise ValueError(f"Invalid base64 content: {exc}") from exc
 
     return write_attachment_bytes(path, data)
+
+
+def _sign_attachment_token(api_key: str, method: str, path: str, expires_at: int) -> str:
+    msg = f"{method}:{path}:{expires_at}".encode()
+    return hmac.new(api_key.encode(), msg, hashlib.sha256).hexdigest()
+
+
+def create_attachment_token(path: str, method: str = "PUT", expires_in: int = 300) -> dict:
+    """Create a short-lived, single-file, single-method signed token for the
+    server's GET/PUT /attachments/{path} HTTP route.
+
+    Lets a client fetch or upload a file's raw bytes directly over HTTP
+    without ever being handed the server's long-lived master API_KEY — the
+    token is scoped to this exact path and method, and expires on its own.
+    """
+    cfg = get_config()
+    if not cfg.api_key:
+        raise ValueError("API_KEY is not configured on this server; attachment tokens require it")
+
+    method = method.upper()
+    if method not in ("GET", "PUT"):
+        raise ValueError("method must be 'GET' or 'PUT'")
+
+    expires_in = max(1, min(int(expires_in), _MAX_TOKEN_TTL))
+    expires_at = int(time.time()) + expires_in
+    sig = _sign_attachment_token(cfg.api_key, method, path, expires_at)
+    return {"path": path, "method": method, "expires_at": expires_at, "sig": sig}
+
+
+def verify_attachment_token(api_key: str, method: str, path: str, expires_at: str | int, sig: str) -> bool:
+    """Verify a token minted by create_attachment_token. Constant-time, expiry-checked."""
+    try:
+        expires_at_int = int(expires_at)
+    except (TypeError, ValueError):
+        return False
+    if time.time() > expires_at_int:
+        return False
+    expected = _sign_attachment_token(api_key, method, path, expires_at_int)
+    return hmac.compare_digest(sig, expected)

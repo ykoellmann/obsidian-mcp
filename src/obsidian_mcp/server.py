@@ -19,8 +19,10 @@ from .storage.filesystem import PathTraversalError, read_file, validate_path
 from .storage.watcher import VaultWatcher
 from .tools.attachments import (
     add_attachment,
+    create_attachment_token,
     list_attachments,
     read_attachment,
+    verify_attachment_token,
     write_attachment_bytes,
 )
 from .tools.canvas import list_canvases, patch_canvas, read_canvas, write_canvas
@@ -118,8 +120,9 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 
 ### Attachments
 - `list_attachments_tool(folder)`, `read_attachment_tool(path)`, `add_attachment_tool(path, content_base64)`
-- For large/many binary files, `GET`/`PUT /attachments/{path}` (raw bytes, same bearer token) reads/writes
-  directly on disk without routing content through an MCP tool call.
+- For large/many binary files, `create_attachment_token_tool(path, method, expires_in)` mints a short-lived,
+  single-file token, then `GET`/`PUT /attachments/{path}?exp=&sig=` reads/writes raw bytes directly on disk
+  — no base64, no MCP tool-call channel, and no need to ever expose the server's master API_KEY.
 
 ### Templates
 - `list_templates_tool()`, `create_from_template_tool(template_path, output_path, variables)`
@@ -530,11 +533,35 @@ def add_attachment_tool(path: str, content_base64: str) -> dict:
     return add_attachment(path, content_base64)
 
 
+@mcp.tool()
+def create_attachment_token_tool(path: str, method: str = "PUT", expires_in: int = 300) -> dict:
+    """Create a short-lived, single-file upload/download token for the
+    GET/PUT /attachments/{path} HTTP route, instead of handing out the
+    server's master API_KEY. method: 'PUT' (upload) or 'GET' (download).
+    expires_in: seconds until the token expires (default 300, max 3600).
+
+    Returns {path, method, expires_at, sig}. Call the route as:
+        curl -X PUT --data-binary @file.png \\
+            "http://host:port/attachments/{path}?exp={expires_at}&sig={sig}"
+    The token only authorizes this exact path + method and stops working after expires_at."""
+    return create_attachment_token(path, method=method, expires_in=expires_in)
+
+
 def _check_bearer_token(request: Request, cfg) -> bool:
     if not cfg.api_key:
         return True
     token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
     return hmac.compare_digest(token, cfg.api_key)
+
+
+def _check_scoped_token(request: Request, cfg, method: str, path: str) -> bool:
+    if not cfg.api_key:
+        return False
+    exp = request.query_params.get("exp")
+    sig = request.query_params.get("sig")
+    if not exp or not sig:
+        return False
+    return verify_attachment_token(cfg.api_key, method, path, exp, sig)
 
 
 @mcp.custom_route("/attachments/{path:path}", methods=["PUT", "GET"])
@@ -545,7 +572,9 @@ async def attachment_route(request: Request) -> Response:
     inside a tool call/result, which forces the bytes through whatever
     client/model is driving the MCP session — expensive and risky for large
     or many files. This route lets a client PUT/GET raw bytes straight to/from
-    disk instead. Same bearer-token auth as the rest of the server.
+    disk instead. Accepts either the server's bearer token or a short-lived
+    scoped token from create_attachment_token_tool (?exp=&sig=), so callers
+    never need to be handed the long-lived master key.
 
     Usage:
         curl -X PUT --data-binary @file.png \\
@@ -554,10 +583,12 @@ async def attachment_route(request: Request) -> Response:
             -H "Authorization: Bearer <API_KEY>" http://host:port/attachments/path/to/file.png
     """
     cfg = get_config()
-    if not _check_bearer_token(request, cfg):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-
     path = request.path_params["path"]
+    authorized = _check_bearer_token(request, cfg) or _check_scoped_token(
+        request, cfg, request.method, path
+    )
+    if not authorized:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     if request.method == "GET":
         try:
