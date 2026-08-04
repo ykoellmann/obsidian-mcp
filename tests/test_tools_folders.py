@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from obsidian_mcp.tools.folders import create_folder, delete_folder, list_folder, rename_folder
+from obsidian_mcp.tools.folders import (
+    create_folder,
+    delete_folder,
+    list_folder,
+    list_trash,
+    rename_folder,
+    restore_folder,
+)
 
 # ── create_folder ─────────────────────────────────────────────────────────
 
@@ -60,6 +67,62 @@ def test_delete_folder_not_a_dir_raises(vault_factory):
     vault_factory({"note.md": "content"})
     with pytest.raises(ValueError, match="Not a folder"):
         delete_folder("note.md")
+
+
+# ── list_trash / restore_folder ──────────────────────────────────────────
+
+def test_list_trash_empty_when_no_trash_dir(vault_factory):
+    vault_factory({})
+    assert list_trash() == {"items": []}
+
+
+def test_list_trash_lists_files_and_folders(tmp_path, vault_factory):
+    vault_factory({"a.md": "A", "Temp/note.md": "content"})
+    from obsidian_mcp.tools.write import delete_note
+
+    delete_note("a.md", trash=True)
+    delete_folder("Temp", trash=True)
+    items = list_trash()["items"]
+    names = {i["name"]: i["type"] for i in items}
+    assert names == {"a.md": "file", "Temp": "folder"}
+
+
+def test_restore_folder_puts_it_back(tmp_path, vault_factory):
+    vault_factory({"Temp/note.md": "content"})
+    delete_folder("Temp", trash=True)
+    result = restore_folder("Temp", "Temp")
+    assert result["status"] == "restored"
+    assert (tmp_path / "Temp" / "note.md").read_text() == "content"
+    assert not (tmp_path / ".trash" / "Temp").exists()
+
+
+def test_restore_folder_to_different_path(tmp_path, vault_factory):
+    vault_factory({"Temp/note.md": "content"})
+    delete_folder("Temp", trash=True)
+    restore_folder("Temp", "Restored")
+    assert (tmp_path / "Restored" / "note.md").read_text() == "content"
+
+
+def test_restore_folder_updates_index(vault_factory):
+    idx = vault_factory({"Temp/note.md": "content"})
+    delete_folder("Temp", trash=True)
+    result = restore_folder("Temp", "Temp", index=idx)
+    assert result["notes_restored"] == 1
+    assert "Temp/note.md" in idx.get_all_notes()
+
+
+def test_restore_folder_missing_raises(vault_factory):
+    vault_factory({})
+    with pytest.raises(FileNotFoundError):
+        restore_folder("NonExistent", "Somewhere")
+
+
+def test_restore_folder_existing_target_raises(tmp_path, vault_factory):
+    vault_factory({"Temp/note.md": "content"})
+    delete_folder("Temp", trash=True)
+    (tmp_path / "Temp").mkdir()
+    with pytest.raises(FileExistsError):
+        restore_folder("Temp", "Temp")
 
 
 # ── list_folder ───────────────────────────────────────────────────────────

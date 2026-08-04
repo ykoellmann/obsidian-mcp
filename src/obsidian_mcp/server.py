@@ -31,7 +31,9 @@ from .tools.folders import (
     create_folder,
     delete_folder,
     list_folder,
+    list_trash,
     rename_folder,
+    restore_folder,
 )
 from .tools.kanban import (
     add_kanban_card,
@@ -65,6 +67,7 @@ from .tools.write import (
     move_note,
     patch_frontmatter,
     patch_note,
+    restore_note,
     write_note,
 )
 
@@ -99,13 +102,16 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 - `patch_frontmatter_tool(path, updates, merge_arrays)` — update YAML keys without touching the body
 - `manage_tags_tool(path, add, remove)` — add/remove tags in frontmatter and inline
 - `delete_note_tool(path, trash)` — trash=True (default) moves to .trash/
+- `restore_note_tool(trashed_name, to_path)` — undo a trashed delete; trashed_name from list_trash_tool
 - `move_note_tool(from_path, to_path)` — rename/move + rewrites all wikilinks vault-wide
 
 ### Folders
 - `list_folder_tool(path)` — immediate contents (path="" = vault root); hides dotfiles
 - `create_folder_tool(path)` — create folder, parents auto-created
 - `delete_folder_tool(path, trash)` — delete or trash a folder
+- `restore_folder_tool(trashed_name, to_path)` — undo a trashed delete; trashed_name from list_trash_tool
 - `rename_folder_tool(from_path, to_path)` — rename + rewrites path-based wikilinks
+- `list_trash_tool()` — see what's sitting in .trash/, with the names restore_*_tool expects
 
 ### Querying & Graph
 - `query_notes_tool(tags, status, frontmatter_filter, inline_field_filter, sort_by, limit, folder)` — Dataview-like filter
@@ -407,6 +413,15 @@ def delete_note_tool(path: str, trash: bool = True) -> dict:
     """Delete a note from the vault.
     trash=True (default) moves it to .trash/ instead of permanent deletion."""
     return delete_note(path, trash=trash, index=_index)
+
+
+@mcp.tool()
+def restore_note_tool(trashed_name: str, to_path: str) -> dict:
+    """Restore a note previously moved to .trash/ (see list_trash_tool for names).
+    to_path: where to put it back — the original folder can't be recovered
+    from the trash entry alone, so you choose the destination.
+    Returns {from, to, status}."""
+    return restore_note(trashed_name, to_path, index=_index)
 
 
 @mcp.tool()
@@ -863,6 +878,24 @@ def rename_folder_tool(from_path: str, to_path: str) -> dict:
     notes that reference notes inside the moved folder.
     Returns {from, to, notes_moved, updated_links_in}."""
     return rename_folder(from_path, to_path, index=_index)
+
+
+@mcp.tool()
+def list_trash_tool() -> dict:
+    """List items sitting in .trash/ (from delete_note_tool/delete_folder_tool
+    with trash=True). Names here are what restore_note_tool/restore_folder_tool
+    expect as trashed_name.
+    Returns {items: [{name, type, size_bytes, mtime}]}."""
+    return list_trash()
+
+
+@mcp.tool()
+def restore_folder_tool(trashed_name: str, to_path: str) -> dict:
+    """Restore a folder previously moved to .trash/ (see list_trash_tool for names).
+    to_path: where to put it back — the original parent path can't be
+    recovered from the trash entry alone, so you choose the destination.
+    Returns {path, status, notes_restored}."""
+    return restore_folder(trashed_name, to_path, index=_index)
 
 
 # ── MCP Resources ─────────────────────────────────────────────────────────────

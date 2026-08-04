@@ -158,6 +158,43 @@ def delete_note(path: str, trash: bool = True, index: VaultIndex | None = None) 
     return {"path": path, "status": "deleted", "trash": trash}
 
 
+def restore_note(trashed_name: str, to_path: str, index: VaultIndex | None = None) -> dict:
+    """Restore a note previously moved to .trash/ (via delete_note trash=True).
+
+    trashed_name: the filename as it sits under .trash/ (see list_trash_tool) —
+    a collision at delete time may have appended a random suffix, so this is
+    often not the note's original filename.
+    to_path: where to put it back (you choose it; the original folder isn't
+    recoverable from the trash entry alone).
+    """
+    if "/" in trashed_name or "\\" in trashed_name or trashed_name in (".", ".."):
+        raise ValueError(f"trashed_name must be a bare filename, not a path: {trashed_name!r}")
+
+    cfg = get_config()
+    validate_path(cfg.vault_path, to_path)
+    _check_write_permission(to_path)
+
+    trash_src = cfg.vault_path / ".trash" / trashed_name
+    if not trash_src.exists() or not trash_src.is_file():
+        raise FileNotFoundError(f"No trashed note named {trashed_name!r} in .trash/")
+
+    dest = cfg.vault_path / to_path
+    if dest.exists():
+        raise FileExistsError(f"Target already exists: {to_path!r}")
+
+    lock = acquire_lock(str(trash_src))
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(trash_src, dest)
+    finally:
+        lock.release()
+
+    if index is not None:
+        index.update(to_path)
+
+    return {"from": f".trash/{trashed_name}", "to": to_path, "status": "restored"}
+
+
 def append_to_note(
     path: str,
     content: str,

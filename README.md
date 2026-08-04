@@ -247,8 +247,8 @@ The server loads this file at startup and sends it to the AI as system instructi
 | Category | Tools |
 |---|---|
 | **Read** | `list_notes`, `read_note`, `search_notes`, `render_note`, `get_note_outline` |
-| **Write** | `write_note`, `patch_note`, `delete_note`, `append_to_note`, `patch_frontmatter`, `manage_tags`, `move_note` |
-| **Folders** | `list_folder`, `create_folder`, `delete_folder`, `rename_folder` |
+| **Write** | `write_note`, `patch_note`, `delete_note`, `restore_note`, `append_to_note`, `patch_frontmatter`, `manage_tags`, `move_note` |
+| **Folders** | `list_folder`, `create_folder`, `delete_folder`, `restore_folder`, `rename_folder`, `list_trash` |
 | **Query** | `query_notes`, `get_backlinks`, `get_broken_links`, `get_orphans`, `get_link_graph`, `get_vault_stats`, `get_tasks`, `resolve_alias` |
 | **Tags** | `get_notes_by_tag`, `get_tag_tree`, `list_all_tags` |
 | **Periodic** | `get_daily_note`, `get_periodic_note` |

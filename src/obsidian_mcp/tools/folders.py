@@ -46,6 +46,61 @@ def delete_folder(path: str, trash: bool = True) -> dict:
     return {"path": path, "status": "deleted", "trash": trash}
 
 
+def list_trash() -> dict:
+    """List top-level items sitting in .trash/ (from delete_note/delete_folder
+    with trash=True). Names here are what restore_note_tool/restore_folder_tool
+    expect as trashed_name — they may differ from the original name if a
+    collision at delete time appended a random suffix."""
+    cfg = get_config()
+    trash_dir = cfg.vault_path / ".trash"
+    if not trash_dir.exists():
+        return {"items": []}
+
+    items = []
+    for item in sorted(trash_dir.iterdir()):
+        items.append(
+            {
+                "name": item.name,
+                "type": "folder" if item.is_dir() else "file",
+                "size_bytes": item.stat().st_size if item.is_file() else None,
+                "mtime": item.stat().st_mtime,
+            }
+        )
+    return {"items": items}
+
+
+def restore_folder(trashed_name: str, to_path: str, index: VaultIndex | None = None) -> dict:
+    """Restore a folder previously moved to .trash/ (via delete_folder trash=True).
+
+    trashed_name: the folder name as it sits under .trash/ (see list_trash_tool).
+    to_path: where to put it back (you choose it; the original parent path
+    isn't recoverable from the trash entry alone).
+    """
+    if "/" in trashed_name or "\\" in trashed_name or trashed_name in (".", ".."):
+        raise ValueError(f"trashed_name must be a bare name, not a path: {trashed_name!r}")
+
+    cfg = get_config()
+    to_dir = validate_path(cfg.vault_path, to_path)
+    _check_write_permission(to_path.rstrip("/") + "/.keep")
+
+    trash_src = cfg.vault_path / ".trash" / trashed_name
+    if not trash_src.exists() or not trash_src.is_dir():
+        raise FileNotFoundError(f"No trashed folder named {trashed_name!r} in .trash/")
+    if to_dir.exists():
+        raise FileExistsError(f"Target already exists: {to_path!r}")
+
+    to_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(trash_src), str(to_dir))
+
+    notes_restored = 0
+    if index is not None:
+        for p in to_dir.rglob("*.md"):
+            index.update(str(p.relative_to(cfg.vault_path)))
+            notes_restored += 1
+
+    return {"path": to_path, "status": "restored", "notes_restored": notes_restored}
+
+
 def list_folder(path: str = "") -> dict:
     """List the immediate contents of a vault folder (non-hidden files and subfolders)."""
     cfg = get_config()

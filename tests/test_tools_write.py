@@ -11,6 +11,7 @@ from obsidian_mcp.tools.write import (
     move_note,
     patch_frontmatter,
     patch_note,
+    restore_note,
     write_note,
 )
 
@@ -167,6 +168,51 @@ def test_delete_note_trash_conflict(tmp_path, vault_factory):
     delete_note("a.md", trash=True)
     trash_files = list((tmp_path / ".trash").iterdir())
     assert len(trash_files) == 2  # original + renamed
+
+
+# ── restore_note ──────────────────────────────────────────────────────────
+
+def test_restore_note_puts_file_back(tmp_path, vault_factory):
+    vault_factory({"note.md": "content"})
+    delete_note("note.md", trash=True)
+    result = restore_note("note.md", "note.md")
+    assert result["status"] == "restored"
+    assert (tmp_path / "note.md").read_text() == "content"
+    assert not (tmp_path / ".trash" / "note.md").exists()
+
+
+def test_restore_note_to_different_path(tmp_path, vault_factory):
+    vault_factory({"note.md": "content"})
+    delete_note("note.md", trash=True)
+    restore_note("note.md", "restored/note.md")
+    assert (tmp_path / "restored" / "note.md").read_text() == "content"
+
+
+def test_restore_note_updates_index(vault_factory):
+    idx = vault_factory({"note.md": "content"})
+    delete_note("note.md", index=idx)
+    restore_note("note.md", "note.md", index=idx)
+    assert "note.md" in idx.get_all_notes()
+
+
+def test_restore_note_missing_raises(vault_factory):
+    vault_factory({})
+    with pytest.raises(FileNotFoundError):
+        restore_note("ghost.md", "ghost.md")
+
+
+def test_restore_note_existing_target_raises(tmp_path, vault_factory):
+    vault_factory({"note.md": "trashed"})
+    delete_note("note.md", trash=True)
+    (tmp_path / "note.md").write_text("someone else wrote here since")
+    with pytest.raises(FileExistsError):
+        restore_note("note.md", "note.md")
+
+
+def test_restore_note_rejects_path_in_trashed_name(vault_factory):
+    vault_factory({})
+    with pytest.raises(ValueError):
+        restore_note("../secrets.md", "note.md")
 
 
 # ── append_to_note ────────────────────────────────────────────────────────
