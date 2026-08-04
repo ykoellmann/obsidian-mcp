@@ -34,6 +34,7 @@ The intended setup is to host obsidian-mcp on a server or NAS where your vault i
 - **Two auth variants** — a static API key (Claude Code, Desktop, curl) and, optionally, GitHub OAuth (claude.ai Web/Mobile Custom Connector) — usable independently or at the same time
 - **Templates** — render Obsidian templates with built-in (`{{date}}`, `{{title}}`, …) and custom variables
 - **MCP Resources** — expose vault notes, stats, and tags as MCP resources for direct context injection
+- **MCP Prompts** — `weekly_review`, `daily_note` starting points for common workflows
 
 ## Installation
 

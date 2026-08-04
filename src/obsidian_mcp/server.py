@@ -42,6 +42,7 @@ from .tools.kanban import (
     move_kanban_card,
     read_kanban,
 )
+from .tools.prompts import daily_note_prompt, weekly_review_prompt
 from .tools.query import (
     get_backlinks,
     get_broken_links,
@@ -151,6 +152,10 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 - `vault://notes/{path}` — raw note content as context
 - `vault://stats` — live vault statistics
 - `vault://tags` — all tags with counts
+
+## MCP Prompts
+- `weekly_review` — summarize the past week: overdue/due-soon tasks, daily note highlights
+- `daily_note(date)` — open or create a daily note, carrying over yesterday's open tasks
 
 ---
 
@@ -344,6 +349,21 @@ _index: VaultIndex | None = None
 _watcher = None
 
 mcp = FastMCP(name="obsidian-mcp", instructions=_load_instructions(), auth=_build_auth())
+
+
+# ── Prompts ───────────────────────────────────────────────────────────────────
+
+@mcp.prompt()
+def weekly_review() -> str:
+    """Summarize the past week: overdue/due-soon tasks, daily note highlights."""
+    return weekly_review_prompt()
+
+
+@mcp.prompt()
+def daily_note(date: str = "today") -> str:
+    """Open or create a daily note, carrying over yesterday's open tasks.
+    date: 'today' | 'yesterday' | 'YYYY-MM-DD'."""
+    return daily_note_prompt(date=date)
 
 
 # ── Read ──────────────────────────────────────────────────────────────────────
