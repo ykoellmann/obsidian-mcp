@@ -313,7 +313,13 @@ def _build_auth() -> AuthProvider | None:
 
     if github_provider and api_key_verifier:
         logger.info("API key auth enabled (alongside GitHub OAuth)")
-        return MultiAuth(server=github_provider, verifiers=[api_key_verifier])
+        # required_scopes must be cleared here: MultiAuth defaults it to the
+        # server's (GitHubProvider's, i.e. ["user"]) and enforces it across
+        # every verifier. _APIKeyAuthProvider's tokens carry scopes=[] since
+        # a static key has no OAuth scopes, so without this override every
+        # API-key request would fail with "insufficient_scope" even though
+        # the key itself checked out.
+        return MultiAuth(server=github_provider, verifiers=[api_key_verifier], required_scopes=[])
     if github_provider:
         return github_provider
     if api_key_verifier:
