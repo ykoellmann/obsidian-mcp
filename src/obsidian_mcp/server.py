@@ -63,6 +63,7 @@ from .tools.templates import create_from_template, list_templates
 from .tools.write import (
     append_to_note,
     delete_note,
+    find_replace_in_vault,
     manage_tags,
     move_note,
     patch_frontmatter,
@@ -104,6 +105,8 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 - `delete_note_tool(path, trash)` — trash=True (default) moves to .trash/
 - `restore_note_tool(trashed_name, to_path)` — undo a trashed delete; trashed_name from list_trash_tool
 - `move_note_tool(from_path, to_path)` — rename/move + rewrites all wikilinks vault-wide
+- `find_replace_in_vault_tool(search, replace, mode, folder, dry_run)` — bulk find/replace across
+  every note; dry_run=True (default) previews matches before writing anything
 
 ### Folders
 - `list_folder_tool(path)` — immediate contents (path="" = vault root); hides dotfiles
@@ -422,6 +425,25 @@ def restore_note_tool(trashed_name: str, to_path: str) -> dict:
     from the trash entry alone, so you choose the destination.
     Returns {from, to, status}."""
     return restore_note(trashed_name, to_path, index=_index)
+
+
+@mcp.tool()
+def find_replace_in_vault_tool(
+    search: str,
+    replace: str,
+    mode: str = "exact",
+    folder: str = "",
+    dry_run: bool = True,
+) -> dict:
+    """Find and replace text across every note in the vault (or a subfolder).
+    mode: 'exact' (default, literal substring) | 'regex'.
+    dry_run=True (default) only previews matches — {matches: [{path, match_count, preview}], total_matches}.
+    Always run once with dry_run=True first, then dry_run=False to actually write.
+    .trash/ and EXCLUDE_PATHS are always skipped; write-protected files
+    (READ_ONLY or outside WRITE_PATHS) are skipped and listed under
+    skipped_write_protected rather than aborting the whole run.
+    Returns {replaced_in, total_replacements, skipped_write_protected} when dry_run=False."""
+    return find_replace_in_vault(search, replace, mode=mode, folder=folder, dry_run=dry_run, index=_index)
 
 
 @mcp.tool()

@@ -7,6 +7,7 @@ from obsidian_mcp.tools.write import (
     WritePermissionError,
     append_to_note,
     delete_note,
+    find_replace_in_vault,
     manage_tags,
     move_note,
     patch_frontmatter,
@@ -379,3 +380,68 @@ def test_move_note_into_subfolder(tmp_path, vault_factory):
     assert (tmp_path / "Archiv" / "note.md").exists()
     rewritten = (tmp_path / "linker.md").read_text()
     assert "[[note]]" in rewritten  # stem unchanged, link stays valid
+
+
+# ── find_replace_in_vault ─────────────────────────────────────────────────
+
+def test_find_replace_dry_run_previews_without_writing(tmp_path, vault_factory):
+    vault_factory({"a.md": "foo bar", "b.md": "nothing here"})
+    result = find_replace_in_vault("foo", "baz", dry_run=True)
+    assert result["dry_run"] is True
+    assert result["total_matches"] == 1
+    assert result["matches"][0]["path"] == "a.md"
+    assert (tmp_path / "a.md").read_text() == "foo bar"  # untouched
+
+
+def test_find_replace_applies_when_not_dry_run(tmp_path, vault_factory):
+    vault_factory({"a.md": "foo bar", "b.md": "foo again"})
+    result = find_replace_in_vault("foo", "baz", dry_run=False)
+    assert result["dry_run"] is False
+    assert sorted(result["replaced_in"]) == ["a.md", "b.md"]
+    assert result["total_replacements"] == 2
+    assert (tmp_path / "a.md").read_text() == "baz bar"
+    assert (tmp_path / "b.md").read_text() == "baz again"
+
+
+def test_find_replace_regex_mode(tmp_path, vault_factory):
+    vault_factory({"a.md": "task-123 and task-456"})
+    find_replace_in_vault(r"task-\d+", "TASK", mode="regex", dry_run=False)
+    assert (tmp_path / "a.md").read_text() == "TASK and TASK"
+
+
+def test_find_replace_invalid_regex_raises(vault_factory):
+    vault_factory({})
+    with pytest.raises(ValueError, match="Invalid regex"):
+        find_replace_in_vault("(unclosed", "x", mode="regex")
+
+
+def test_find_replace_scoped_to_folder(tmp_path, vault_factory):
+    vault_factory({"Inbox/a.md": "foo", "Archive/b.md": "foo"})
+    result = find_replace_in_vault("foo", "bar", folder="Inbox", dry_run=False)
+    assert result["replaced_in"] == ["Inbox/a.md"]
+    assert (tmp_path / "Archive" / "b.md").read_text() == "foo"
+
+
+def test_find_replace_skips_trash(tmp_path, vault_factory):
+    vault_factory({"a.md": "foo"})
+    (tmp_path / ".trash").mkdir()
+    (tmp_path / ".trash" / "old.md").write_text("foo")
+    result = find_replace_in_vault("foo", "bar", dry_run=False)
+    assert result["replaced_in"] == ["a.md"]
+    assert (tmp_path / ".trash" / "old.md").read_text() == "foo"  # untouched
+
+
+def test_find_replace_skips_read_only(tmp_path, vault_factory, monkeypatch):
+    vault_factory({"a.md": "foo"})
+    monkeypatch.setenv("READ_ONLY", "true")
+    result = find_replace_in_vault("foo", "bar", dry_run=False)
+    assert result["replaced_in"] == []
+    assert result["skipped_write_protected"] == ["a.md"]
+    assert (tmp_path / "a.md").read_text() == "foo"
+
+
+def test_find_replace_updates_index(vault_factory):
+    idx = vault_factory({"a.md": "---\ntags: [old]\n---\n"})
+    find_replace_in_vault("old", "new", dry_run=False, index=idx)
+    assert "a.md" in idx.get_notes_by_tag("new")
+    assert "a.md" not in idx.get_notes_by_tag("old")

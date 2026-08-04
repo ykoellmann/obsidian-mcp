@@ -11,6 +11,7 @@ from ..config import get_config
 from ..domain.index import VaultIndex
 from ..storage.filesystem import validate_path, write_file_atomic
 from ..storage.locking import acquire_lock
+from .read import _is_excluded
 
 
 class WritePermissionError(Exception):
@@ -419,3 +420,117 @@ def move_note(from_path: str, to_path: str, index: VaultIndex | None = None) -> 
             index.update(rel)
 
     return {"from": from_path, "to": to_path, "updated_links_in": updated_files}
+
+
+def _is_writable(rel_path: str) -> bool:
+    """Like _check_write_permission, but returns False instead of raising —
+    used to silently skip out-of-scope files during a vault-wide sweep
+    instead of aborting the whole operation for one file."""
+    try:
+        _check_write_permission(rel_path)
+    except WritePermissionError:
+        return False
+    return True
+
+
+def _match_snippets(raw: str, pattern: re.Pattern, limit: int = 3) -> list[dict]:
+    """Up to `limit` example matches, each with its 1-indexed line number and
+    the full matched line — mirrors search_notes' snippet shape for
+    familiarity, but simpler since there's no relevance scoring here."""
+    snippets = []
+    for i, line in enumerate(raw.splitlines()):
+        if pattern.search(line):
+            snippets.append({"line": i + 1, "text": line})
+            if len(snippets) >= limit:
+                break
+    return snippets
+
+
+def find_replace_in_vault(
+    search: str,
+    replace: str,
+    mode: str = "exact",
+    folder: str = "",
+    dry_run: bool = True,
+    index: VaultIndex | None = None,
+) -> dict:
+    """Find and replace text across every note in the vault (or a subfolder).
+
+    mode: 'exact' (literal substring) | 'regex'.
+    dry_run=True (default) only previews matches, writes nothing — always
+    run once with dry_run=True first to check what would change before
+    setting dry_run=False. .trash/ and EXCLUDE_PATHS are always skipped;
+    files outside WRITE_PATHS (or all files, if the server is READ_ONLY)
+    are silently skipped rather than aborting the whole run, and reported
+    under "skipped_write_protected".
+    """
+    cfg = get_config()
+    base = validate_path(cfg.vault_path, folder) if folder else cfg.vault_path
+
+    if mode == "regex":
+        try:
+            pattern = re.compile(search)
+        except re.error as exc:
+            raise ValueError(f"Invalid regex: {exc}") from exc
+    else:
+        pattern = re.compile(re.escape(search))
+
+    candidates: list[tuple[Path, str, str, int]] = []
+    skipped_write_protected: list[str] = []
+    for md_file in sorted(base.rglob("*.md")):
+        rel = str(md_file.relative_to(cfg.vault_path))
+        if _is_excluded(rel, cfg.exclude_paths) or Path(rel).parts[0] == ".trash":
+            continue
+        try:
+            raw = md_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        count = len(pattern.findall(raw))
+        if count == 0:
+            continue
+        if not _is_writable(rel):
+            skipped_write_protected.append(rel)
+            continue
+        candidates.append((md_file, rel, raw, count))
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "matches": [
+                {"path": rel, "match_count": count, "preview": _match_snippets(raw, pattern)}
+                for _, rel, raw, count in candidates
+            ],
+            "total_matches": sum(count for *_, count in candidates),
+            "skipped_write_protected": skipped_write_protected,
+        }
+
+    if not candidates:
+        return {
+            "dry_run": False,
+            "replaced_in": [],
+            "total_replacements": 0,
+            "skipped_write_protected": skipped_write_protected,
+        }
+
+    locks = [acquire_lock(str(md_file)) for md_file, _, _, _ in candidates]
+    try:
+        replaced_in: list[str] = []
+        total = 0
+        for _md_file, rel, raw, count in candidates:
+            write_file_atomic(cfg.vault_path, rel, pattern.sub(replace, raw))
+            replaced_in.append(rel)
+            total += count
+    finally:
+        for lock in reversed(locks):
+            lock.release()
+
+    if index is not None:
+        for rel in replaced_in:
+            index.update(rel)
+
+    return {
+        "dry_run": False,
+        "replaced_in": replaced_in,
+        "total_replacements": total,
+        "skipped_write_protected": skipped_write_protected,
+    }
