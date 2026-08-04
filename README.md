@@ -64,7 +64,7 @@ VAULT_PATH=/path/to/your/obsidian/vault
 # Optional:
 # READ_ONLY=true            # prevent all writes
 # WRITE_PATHS=Notes/,Inbox/ # restrict writes to specific folders
-# TRANSPORT=stdio           # stdio (default) or sse
+# TRANSPORT=stdio           # stdio (default), http (recommended for network use), or sse (legacy)
 ```
 
 Full list of variables — including `API_KEY`, `PUBLIC_BASE_URL`, and the
@@ -142,9 +142,11 @@ openssl rand -hex 32
 **2. Configure the server** (`docker-compose.yml` or `.env`):
 ```env
 VAULT_PATH=/data/vault
-TRANSPORT=sse
+TRANSPORT=http
 API_KEY=your-generated-key
 ```
+(`sse` also works here, but see the note under Option B — `http` is the
+more robust choice and works identically for this bearer-key setup.)
 
 **3. Start:**
 ```bash
@@ -156,8 +158,8 @@ docker compose up -d   # or: uv run obsidian-remote-mcp
 {
   "mcpServers": {
     "obsidian": {
-      "type": "sse",
-      "url": "https://your-server/sse",
+      "type": "http",
+      "url": "https://your-server/mcp",
       "headers": {
         "Authorization": "Bearer your-generated-key"
       }
@@ -185,7 +187,7 @@ Copy the generated **Client ID** and **Client Secret**.
 **2. Configure the server** (`docker-compose.yml` or `.env`):
 ```env
 VAULT_PATH=/data/vault
-TRANSPORT=sse
+TRANSPORT=http
 PUBLIC_BASE_URL=https://obsidian.example.com   # must match the GitHub callback host
 OAUTH_GITHUB_CLIENT_ID=your-client-id
 OAUTH_GITHUB_CLIENT_SECRET=your-client-secret
@@ -194,6 +196,10 @@ OAUTH_GITHUB_ALLOWED_LOGINS=your-github-username # comma-separated; required, no
 `OAUTH_GITHUB_ALLOWED_LOGINS` is enforced at login: only the listed GitHub
 accounts can authenticate, everyone else is rejected, even with a valid
 GitHub account.
+
+> **Use `TRANSPORT=http`, not `sse`.** `sse` caused OAuth authorization
+> errors with claude.ai specifically (token issued fine server-side, but
+> claude.ai never followed up with a request) — `http` fixed it.
 
 **3. Start:**
 ```bash
