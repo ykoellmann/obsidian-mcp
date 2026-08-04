@@ -29,6 +29,10 @@ class Task:
     text: str
     done: bool
     line: int
+    due: str | None = None          # 📅 YYYY-MM-DD
+    recurrence: str | None = None   # 🔁 freeform, e.g. "every week"
+    priority: str | None = None     # ⏫ high | 🔼 medium | 🔽 low
+    done_date: str | None = None    # ✅ YYYY-MM-DD
 
 
 @dataclass

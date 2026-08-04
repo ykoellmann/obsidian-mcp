@@ -27,6 +27,13 @@ _CALLOUT_RE = re.compile(
 # - [ ] text  or  - [x] text
 _TASK_RE = re.compile(r"^- \[([ xX])\] (.+)$", re.MULTILINE)
 
+# Tasks-plugin emoji markers, extracted out of the task text separately.
+_TASK_DUE_RE = re.compile(r"📅\s*(\d{4}-\d{2}-\d{2})")
+_TASK_DONE_DATE_RE = re.compile(r"✅\s*(\d{4}-\d{2}-\d{2})")
+_TASK_PRIORITY_RE = re.compile(r"[⏫🔼🔽]")
+_TASK_PRIORITY_MAP = {"⏫": "high", "🔼": "medium", "🔽": "low"}
+_TASK_RECURRENCE_RE = re.compile(r"🔁\s*([^\n]*?)(?=\s*[📅✅⏫🔼🔽]|$)")
+
 # key:: value  (Dataview inline fields — must start at line beginning)
 _INLINE_FIELD_RE = re.compile(r"^([\w][\w /-]*)::[ \t]*(.+)$", re.MULTILINE)
 
@@ -115,12 +122,51 @@ def extract_callouts(body: str) -> list[Callout]:
     return callouts
 
 
+def _extract_task_markers(
+    text: str,
+) -> tuple[str, str | None, str | None, str | None, str | None]:
+    """Pull Tasks-plugin emoji markers (due/done-date/priority/recurrence) out
+    of a task line, returning (clean_text, due, recurrence, priority, done_date)."""
+    due = None
+    if m := _TASK_DUE_RE.search(text):
+        due = m.group(1)
+        text = text[: m.start()] + text[m.end():]
+
+    done_date = None
+    if m := _TASK_DONE_DATE_RE.search(text):
+        done_date = m.group(1)
+        text = text[: m.start()] + text[m.end():]
+
+    priority = None
+    if m := _TASK_PRIORITY_RE.search(text):
+        priority = _TASK_PRIORITY_MAP[m.group(0)]
+        text = text[: m.start()] + text[m.end():]
+
+    recurrence = None
+    if m := _TASK_RECURRENCE_RE.search(text):
+        recurrence = m.group(1).strip() or None
+        text = text[: m.start()] + text[m.end():]
+
+    return re.sub(r"[ \t]{2,}", " ", text).strip(), due, recurrence, priority, done_date
+
+
 def extract_tasks(body: str) -> list[Task]:
     tasks: list[Task] = []
     for m in _TASK_RE.finditer(body):
         line_num = body[: m.start()].count("\n") + 1
         done = m.group(1).lower() == "x"
-        tasks.append(Task(text=m.group(2).strip(), done=done, line=line_num))
+        text, due, recurrence, priority, done_date = _extract_task_markers(m.group(2).strip())
+        tasks.append(
+            Task(
+                text=text,
+                done=done,
+                line=line_num,
+                due=due,
+                recurrence=recurrence,
+                priority=priority,
+                done_date=done_date,
+            )
+        )
     return tasks
 
 

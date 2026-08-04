@@ -61,7 +61,15 @@ def read_note(path: str) -> dict:
             for c in note.callouts
         ],
         "tasks": [
-            {"text": t.text, "done": t.done, "line": t.line}
+            {
+                "text": t.text,
+                "done": t.done,
+                "line": t.line,
+                "due": t.due,
+                "recurrence": t.recurrence,
+                "priority": t.priority,
+                "done_date": t.done_date,
+            }
             for t in note.tasks
         ],
         "inline_fields": note.inline_fields,

@@ -201,7 +201,12 @@ Reference with `[[Note^my-block-id]]`. IDs: lowercase letters, digits, hyphens.
 ```markdown
 - [ ] Open task
 - [x] Done task
+- [ ] Tasks-plugin syntax: 📅 2026-08-10 due, 🔁 every week recurring, ⏫/🔼/🔽 priority
+- [x] Done with a date ✅ 2026-08-01
 ```
+Emoji markers are parsed out of `text` into their own fields (`due`, `recurrence`,
+`priority`, `done_date`) by `read_note_tool`/`get_tasks_tool` — `text` itself
+stays clean of the markers.
 
 ### Callouts
 ```markdown
@@ -579,11 +584,17 @@ def get_tasks_tool(
     status: str = "open",
     folder: str = "",
     tag: str | None = None,
+    due_before: str | None = None,
+    due_after: str | None = None,
 ) -> list[dict]:
     """Return tasks from across the vault.
     status: 'open' | 'done' | 'all'. Optionally filter by folder or tag.
-    Returns [{text, done, source, line}]."""
-    return get_tasks(_index, status=status, folder=folder, tag=tag)
+    due_before/due_after: 'YYYY-MM-DD', inclusive; matches the Tasks-plugin
+    📅 due date (tasks without one never match either filter).
+    Parses Tasks-plugin emoji markers: 📅 due, ✅ done date, 🔁 recurrence,
+    ⏫/🔼/🔽 priority (high/medium/low) — stripped from `text` into their own fields.
+    Returns [{text, done, source, line, due, recurrence, priority, done_date}]."""
+    return get_tasks(_index, status=status, folder=folder, tag=tag, due_before=due_before, due_after=due_after)
 
 
 @mcp.tool()

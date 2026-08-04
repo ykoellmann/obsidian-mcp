@@ -142,7 +142,11 @@ def get_tasks(
     status: str = "open",
     folder: str = "",
     tag: str | None = None,
+    due_before: str | None = None,
+    due_after: str | None = None,
 ) -> list[dict]:
+    """due_before/due_after: 'YYYY-MM-DD', inclusive, compared against each
+    task's 📅 due date (tasks without a due date never match either filter)."""
     cfg = get_config()
     all_notes = index.get_all_notes()
     results: list[dict] = []
@@ -159,11 +163,21 @@ def get_tasks(
                     continue
                 if status == "done" and not task.done:
                     continue
+                if (due_before or due_after) and not task.due:
+                    continue
+                if due_before and task.due > due_before:
+                    continue
+                if due_after and task.due < due_after:
+                    continue
                 results.append({
                     "text": task.text,
                     "done": task.done,
                     "source": note_path,
                     "line": task.line,
+                    "due": task.due,
+                    "recurrence": task.recurrence,
+                    "priority": task.priority,
+                    "done_date": task.done_date,
                 })
         except Exception:
             pass

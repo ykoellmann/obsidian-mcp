@@ -126,6 +126,45 @@ def test_get_tasks_all(vault_factory):
     assert len(all_tasks) == 2
 
 
+def test_get_tasks_includes_marker_fields(vault_factory):
+    idx = vault_factory({"tasks.md": "- [ ] Ship it ⏫ 📅 2026-08-10 🔁 every week\n"})
+    task = get_tasks(idx, status="open")[0]
+    assert task["due"] == "2026-08-10"
+    assert task["priority"] == "high"
+    assert task["recurrence"] == "every week"
+    assert task["done_date"] is None
+
+
+def test_get_tasks_due_before_filters_out_later_and_unset(vault_factory):
+    idx = vault_factory({
+        "tasks.md": (
+            "- [ ] Due soon 📅 2026-08-05\n"
+            "- [ ] Due later 📅 2026-09-01\n"
+            "- [ ] No due date\n"
+        )
+    })
+    results = get_tasks(idx, status="open", due_before="2026-08-10")
+    assert [t["text"] for t in results] == ["Due soon"]
+
+
+def test_get_tasks_due_after_filters_out_earlier_and_unset(vault_factory):
+    idx = vault_factory({
+        "tasks.md": (
+            "- [ ] Overdue 📅 2026-07-01\n"
+            "- [ ] Upcoming 📅 2026-09-01\n"
+            "- [ ] No due date\n"
+        )
+    })
+    results = get_tasks(idx, status="open", due_after="2026-08-01")
+    assert [t["text"] for t in results] == ["Upcoming"]
+
+
+def test_get_tasks_due_range_is_inclusive(vault_factory):
+    idx = vault_factory({"tasks.md": "- [ ] Exactly on date 📅 2026-08-10\n"})
+    results = get_tasks(idx, status="open", due_before="2026-08-10", due_after="2026-08-10")
+    assert len(results) == 1
+
+
 # ── get_tag_tree ──────────────────────────────────────────────────────────
 
 def test_tag_tree_structure(vault_factory):

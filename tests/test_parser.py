@@ -200,6 +200,70 @@ def test_tasks_empty_when_none():
     assert note.tasks == []
 
 
+# ── Tasks-plugin emoji markers ───────────────────────────────────────────
+
+def test_task_due_date_extracted():
+    note = parse_note("- [ ] Buy milk 📅 2026-08-10")
+    task = note.tasks[0]
+    assert task.text == "Buy milk"
+    assert task.due == "2026-08-10"
+
+
+def test_task_done_date_extracted():
+    note = parse_note("- [x] Pay rent ✅ 2026-08-01")
+    task = note.tasks[0]
+    assert task.text == "Pay rent"
+    assert task.done_date == "2026-08-01"
+
+
+def test_task_priority_high():
+    note = parse_note("- [ ] Urgent fix ⏫")
+    assert note.tasks[0].text == "Urgent fix"
+    assert note.tasks[0].priority == "high"
+
+
+def test_task_priority_medium():
+    note = parse_note("- [ ] Somewhat urgent 🔼")
+    assert note.tasks[0].priority == "medium"
+
+
+def test_task_priority_low():
+    note = parse_note("- [ ] Whenever 🔽")
+    assert note.tasks[0].priority == "low"
+
+
+def test_task_recurrence_extracted():
+    note = parse_note("- [ ] Weekly sync 🔁 every week")
+    task = note.tasks[0]
+    assert task.text == "Weekly sync"
+    assert task.recurrence == "every week"
+
+
+def test_task_recurrence_stops_before_next_marker():
+    note = parse_note("- [ ] Weekly sync 🔁 every week 📅 2026-08-15")
+    task = note.tasks[0]
+    assert task.recurrence == "every week"
+    assert task.due == "2026-08-15"
+
+
+def test_task_combined_markers():
+    note = parse_note("- [ ] Ship release ⏫ 📅 2026-08-05 🔁 every month")
+    task = note.tasks[0]
+    assert task.text == "Ship release"
+    assert task.priority == "high"
+    assert task.due == "2026-08-05"
+    assert task.recurrence == "every month"
+
+
+def test_task_without_markers_has_none_fields():
+    note = parse_note("- [ ] Plain task")
+    task = note.tasks[0]
+    assert task.due is None
+    assert task.recurrence is None
+    assert task.priority is None
+    assert task.done_date is None
+
+
 # ── wikilinks not broken by new regexes ──────────────────────────────────
 
 def test_wikilinks_unaffected_by_block_syntax():
