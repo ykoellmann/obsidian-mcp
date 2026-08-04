@@ -641,6 +641,27 @@ def _check_scoped_token(request: Request, cfg, method: str, path: str) -> bool:
     return verify_attachment_token(cfg.api_key, method, path, exp, sig)
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health_route(request: Request) -> Response:
+    """Unauthenticated liveness/readiness check for Docker HEALTHCHECK,
+    uptime monitors, etc. Returns no vault content, so no auth is required.
+
+    Returns {status: "starting"|"ok", vault_path, index_ready}.
+    503 while the server hasn't finished VaultIndex._cfg/_index setup yet
+    (main() hasn't run), 200 once ready — index_ready itself may still be
+    False right after startup while the initial index build is in progress.
+    """
+    if _cfg is None or _index is None:
+        return JSONResponse({"status": "starting"}, status_code=503)
+    return JSONResponse(
+        {
+            "status": "ok",
+            "vault_path": str(_cfg.vault_path),
+            "index_ready": _index.is_ready(),
+        }
+    )
+
+
 @mcp.custom_route("/attachments/{path:path}", methods=["PUT", "GET"])
 async def attachment_route(request: Request) -> Response:
     """Direct binary upload/download, outside the MCP tool-call channel.

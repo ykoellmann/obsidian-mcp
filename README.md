@@ -122,6 +122,8 @@ The `docker-compose.yml` pulls the pre-built image from GHCR — no cloning or b
 
 If you enable GitHub OAuth (see [Option B](#option-b-github-oauth-claudeai-webmobile-custom-connector)), uncomment the `fastmcp-data` volume in `docker-compose.yml` so logins survive container restarts.
 
+The image has a built-in `HEALTHCHECK` against `GET /health` (unauthenticated, no vault content — just `{status, vault_path, index_ready}`), visible in `docker ps`/`docker compose ps`. Only meaningful for `TRANSPORT=http`/`sse`; a no-op for `stdio`.
+
 ## Remote Setup (Recommended)
 
 Run obsidian-mcp on a server and connect to it remotely. Network transports
