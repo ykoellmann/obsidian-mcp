@@ -14,7 +14,22 @@ services:
       - EXCLUDE_PATHS=${EXCLUDE_PATHS:-private,.obsidian}
       - API_KEY=${API_KEY:-}
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
+      # Optional second auth variant for the claude.ai Custom Connector (OAuth-only).
+      # Works alongside API_KEY — see .env.example for full setup instructions.
+      - OAUTH_GITHUB_CLIENT_ID=${OAUTH_GITHUB_CLIENT_ID:-}
+      - OAUTH_GITHUB_CLIENT_SECRET=${OAUTH_GITHUB_CLIENT_SECRET:-}
+      - OAUTH_GITHUB_ALLOWED_LOGINS=${OAUTH_GITHUB_ALLOWED_LOGINS:-}
+      # Only needed if OAUTH_GITHUB_* above is set: persists OAuth logins
+      # across container restarts (mount fastmcp-data below to use it).
+      - FASTMCP_HOME=${FASTMCP_HOME:-}
     volumes:
       - ${HOST_VAULT_PATH}:/vault
+      # Uncomment if OAUTH_GITHUB_* is configured, to keep claude.ai logged in
+      # across container restarts:
+      # - fastmcp-data:/data/fastmcp
     ports:
       - "8000:8000"
+
+# Uncomment alongside the volume above:
+# volumes:
+#   fastmcp-data:

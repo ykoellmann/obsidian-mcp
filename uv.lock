@@ -650,7 +650,7 @@ wheels = [
 
 [[package]]
 name = "obsidian-remote-mcp"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
@@ -669,7 +669,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastmcp", specifier = ">=2.0" },
+    { name = "fastmcp", specifier = ">=3.4.4" },
     { name = "filelock", specifier = ">=3.13" },
     { name = "python-frontmatter", specifier = ">=1.1" },
     { name = "pyyaml", specifier = ">=6.0" },

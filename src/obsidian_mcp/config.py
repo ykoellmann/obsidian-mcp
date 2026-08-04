@@ -20,6 +20,9 @@ class Config:
     port: int
     api_key: str
     public_base_url: str
+    oauth_github_client_id: str
+    oauth_github_client_secret: str
+    oauth_github_allowed_logins: list[str]
 
     def __init__(self) -> None:
         raw_vault = os.environ.get("VAULT_PATH", "")
@@ -43,9 +46,35 @@ class Config:
         self.api_key = os.environ.get("API_KEY") or os.environ.get("OBSIDIAN_MCP_API_KEY") or ""
         self.public_base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
-        if self.transport != "stdio" and not self.api_key:
+        self.oauth_github_client_id = os.environ.get("OAUTH_GITHUB_CLIENT_ID", "")
+        self.oauth_github_client_secret = os.environ.get("OAUTH_GITHUB_CLIENT_SECRET", "")
+        raw_logins = os.environ.get("OAUTH_GITHUB_ALLOWED_LOGINS", "")
+        self.oauth_github_allowed_logins = [
+            login.strip().lower() for login in raw_logins.split(",") if login.strip()
+        ]
+        oauth_configured = bool(self.oauth_github_client_id or self.oauth_github_client_secret)
+        if oauth_configured:
+            if not (self.oauth_github_client_id and self.oauth_github_client_secret):
+                raise ConfigError(
+                    "OAUTH_GITHUB_CLIENT_ID and OAUTH_GITHUB_CLIENT_SECRET must both be set "
+                    "to enable GitHub OAuth"
+                )
+            if not self.oauth_github_allowed_logins:
+                raise ConfigError(
+                    "OAUTH_GITHUB_ALLOWED_LOGINS is required when GitHub OAuth is configured "
+                    "(comma-separated GitHub usernames) — without it, any GitHub account could "
+                    "authenticate and get full access to the vault"
+                )
+            if not self.public_base_url:
+                raise ConfigError(
+                    "PUBLIC_BASE_URL is required when GitHub OAuth is configured "
+                    "(used as the OAuth callback base URL, e.g. https://your-server.com)"
+                )
+
+        if self.transport != "stdio" and not self.api_key and not oauth_configured:
             raise ConfigError(
-                f"API_KEY is required when TRANSPORT={self.transport} "
+                f"API_KEY or GitHub OAuth (OAUTH_GITHUB_CLIENT_ID/SECRET) is required when "
+                f"TRANSPORT={self.transport} "
                 "(the server would otherwise be reachable without authentication)"
             )
 

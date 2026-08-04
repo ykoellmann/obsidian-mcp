@@ -31,6 +31,7 @@ The intended setup is to host obsidian-mcp on a server or NAS where your vault i
 - **Canvas** — read, create, and patch Obsidian Canvas (`.canvas`) files
 - **Kanban** — read, create, and manipulate Obsidian Kanban boards (columns and cards)
 - **Attachments** — list, read (text or base64), and add binary files
+- **Two auth variants** — a static API key (Claude Code, Desktop, curl) and, optionally, GitHub OAuth (claude.ai Web/Mobile Custom Connector) — usable independently or at the same time
 - **Templates** — render Obsidian templates with built-in (`{{date}}`, `{{title}}`, …) and custom variables
 - **MCP Resources** — expose vault notes, stats, and tags as MCP resources for direct context injection
 
@@ -65,6 +66,11 @@ VAULT_PATH=/path/to/your/obsidian/vault
 # WRITE_PATHS=Notes/,Inbox/ # restrict writes to specific folders
 # TRANSPORT=stdio           # stdio (default) or sse
 ```
+
+Full list of variables — including `API_KEY`, `PUBLIC_BASE_URL`, and the
+`OAUTH_GITHUB_*` variables for the optional second auth variant — is
+documented with inline comments in `.env.example`; see [Remote Setup](#remote-setup-recommended)
+for the two auth variants in detail.
 
 ## Usage with Claude Code
 
@@ -114,9 +120,19 @@ docker compose up -d
 
 The `docker-compose.yml` pulls the pre-built image from GHCR — no cloning or building required. To build locally instead, swap `image:` for `build: .` in the compose file.
 
+If you enable GitHub OAuth (see [Option B](#option-b-github-oauth-claudeai-webmobile-custom-connector)), uncomment the `fastmcp-data` volume in `docker-compose.yml` so logins survive container restarts.
+
 ## Remote Setup (Recommended)
 
-Run obsidian-mcp on a server and connect to it remotely via SSE transport.
+Run obsidian-mcp on a server and connect to it remotely. Network transports
+(`sse`/`streamable-http`) need at least one of the two auth variants below —
+**API key** and **GitHub OAuth** are independent and can be used at the same
+time: keep the API key for Claude Code/Desktop/curl while adding OAuth only
+for claude.ai, or use either one alone.
+
+> **Security:** Always put a TLS-terminating reverse proxy (e.g. [Caddy](https://caddyserver.com)) in front when exposing to the internet — required for GitHub OAuth callbacks in particular, since GitHub rejects plain `http://` callback URLs except on `localhost`. `API_KEY`/OAuth are not needed for stdio transport (local use only).
+
+### Option A: API key (Claude Code, Claude Desktop, curl, mcp-remote)
 
 **1. Generate an API key:**
 ```bash
@@ -150,7 +166,50 @@ docker compose up -d   # or: uv run obsidian-remote-mcp
 }
 ```
 
-> **Security:** Always put a TLS-terminating reverse proxy (e.g. [Caddy](https://caddyserver.com)) in front when exposing to the internet. `API_KEY` is not needed for stdio transport (local use only).
+### Option B: GitHub OAuth (claude.ai Web/Mobile Custom Connector)
+
+claude.ai's "Custom Connector" UI only has fields for OAuth (Authorization
+URL, Token URL, Client ID/Secret) — no field for a bearer token or custom
+header. obsidian-mcp handles the whole OAuth protocol for you (discovery
+endpoints, PKCE, token exchange); you only ever hand claude.ai your server's
+URL.
+
+**1. Create a GitHub OAuth App:** GitHub → Settings → Developer settings →
+[OAuth Apps](https://github.com/settings/developers) → New OAuth App.
+- Homepage URL: your server's public URL (e.g. `https://obsidian.example.com`)
+- Authorization callback URL: the same URL + `/auth/callback`
+  (e.g. `https://obsidian.example.com/auth/callback`)
+
+Copy the generated **Client ID** and **Client Secret**.
+
+**2. Configure the server** (`docker-compose.yml` or `.env`):
+```env
+VAULT_PATH=/data/vault
+TRANSPORT=sse
+PUBLIC_BASE_URL=https://obsidian.example.com   # must match the GitHub callback host
+OAUTH_GITHUB_CLIENT_ID=your-client-id
+OAUTH_GITHUB_CLIENT_SECRET=your-client-secret
+OAUTH_GITHUB_ALLOWED_LOGINS=your-github-username # comma-separated; required, no "allow anyone" fallback
+```
+`OAUTH_GITHUB_ALLOWED_LOGINS` is enforced at login: only the listed GitHub
+accounts can authenticate, everyone else is rejected, even with a valid
+GitHub account.
+
+**3. Start:**
+```bash
+docker compose up -d   # or: uv run obsidian-remote-mcp
+```
+
+**4. Connect from claude.ai:** Settings → Connectors → Add Custom Connector,
+and enter just the server URL (`https://obsidian.example.com/mcp`). claude.ai
+discovers everything else (`/.well-known/oauth-authorization-server`, PKCE,
+etc.) automatically and redirects you to GitHub to log in on first connect.
+
+> **Persistence in Docker:** OAuth client registrations and tokens are stored
+> under FastMCP's own data directory, which is *not* inside the vault volume
+> by default. Without a persistent mount there, every container restart logs
+> claude.ai out and forces re-authentication. Set `FASTMCP_HOME` to a mounted
+> path (see `docker-compose.yml`) to avoid that.
 
 Keep the vault synced on the server with Syncthing, git+cron, rclone, or Obsidian Sync — obsidian-mcp picks up changes automatically via its file watcher.
 
@@ -220,7 +279,7 @@ src/obsidian_mcp/
 ## Development
 
 ```bash
-uv run pytest                  # run tests (238 tests)
+uv run pytest                  # run tests (268 tests)
 uv run ruff check src/ tests/  # lint
 ```
 

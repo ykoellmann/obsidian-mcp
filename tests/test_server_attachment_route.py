@@ -10,6 +10,7 @@ import time
 
 import httpx
 import pytest
+from fastmcp.server.auth import AccessToken, TokenVerifier
 
 from obsidian_mcp import server
 from obsidian_mcp.tools.attachments import create_attachment_token
@@ -117,6 +118,68 @@ async def test_download_route_rejects_wrong_key(tmp_path, vault_factory, monkeyp
         )
 
     assert resp.status_code == 401
+
+
+# ── OAuth-style tokens (mcp.auth), independent of the static API_KEY ─────────
+
+class _FakeOAuthVerifier(TokenVerifier):
+    """Stands in for GitHubProvider/MultiAuth without hitting the network."""
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if token == "valid-oauth-token":
+            return AccessToken(token=token, client_id="oauth-user", scopes=[])
+        return None
+
+
+@pytest.mark.asyncio
+async def test_upload_route_accepts_oauth_token(tmp_path, vault_factory, monkeypatch):
+    vault_factory({})
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.setattr(server.mcp, "auth", _FakeOAuthVerifier())
+
+    async with _client() as client:
+        resp = await client.put(
+            "/attachments/docs/file.pdf",
+            content=b"PDF-CONTENT",
+            headers={"Authorization": "Bearer valid-oauth-token"},
+        )
+
+    assert resp.status_code == 200
+    assert (tmp_path / "docs" / "file.pdf").read_bytes() == b"PDF-CONTENT"
+
+
+@pytest.mark.asyncio
+async def test_upload_route_rejects_invalid_oauth_token(tmp_path, vault_factory, monkeypatch):
+    vault_factory({})
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.setattr(server.mcp, "auth", _FakeOAuthVerifier())
+
+    async with _client() as client:
+        resp = await client.put(
+            "/attachments/docs/file.pdf",
+            content=b"PDF-CONTENT",
+            headers={"Authorization": "Bearer not-a-real-token"},
+        )
+
+    assert resp.status_code == 401
+    assert not (tmp_path / "docs" / "file.pdf").exists()
+
+
+@pytest.mark.asyncio
+async def test_upload_route_accepts_api_key_alongside_oauth(tmp_path, vault_factory, monkeypatch):
+    """Both auth variants must work at the same time, not either/or."""
+    vault_factory({})
+    monkeypatch.setenv("API_KEY", "test-key")
+    monkeypatch.setattr(server.mcp, "auth", _FakeOAuthVerifier())
+
+    async with _client() as client:
+        resp = await client.put(
+            "/attachments/docs/file.pdf",
+            content=b"PDF-CONTENT",
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+    assert resp.status_code == 200
 
 
 # ── scoped tokens (no master key exposed) ────────────────────────────────────

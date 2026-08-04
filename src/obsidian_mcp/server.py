@@ -9,7 +9,8 @@ import os
 import threading
 
 from fastmcp import FastMCP
-from fastmcp.server.auth import AccessToken, AuthProvider
+from fastmcp.server.auth import AccessToken, AuthProvider, MultiAuth, TokenVerifier
+from fastmcp.server.auth.providers.github import GitHubProvider
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -235,7 +236,7 @@ def _load_instructions() -> str:
     return _DEFAULT_INSTRUCTIONS
 
 
-class _APIKeyAuthProvider(AuthProvider):
+class _APIKeyAuthProvider(TokenVerifier):
     """Simple static API-key auth. Clients must send: Authorization: Bearer <key>."""
 
     def __init__(self, api_key: str) -> None:
@@ -249,11 +250,75 @@ class _APIKeyAuthProvider(AuthProvider):
         return None
 
 
-def _build_auth() -> _APIKeyAuthProvider | None:
+class _RestrictedGitHubVerifier(TokenVerifier):
+    """Wraps GitHubProvider's token validator to reject logins not on an allowlist.
+
+    Runs once per GitHub token exchange (not per request) — GitHubProvider
+    itself has no concept of restricting which GitHub account may authenticate,
+    so any account could otherwise get full vault access.
+    """
+
+    def __init__(self, base: TokenVerifier, allowed_logins: list[str]) -> None:
+        super().__init__()
+        self._base = base
+        self._allowed_logins = set(allowed_logins)
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        result = await self._base.verify_token(token)
+        if result is None:
+            return None
+        login = str((result.claims or {}).get("login", "")).lower()
+        if login not in self._allowed_logins:
+            logger.warning("Rejected GitHub login not on allowlist: %s", login or "<unknown>")
+            return None
+        return result
+
+
+def _build_auth() -> AuthProvider | None:
+    # Reads os.environ directly (not get_config()) so this module can still be
+    # imported without VAULT_PATH set (e.g. during testing or linting).
+    # Config.__init__ performs the actual validation of these values later.
     key = os.environ.get("API_KEY") or os.environ.get("OBSIDIAN_MCP_API_KEY")
-    if key:
+    api_key_verifier = _APIKeyAuthProvider(key) if key else None
+
+    client_id = os.environ.get("OAUTH_GITHUB_CLIENT_ID")
+    client_secret = os.environ.get("OAUTH_GITHUB_CLIENT_SECRET")
+    github_provider = None
+    if client_id and client_secret:
+        allowed_logins = [
+            login.strip().lower()
+            for login in os.environ.get("OAUTH_GITHUB_ALLOWED_LOGINS", "").split(",")
+            if login.strip()
+        ]
+        base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+
+        # Client registrations + encrypted tokens persist under FastMCP's own
+        # data directory (FASTMCP_HOME, defaults to a platformdirs path).
+        # Mount that directory as a volume in Docker, or set FASTMCP_HOME to a
+        # path inside an existing mount, or logins won't survive a restart.
+        github_provider = GitHubProvider(
+            client_id=client_id,
+            client_secret=client_secret,
+            base_url=base_url,
+        )
+        # Relies on OAuthProxy's private _token_validator attribute — the only
+        # hook that runs at token-exchange time, before an allowlist check
+        # could otherwise happen. May break on a fastmcp upgrade; if it does,
+        # this will raise AttributeError loudly at startup rather than
+        # silently allowing any GitHub account through.
+        github_provider._token_validator = _RestrictedGitHubVerifier(
+            github_provider._token_validator, allowed_logins
+        )
+        logger.info("GitHub OAuth enabled (allowed logins: %s)", ", ".join(allowed_logins))
+
+    if github_provider and api_key_verifier:
+        logger.info("API key auth enabled (alongside GitHub OAuth)")
+        return MultiAuth(server=github_provider, verifiers=[api_key_verifier])
+    if github_provider:
+        return github_provider
+    if api_key_verifier:
         logger.info("API key auth enabled")
-        return _APIKeyAuthProvider(key)
+        return api_key_verifier
     return None
 
 
@@ -549,11 +614,15 @@ def create_attachment_token_tool(path: str, method: str = "PUT", expires_in: int
     return create_attachment_token(path, method=method, expires_in=expires_in)
 
 
-def _check_bearer_token(request: Request, cfg) -> bool:
-    if not cfg.api_key:
-        return True
+async def _check_bearer_token(request: Request, cfg) -> bool:
     token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
-    return hmac.compare_digest(token, cfg.api_key)
+    if not token:
+        return False
+    if cfg.api_key and hmac.compare_digest(token, cfg.api_key):
+        return True
+    if mcp.auth is not None:
+        return await mcp.auth.verify_token(token) is not None
+    return False
 
 
 def _check_scoped_token(request: Request, cfg, method: str, path: str) -> bool:
@@ -574,9 +643,10 @@ async def attachment_route(request: Request) -> Response:
     inside a tool call/result, which forces the bytes through whatever
     client/model is driving the MCP session — expensive and risky for large
     or many files. This route lets a client PUT/GET raw bytes straight to/from
-    disk instead. Accepts either the server's bearer token or a short-lived
-    scoped token from create_attachment_token_tool (?exp=&sig=), so callers
-    never need to be handed the long-lived master key.
+    disk instead. Accepts the server's static bearer token, a valid GitHub
+    OAuth access token (if configured), or a short-lived scoped token from
+    create_attachment_token_tool (?exp=&sig=), so callers never need to be
+    handed the long-lived master key.
 
     Usage:
         curl -X PUT --data-binary @file.png \\
@@ -586,7 +656,7 @@ async def attachment_route(request: Request) -> Response:
     """
     cfg = get_config()
     path = request.path_params["path"]
-    authorized = _check_bearer_token(request, cfg) or _check_scoped_token(
+    authorized = await _check_bearer_token(request, cfg) or _check_scoped_token(
         request, cfg, request.method, path
     )
     if not authorized:
