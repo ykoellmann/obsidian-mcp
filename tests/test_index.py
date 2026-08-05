@@ -68,6 +68,27 @@ def test_exclude_paths(tmp_path):
     assert "private/secret.md" not in idx.get_backlinks("other")
 
 
+def test_excalidraw_files_excluded_from_build(tmp_path):
+    (tmp_path / "drawing.excalidraw.md").write_text(
+        '---\nexcalidraw-plugin: parsed\n---\n'
+        '## Drawing\n```json\n{"elements": [{"backgroundColor": "#ffffff"}]}\n```\n'
+    )
+    idx = VaultIndex(tmp_path)
+    idx.build()
+    assert "drawing.excalidraw.md" not in idx.get_all_notes()
+    assert "ffffff" not in idx.get_all_tags_with_counts()
+
+
+def test_excalidraw_files_excluded_from_update(tmp_path):
+    (tmp_path / "drawing.excalidraw.md").write_text(
+        '---\nexcalidraw-plugin: parsed\n---\n## Drawing\n```json\n{}\n```\n'
+    )
+    idx = VaultIndex(tmp_path)
+    idx.build()
+    idx.update("drawing.excalidraw.md")
+    assert "drawing.excalidraw.md" not in idx.get_all_notes()
+
+
 # ── alias resolution ──────────────────────────────────────────────────────
 
 def test_alias_resolution(tmp_path):

@@ -27,6 +27,12 @@ from .tools.attachments import (
     write_attachment_bytes,
 )
 from .tools.canvas import list_canvases, patch_canvas, read_canvas, write_canvas
+from .tools.excalidraw import (
+    list_excalidraw,
+    patch_excalidraw,
+    read_excalidraw,
+    write_excalidraw,
+)
 from .tools.folders import (
     create_folder,
     delete_folder,
@@ -148,6 +154,11 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 - `read_kanban_tool(path)`, `create_kanban_board_tool(path, columns)`
 - `add_kanban_card_tool(path, column, text, done)`, `move_kanban_card_tool(...)`, `delete_kanban_card_tool(...)`
 
+### Excalidraw (*.excalidraw.md, Obsidian Excalidraw plugin)
+- `list_excalidraw_tool()`, `read_excalidraw_tool(path)` — returns {path, elements, app_state, files}
+- `write_excalidraw_tool(path, elements, app_state)` — element types: rectangle|ellipse|text|arrow|freedraw|...
+- `patch_excalidraw_tool(path, add_elements, update_elements, delete_element_ids)`
+
 ## MCP Resources
 - `vault://notes/{path}` — raw note content as context
 - `vault://stats` — live vault statistics
@@ -233,6 +244,13 @@ Always use the kanban tools instead of editing raw Markdown.
 
 ### Canvas
 `.canvas` files: JSON with `nodes` (text/file/group/link) and `edges`. IDs auto-generated.
+
+### Excalidraw
+`*.excalidraw.md` files: frontmatter `excalidraw-plugin: parsed`, drawing scene
+(`elements`/`appState`/`files`) embedded as JSON in a `## Drawing` code block.
+Always use the excalidraw tools instead of editing raw Markdown — the
+surrounding file structure (warning banner, `## Text Elements` section) is
+regenerated on every write and not meaningful to edit by hand.
 
 ### Dataview
 Only `key:: value` inline fields are parsed server-side. DQL block queries are Obsidian-app-only.
@@ -846,6 +864,53 @@ def patch_canvas_tool(
         delete_node_ids=delete_node_ids,
         add_edges=add_edges,
         delete_edge_ids=delete_edge_ids,
+    )
+
+
+# ── Excalidraw ────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def list_excalidraw_tool() -> list[str]:
+    """List all Obsidian Excalidraw (*.excalidraw.md) files in the vault."""
+    return list_excalidraw()
+
+
+@mcp.tool()
+def read_excalidraw_tool(path: str) -> dict:
+    """Read an Obsidian Excalidraw file.
+    Returns {path, elements, app_state, files}."""
+    return read_excalidraw(path)
+
+
+@mcp.tool()
+def write_excalidraw_tool(
+    path: str,
+    elements: list[dict] | None = None,
+    app_state: dict | None = None,
+) -> dict:
+    """Create or fully overwrite an Excalidraw file.
+    Element fields: type ('rectangle'|'ellipse'|'text'|'arrow'|'freedraw'|...), x, y,
+    width, height. Element 'id' is auto-generated if omitted.
+    Returns {path, status, elements}."""
+    return write_excalidraw(path, elements=elements, app_state=app_state, index=_index)
+
+
+@mcp.tool()
+def patch_excalidraw_tool(
+    path: str,
+    add_elements: list[dict] | None = None,
+    update_elements: list[dict] | None = None,
+    delete_element_ids: list[str] | None = None,
+) -> dict:
+    """Atomically update an existing Excalidraw file without rewriting the whole file.
+    update_elements: each dict must include 'id'.
+    Returns {path, status, elements}."""
+    return patch_excalidraw(
+        path,
+        add_elements=add_elements,
+        update_elements=update_elements,
+        delete_element_ids=delete_element_ids,
+        index=_index,
     )
 
 

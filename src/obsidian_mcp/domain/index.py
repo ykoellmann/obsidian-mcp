@@ -55,7 +55,7 @@ class VaultIndex:
 
     def update(self, path: str) -> None:
         full = self._vault_root / path
-        if not full.exists():
+        if not full.exists() or self._is_excluded(full):
             self.remove(path)
             return
         try:
@@ -195,4 +195,9 @@ class VaultIndex:
 
     def _is_excluded(self, path: Path) -> bool:
         parts = path.relative_to(self._vault_root).parts
-        return any(part in self._exclude_paths for part in parts)
+        if any(part in self._exclude_paths for part in parts):
+            return True
+        # Excalidraw files are *.md so they'd otherwise get tag/wikilink-parsed
+        # as regular notes — their body is an embedded JSON scene, not prose,
+        # and things like "#ffffff" hex colors would show up as bogus tags.
+        return path.name.endswith(".excalidraw.md")

@@ -29,6 +29,7 @@ The intended setup is to host obsidian-mcp on a server or NAS where your vault i
 - **Dataview-like queries** — filter notes by tags, status, frontmatter fields, or inline fields (`key:: value`)
 - **Periodic Notes** — read/preview daily, weekly, monthly, quarterly, yearly journal notes from templates
 - **Canvas** — read, create, and patch Obsidian Canvas (`.canvas`) files
+- **Excalidraw** — read, create, and patch Obsidian Excalidraw (`*.excalidraw.md`) drawings
 - **Kanban** — read, create, and manipulate Obsidian Kanban boards (columns and cards)
 - **Attachments** — list, read (text or base64), and add binary files
 - **Two auth variants** — a static API key (Claude Code, Desktop, curl) and, optionally, GitHub OAuth (claude.ai Web/Mobile Custom Connector) — usable independently or at the same time
@@ -254,6 +255,7 @@ The server loads this file at startup and sends it to the AI as system instructi
 | **Tags** | `get_notes_by_tag`, `get_tag_tree`, `list_all_tags` |
 | **Periodic** | `get_daily_note`, `get_periodic_note` |
 | **Canvas** | `list_canvases`, `read_canvas`, `write_canvas`, `patch_canvas` |
+| **Excalidraw** | `list_excalidraw`, `read_excalidraw`, `write_excalidraw`, `patch_excalidraw` |
 | **Kanban** | `read_kanban`, `create_kanban_board`, `add_kanban_card`, `move_kanban_card`, `delete_kanban_card` |
 | **Attachments** | `list_attachments`, `read_attachment`, `add_attachment` |
 | **Templates** | `list_templates`, `create_from_template` |
@@ -280,15 +282,17 @@ src/obsidian_mcp/
     ├── query.py       # graph tools, task aggregation, periodic notes, query_notes
     ├── folders.py     # folder management
     ├── canvas.py      # Obsidian Canvas (.canvas JSON) tools
+    ├── excalidraw.py  # Obsidian Excalidraw (*.excalidraw.md) tools
     ├── kanban.py      # Obsidian Kanban plugin tools
     ├── attachments.py # binary and text attachment handling
-    └── templates.py   # template rendering with variable substitution
+    ├── templates.py   # template rendering with variable substitution
+    └── prompts.py     # MCP Prompts (weekly_review, daily_note)
 ```
 
 ## Development
 
 ```bash
-uv run pytest                  # run tests (268 tests)
+uv run pytest                  # run tests (330 tests)
 uv run ruff check src/ tests/  # lint
 ```
 
