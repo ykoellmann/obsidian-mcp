@@ -32,6 +32,34 @@ def test_write_note_overwrites_existing(tmp_path, vault_factory):
     assert (tmp_path / "old.md").read_text() == "new content"
 
 
+def test_write_note_preserves_existing_frontmatter(tmp_path, vault_factory):
+    vault_factory({"note.md": "---\nstatus: active\ntags: [project/active]\ncreated: 2026-08-20\n---\nOld body"})
+    result = write_note("note.md", "New body without frontmatter")
+    assert result["frontmatter_preserved"] is True
+    raw = (tmp_path / "note.md").read_text()
+    fm = yaml.safe_load(raw.split("---\n")[1])
+    assert fm["status"] == "active"
+    assert fm["tags"] == ["project/active"]
+    assert str(fm["created"]) == "2026-08-20"
+    assert raw.rstrip().endswith("New body without frontmatter")
+
+
+def test_write_note_new_frontmatter_overrides_old(tmp_path, vault_factory):
+    vault_factory({"note.md": "---\nstatus: active\n---\nOld body"})
+    result = write_note("note.md", "---\nstatus: done\n---\nNew body")
+    assert result["frontmatter_preserved"] is False
+    raw = (tmp_path / "note.md").read_text()
+    fm = yaml.safe_load(raw.split("---\n")[1])
+    assert fm["status"] == "done"
+
+
+def test_write_note_no_prior_frontmatter_untouched(tmp_path, vault_factory):
+    vault_factory({"note.md": "plain body, no frontmatter"})
+    result = write_note("note.md", "replacement body")
+    assert result["frontmatter_preserved"] is False
+    assert (tmp_path / "note.md").read_text() == "replacement body"
+
+
 def test_write_note_creates_subdirectories(tmp_path, vault_factory):
     vault_factory({})
     write_note("Deep/Nested/note.md", "content")

@@ -34,13 +34,31 @@ def _check_write_permission(relative_path: str) -> None:
 
 
 def write_note(path: str, content: str, index: VaultIndex | None = None) -> dict:
+    """Write (create or overwrite) a note.
+
+    If `content` has no YAML frontmatter of its own and a note already exists
+    at `path` with frontmatter, that existing frontmatter is carried over
+    onto the new body instead of being silently dropped — an overwrite that
+    only changes the body shouldn't destroy status/tags/created/etc.
+    """
     cfg = get_config()
     validate_path(cfg.vault_path, path)
     _check_write_permission(path)
 
-    full_path = str(cfg.vault_path / path)
+    full_path_obj = cfg.vault_path / path
+    full_path = str(full_path_obj)
     lock = acquire_lock(full_path)
     try:
+        frontmatter_preserved = False
+        if not _FM_RE.match(content) and full_path_obj.exists():
+            try:
+                existing_raw = full_path_obj.read_text(encoding="utf-8")
+            except Exception:
+                existing_raw = ""
+            existing_fm, _ = _parse_frontmatter(existing_raw)
+            if existing_fm:
+                content = _serialize_frontmatter(existing_fm, content)
+                frontmatter_preserved = True
         write_file_atomic(cfg.vault_path, path, content)
     finally:
         lock.release()
@@ -48,7 +66,7 @@ def write_note(path: str, content: str, index: VaultIndex | None = None) -> dict
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "written"}
+    return {"path": path, "status": "written", "frontmatter_preserved": frontmatter_preserved}
 
 
 def patch_note(

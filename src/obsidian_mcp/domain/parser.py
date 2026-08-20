@@ -37,6 +37,26 @@ _TASK_RECURRENCE_RE = re.compile(r"🔁\s*([^\n]*?)(?=\s*[📅✅⏫🔼🔽]|$)
 # key:: value  (Dataview inline fields — must start at line beginning)
 _INLINE_FIELD_RE = re.compile(r"^([\w][\w /-]*)::[ \t]*(.+)$", re.MULTILINE)
 
+# Fenced code blocks (```...```) and inline code spans (`...`) — inline tags
+# inside either don't count as real tags (mirrors Obsidian's own behavior,
+# e.g. a sentence explaining "`#tag`-Syntax" shouldn't itself become a tag).
+_CODE_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+
+# A tag must contain at least one non-numeric character — Obsidian doesn't
+# treat purely-numeric strings like "#1" as valid tags, since that syntax is
+# commonly used for cross-references ("see point #9") rather than tagging.
+_PURELY_NUMERIC_RE = re.compile(r"^\d+$")
+
+
+def _strip_code(body: str) -> str:
+    """Blank out fenced code blocks and inline code spans, preserving length/
+    line numbers (replaced with spaces/newlines-preserved) so other regexes
+    that rely on positions in the original body still line up."""
+    body = _CODE_BLOCK_RE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), body)
+    body = _INLINE_CODE_RE.sub(lambda m: " " * len(m.group(0)), body)
+    return body
+
 
 def parse_note(raw_content: str, path: str = "") -> Note:
     try:
@@ -81,8 +101,10 @@ def extract_tags(fm: dict, body: str) -> list[str]:
     if isinstance(fm_tags, list):
         tags.extend(str(t).strip().lstrip("#") for t in fm_tags if t)
 
-    for match in re.finditer(r"(?<!\[)#([\w/-]+)", body):
+    for match in re.finditer(r"(?<!\[)#([\w/-]+)", _strip_code(body)):
         tag = match.group(1)
+        if _PURELY_NUMERIC_RE.match(tag):
+            continue
         if tag not in tags:
             tags.append(tag)
 

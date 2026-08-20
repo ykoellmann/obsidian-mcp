@@ -62,6 +62,30 @@ def test_tags_from_frontmatter_list():
     assert "beta" in note.tags
 
 
+def test_purely_numeric_inline_hash_not_a_tag():
+    # "#9" here is a cross-reference ("see point #9"), not an Obsidian tag —
+    # Obsidian itself doesn't treat purely-numeric strings as valid tags.
+    raw = "See Feature-Request #9 and point #1 for details. #real-tag applies."
+    note = parse_note(raw, path="x.md")
+    assert "9" not in note.tags
+    assert "1" not in note.tags
+    assert "real-tag" in note.tags
+
+
+def test_inline_hash_inside_code_span_not_a_tag():
+    raw = "Use the `#tag`-syntax to tag a note. #actual-tag works though."
+    note = parse_note(raw, path="x.md")
+    assert "tag" not in note.tags
+    assert "actual-tag" in note.tags
+
+
+def test_inline_hash_inside_fenced_code_block_not_a_tag():
+    raw = "```\n#not-a-tag\n```\n#real-tag in prose."
+    note = parse_note(raw, path="x.md")
+    assert "not-a-tag" not in note.tags
+    assert "real-tag" in note.tags
+
+
 def test_tags_from_frontmatter_string():
     raw = "---\ntags: alpha, beta\n---\nBody"
     note = parse_note(raw)

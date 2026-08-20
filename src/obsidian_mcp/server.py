@@ -522,7 +522,10 @@ def get_note_outline_tool(path: str) -> dict:
 
 @mcp.tool()
 def write_note_tool(path: str, content: str) -> dict:
-    """Write (create or overwrite) a note. Respects READ_ONLY and WRITE_PATHS."""
+    """Write (create or overwrite) a note. Respects READ_ONLY and WRITE_PATHS.
+    If `content` has no frontmatter of its own and a note already exists at
+    `path`, its existing frontmatter is preserved rather than dropped —
+    check the returned `frontmatter_preserved` flag."""
     return write_note(path, content, index=_index)
 
 
