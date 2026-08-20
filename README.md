@@ -28,9 +28,10 @@ The intended setup is to host obsidian-mcp on a server or NAS where your vault i
 - **Query & Graph** — backlinks, broken links, orphan detection, BFS link graph, vault stats, task collection across vault
 - **Dataview-like queries** — filter notes by tags, status, frontmatter fields, or inline fields (`key:: value`)
 - **Periodic Notes** — read/preview daily, weekly, monthly, quarterly, yearly journal notes from templates
-- **Canvas** — read, create, and patch Obsidian Canvas (`.canvas`) files
-- **Excalidraw** — read, create, and patch Obsidian Excalidraw (`*.excalidraw.md`) drawings
-- **Kanban** — read, create, and manipulate Obsidian Kanban boards (columns and cards)
+- **Canvas** *(opt-in via `ENABLE_CANVAS`)* — read, create, and patch Obsidian Canvas (`.canvas`) files
+- **Excalidraw** *(opt-in via `ENABLE_EXCALIDRAW`)* — read, create, and patch Obsidian Excalidraw (`*.excalidraw.md`) drawings
+- **Kanban** *(opt-in via `ENABLE_KANBAN`)* — read, create, and manipulate Obsidian Kanban boards (columns and cards)
+- **Bases** *(opt-in via `ENABLE_BASES`)* — read, create, and patch Obsidian Bases (`.base`) files — YAML-defined table/cards/list views over existing frontmatter properties
 - **Attachments** — list, read (text or base64), and add binary files
 - **Two auth variants** — a static API key (Claude Code, Desktop, curl) and, optionally, GitHub OAuth (claude.ai Web/Mobile Custom Connector) — usable independently or at the same time
 - **Templates** — render Obsidian templates with built-in (`{{date}}`, `{{title}}`, …) and custom variables
@@ -73,6 +74,25 @@ Full list of variables — including `API_KEY`, `PUBLIC_BASE_URL`, and the
 `OAUTH_GITHUB_*` variables for the optional second auth variant — is
 documented with inline comments in `.env.example`; see [Remote Setup](#remote-setup-recommended)
 for the two auth variants in detail.
+
+### Optional plugin-format tools (Canvas / Excalidraw / Kanban / Bases)
+
+> [!WARNING]
+> **Breaking change:** as of this version, the Canvas, Excalidraw, and Kanban
+> tool groups are disabled by default, alongside the new Bases tools. If you
+> already rely on any of them, set the matching flag(s) below — otherwise
+> those tools disappear from your client's tool list after upgrading.
+
+```env
+# ENABLE_CANVAS=true      # .canvas file tools
+# ENABLE_EXCALIDRAW=true  # *.excalidraw.md file tools
+# ENABLE_KANBAN=true      # Kanban board tools
+# ENABLE_BASES=true       # .base file tools (Obsidian core plugin, 1.9.0+)
+```
+
+Each defaults to `false`. A disabled group's tools aren't just refused at
+call time — they're never registered, so they don't appear in the tool list
+at all.
 
 ## Usage with Claude Code
 
@@ -257,8 +277,11 @@ The server loads this file at startup and sends it to the AI as system instructi
 | **Canvas** | `list_canvases`, `read_canvas`, `write_canvas`, `patch_canvas` |
 | **Excalidraw** | `list_excalidraw`, `read_excalidraw`, `write_excalidraw`, `patch_excalidraw` |
 | **Kanban** | `read_kanban`, `create_kanban_board`, `add_kanban_card`, `move_kanban_card`, `delete_kanban_card` |
+| **Bases** | `list_bases`, `read_base`, `write_base`, `patch_base` |
 | **Attachments** | `list_attachments`, `read_attachment`, `add_attachment` |
 | **Templates** | `list_templates`, `create_from_template` |
+
+Canvas, Excalidraw, Kanban, and Bases are each opt-in (see [Optional plugin-format tools](#optional-plugin-format-tools-canvas--excalidraw--kanban--bases) above) — their tools only appear once the matching `ENABLE_*` flag is set.
 
 Full parameter documentation is embedded in the server and shown automatically to connected AI clients.
 
@@ -284,6 +307,7 @@ src/obsidian_mcp/
     ├── canvas.py      # Obsidian Canvas (.canvas JSON) tools
     ├── excalidraw.py  # Obsidian Excalidraw (*.excalidraw.md) tools
     ├── kanban.py      # Obsidian Kanban plugin tools
+    ├── bases.py       # Obsidian Bases (.base YAML) tools
     ├── attachments.py # binary and text attachment handling
     ├── templates.py   # template rendering with variable substitution
     └── prompts.py     # MCP Prompts (weekly_review, daily_note)

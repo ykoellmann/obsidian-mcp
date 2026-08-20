@@ -26,6 +26,7 @@ from .tools.attachments import (
     verify_attachment_token,
     write_attachment_bytes,
 )
+from .tools.bases import list_bases, patch_base, read_base, write_base
 from .tools.canvas import list_canvases, patch_canvas, read_canvas, write_canvas
 from .tools.excalidraw import (
     list_excalidraw,
@@ -145,6 +146,12 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 - `list_templates_tool()`, `create_from_template_tool(template_path, output_path, variables)`
 - Built-in variables: `{{date}}`, `{{title}}`, `{{week}}`, `{{month}}`, `{{year}}`, `{{weekday}}`, `{{time}}`
 
+The Canvas/Kanban/Excalidraw/Bases tool groups below are each opt-in on the
+server (`ENABLE_CANVAS`/`ENABLE_KANBAN`/`ENABLE_EXCALIDRAW`/`ENABLE_BASES`).
+If a tool from one of these groups isn't in your tool list, the operator
+hasn't enabled it — that's expected, not an error; don't retry or assume it's
+broken.
+
 ### Canvas (.canvas files)
 - `list_canvases_tool()`, `read_canvas_tool(path)`
 - `write_canvas_tool(path, nodes, edges)` — node types: text|file|group|link
@@ -158,6 +165,11 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 - `list_excalidraw_tool()`, `read_excalidraw_tool(path)` — returns {path, elements, app_state, files}
 - `write_excalidraw_tool(path, elements, app_state)` — element types: rectangle|ellipse|text|arrow|freedraw|...
 - `patch_excalidraw_tool(path, add_elements, update_elements, delete_element_ids)`
+
+### Bases (.base files, Obsidian core plugin since 1.9.0)
+- `list_bases_tool()`, `read_base_tool(path)` — returns {path, filters, formulas, properties, views}
+- `write_base_tool(path, filters, formulas, properties, views)` — returns known_properties from existing bases
+- `patch_base_tool(path, update_formulas, delete_formula_keys, update_properties, delete_property_keys, set_filters, add_views, update_views, delete_view_names)`
 
 ## MCP Resources
 - `vault://notes/{path}` — raw note content as context
@@ -238,12 +250,25 @@ Accessible via `read_note_tool` → `inline_fields`, filterable in `query_notes_
 
 ## Supported Plugin Formats
 
+Each format below is only available if its tool group is enabled on the
+server (see the note at the top of "## Tool Reference"). Pick the right
+format for the job — they overlap in what they *can* represent, but each has
+a format it's the natural fit for:
+
 ### Kanban
 Frontmatter `kanban-plugin: basic`, columns as `## Name`, cards as `- [ ] text`.
 Always use the kanban tools instead of editing raw Markdown.
+Use it for column-based task workflows (To-do/Doing/Done, sprint boards).
+For a simple checklist inside one note, plain `- [ ]` tasks via
+`patch_note_tool` are lighter — don't reach for a Kanban board just to track
+a handful of to-dos.
 
 ### Canvas
 `.canvas` files: JSON with `nodes` (text/file/group/link) and `edges`. IDs auto-generated.
+Use it for spatial/visual relationships between notes (mind maps, linking
+diagrams, freeform boards). It's not a replacement for ordinary links — if
+all you need is "which notes relate to this one", wikilinks or
+`get_link_graph_tool` are the lighter tool.
 
 ### Excalidraw
 `*.excalidraw.md` files: frontmatter `excalidraw-plugin: parsed`, drawing scene
@@ -251,6 +276,36 @@ Always use the kanban tools instead of editing raw Markdown.
 Always use the excalidraw tools instead of editing raw Markdown — the
 surrounding file structure (warning banner, `## Text Elements` section) is
 regenerated on every write and not meaningful to edit by hand.
+Use it for freehand sketches/diagrams that go beyond boxes-and-arrows (e.g.
+architecture sketches). For structured node-and-edge relationships, prefer
+Canvas instead.
+
+### Bases
+`.base` files: plain YAML (not JSON, no frontmatter wrapper) with up to four
+top-level keys — `filters` (boolean and/or/not tree of comparisons and
+function calls like `file.hasTag("book")`), `formulas` (name -> expression),
+`properties` (per-property `displayName`), `views` (list of
+`{type, name, limit, filters, order, groupBy, summaries}`, `type` required —
+e.g. `table`|`cards`|`list`). A Base never changes notes — it only defines a
+filtered/grouped/sorted *view* over existing frontmatter properties.
+Use it when the user wants a table/cards/list overview across multiple notes
+that share frontmatter properties (e.g. "show me all open projects", "table
+of recipes grouped by category") — not for editing a single note (use
+`patch_note_tool`/`patch_frontmatter_tool` for that) and not as a substitute
+for tags or links.
+Before creating a new Base, call `list_bases_tool()`/`read_base_tool()` on
+existing `.base` files to reuse established property names — `write_base_tool`
+also returns `known_properties` collected from them, so use that rather than
+inventing new names. Before filtering/grouping by a property, check that it's
+written consistently across the target notes (e.g. via `query_notes_tool` or
+`get_vault_conventions_tool`) — inconsistent casing/values (`"offen"` vs.
+`"Offen"`) silently break filters. The server only validates that a `.base`
+file has the right overall shape (mapping/list types, `views[].type` present);
+it does not parse Obsidian's filter/formula expression grammar, so keep filter
+strings to the documented syntax (https://obsidian.md/help/bases/syntax) —
+a malformed expression won't be caught until the file is opened in Obsidian.
+Use `write_base_tool` for a new Base, `patch_base_tool` for a targeted change
+(add a view, adjust filters) instead of rewriting the whole file.
 
 ### Dataview
 Only `key:: value` inline fields are parsed server-side. DQL block queries are Obsidian-app-only.
@@ -372,6 +427,37 @@ _index: VaultIndex | None = None
 _watcher = None
 
 mcp = FastMCP(name="obsidian-mcp", instructions=_load_instructions(), auth=_build_auth())
+
+
+def _feature_flags_from_env() -> tuple[bool, bool, bool, bool]:
+    """Read the ENABLE_* flags directly from os.environ (not get_config()), so
+    this module can still be imported without VAULT_PATH set (e.g. during
+    testing or linting) — same reasoning as _build_auth() above."""
+    def _flag(name: str) -> bool:
+        return os.environ.get(name, "false").lower() in ("1", "true", "yes")
+
+    return (
+        _flag("ENABLE_CANVAS"),
+        _flag("ENABLE_EXCALIDRAW"),
+        _flag("ENABLE_KANBAN"),
+        _flag("ENABLE_BASES"),
+    )
+
+
+# Gates which optional plugin-format tool groups (Canvas/Excalidraw/Kanban/
+# Bases) get registered below, so disabled tools never appear in the client's
+# tool list. Deliberately not the real Config object (that needs VAULT_PATH,
+# see _build_auth() above) — just the four flags, read straight from the
+# environment.
+class _FeatureFlags:
+    def __init__(self, enable_canvas, enable_excalidraw, enable_kanban, enable_bases):
+        self.enable_canvas = enable_canvas
+        self.enable_excalidraw = enable_excalidraw
+        self.enable_kanban = enable_kanban
+        self.enable_bases = enable_bases
+
+
+_feature_flags = _FeatureFlags(*_feature_flags_from_env())
 
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
@@ -818,152 +904,211 @@ def create_from_template_tool(
 
 # ── Canvas ────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
-def list_canvases_tool() -> list[str]:
-    """List all Obsidian Canvas (.canvas) files in the vault."""
-    return list_canvases()
+if _feature_flags.enable_canvas:
 
+    @mcp.tool()
+    def list_canvases_tool() -> list[str]:
+        """List all Obsidian Canvas (.canvas) files in the vault."""
+        return list_canvases()
 
-@mcp.tool()
-def read_canvas_tool(path: str) -> dict:
-    """Read an Obsidian Canvas file.
-    Returns {path, nodes: [{id, type, text, file, x, y}], edges: [{from, to, label}]}."""
-    return read_canvas(path)
+    @mcp.tool()
+    def read_canvas_tool(path: str) -> dict:
+        """Read an Obsidian Canvas file.
+        Returns {path, nodes: [{id, type, text, file, x, y}], edges: [{from, to, label}]}."""
+        return read_canvas(path)
 
+    @mcp.tool()
+    def write_canvas_tool(
+        path: str,
+        nodes: list[dict] | None = None,
+        edges: list[dict] | None = None,
+    ) -> dict:
+        """Create or fully overwrite an Obsidian Canvas file.
+        Node fields: type ('text'|'file'|'group'|'link'), x, y, width, height.
+        Text nodes: text. File nodes: file (vault path). Link nodes: url.
+        Edge fields: fromNode, toNode, label (optional). IDs are auto-generated if omitted.
+        Returns {path, status, nodes, edges}."""
+        return write_canvas(path, nodes=nodes, edges=edges)
 
-@mcp.tool()
-def write_canvas_tool(
-    path: str,
-    nodes: list[dict] | None = None,
-    edges: list[dict] | None = None,
-) -> dict:
-    """Create or fully overwrite an Obsidian Canvas file.
-    Node fields: type ('text'|'file'|'group'|'link'), x, y, width, height.
-    Text nodes: text. File nodes: file (vault path). Link nodes: url.
-    Edge fields: fromNode, toNode, label (optional). IDs are auto-generated if omitted.
-    Returns {path, status, nodes, edges}."""
-    return write_canvas(path, nodes=nodes, edges=edges)
-
-
-@mcp.tool()
-def patch_canvas_tool(
-    path: str,
-    add_nodes: list[dict] | None = None,
-    update_nodes: list[dict] | None = None,
-    delete_node_ids: list[str] | None = None,
-    add_edges: list[dict] | None = None,
-    delete_edge_ids: list[str] | None = None,
-) -> dict:
-    """Atomically update an existing canvas without rewriting the whole file.
-    update_nodes: each dict must include 'id'. delete_node_ids also removes
-    all edges connected to those nodes. Returns {path, status, nodes, edges}."""
-    return patch_canvas(
-        path,
-        add_nodes=add_nodes,
-        update_nodes=update_nodes,
-        delete_node_ids=delete_node_ids,
-        add_edges=add_edges,
-        delete_edge_ids=delete_edge_ids,
-    )
+    @mcp.tool()
+    def patch_canvas_tool(
+        path: str,
+        add_nodes: list[dict] | None = None,
+        update_nodes: list[dict] | None = None,
+        delete_node_ids: list[str] | None = None,
+        add_edges: list[dict] | None = None,
+        delete_edge_ids: list[str] | None = None,
+    ) -> dict:
+        """Atomically update an existing canvas without rewriting the whole file.
+        update_nodes: each dict must include 'id'. delete_node_ids also removes
+        all edges connected to those nodes. Returns {path, status, nodes, edges}."""
+        return patch_canvas(
+            path,
+            add_nodes=add_nodes,
+            update_nodes=update_nodes,
+            delete_node_ids=delete_node_ids,
+            add_edges=add_edges,
+            delete_edge_ids=delete_edge_ids,
+        )
 
 
 # ── Excalidraw ────────────────────────────────────────────────────────────────
 
-@mcp.tool()
-def list_excalidraw_tool() -> list[str]:
-    """List all Obsidian Excalidraw (*.excalidraw.md) files in the vault."""
-    return list_excalidraw()
+if _feature_flags.enable_excalidraw:
 
+    @mcp.tool()
+    def list_excalidraw_tool() -> list[str]:
+        """List all Obsidian Excalidraw (*.excalidraw.md) files in the vault."""
+        return list_excalidraw()
 
-@mcp.tool()
-def read_excalidraw_tool(path: str) -> dict:
-    """Read an Obsidian Excalidraw file.
-    Returns {path, elements, app_state, files}."""
-    return read_excalidraw(path)
+    @mcp.tool()
+    def read_excalidraw_tool(path: str) -> dict:
+        """Read an Obsidian Excalidraw file.
+        Returns {path, elements, app_state, files}."""
+        return read_excalidraw(path)
 
+    @mcp.tool()
+    def write_excalidraw_tool(
+        path: str,
+        elements: list[dict] | None = None,
+        app_state: dict | None = None,
+    ) -> dict:
+        """Create or fully overwrite an Excalidraw file.
+        Element fields: type ('rectangle'|'ellipse'|'text'|'arrow'|'freedraw'|...), x, y,
+        width, height. Element 'id' is auto-generated if omitted.
+        Returns {path, status, elements}."""
+        return write_excalidraw(path, elements=elements, app_state=app_state, index=_index)
 
-@mcp.tool()
-def write_excalidraw_tool(
-    path: str,
-    elements: list[dict] | None = None,
-    app_state: dict | None = None,
-) -> dict:
-    """Create or fully overwrite an Excalidraw file.
-    Element fields: type ('rectangle'|'ellipse'|'text'|'arrow'|'freedraw'|...), x, y,
-    width, height. Element 'id' is auto-generated if omitted.
-    Returns {path, status, elements}."""
-    return write_excalidraw(path, elements=elements, app_state=app_state, index=_index)
-
-
-@mcp.tool()
-def patch_excalidraw_tool(
-    path: str,
-    add_elements: list[dict] | None = None,
-    update_elements: list[dict] | None = None,
-    delete_element_ids: list[str] | None = None,
-) -> dict:
-    """Atomically update an existing Excalidraw file without rewriting the whole file.
-    update_elements: each dict must include 'id'.
-    Returns {path, status, elements}."""
-    return patch_excalidraw(
-        path,
-        add_elements=add_elements,
-        update_elements=update_elements,
-        delete_element_ids=delete_element_ids,
-        index=_index,
-    )
+    @mcp.tool()
+    def patch_excalidraw_tool(
+        path: str,
+        add_elements: list[dict] | None = None,
+        update_elements: list[dict] | None = None,
+        delete_element_ids: list[str] | None = None,
+    ) -> dict:
+        """Atomically update an existing Excalidraw file without rewriting the whole file.
+        update_elements: each dict must include 'id'.
+        Returns {path, status, elements}."""
+        return patch_excalidraw(
+            path,
+            add_elements=add_elements,
+            update_elements=update_elements,
+            delete_element_ids=delete_element_ids,
+            index=_index,
+        )
 
 
 # ── Kanban ────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
-def read_kanban_tool(path: str) -> dict:
-    """Read an Obsidian Kanban board (requires kanban-plugin in frontmatter).
-    Returns {path, plugin, columns: [{name, cards: [{text, done}]}], total_cards}."""
-    return read_kanban(path)
+if _feature_flags.enable_kanban:
+
+    @mcp.tool()
+    def read_kanban_tool(path: str) -> dict:
+        """Read an Obsidian Kanban board (requires kanban-plugin in frontmatter).
+        Returns {path, plugin, columns: [{name, cards: [{text, done}]}], total_cards}."""
+        return read_kanban(path)
+
+    @mcp.tool()
+    def create_kanban_board_tool(path: str, columns: list[str]) -> dict:
+        """Create a new Kanban board with the given column names.
+        Returns {path, status, columns}."""
+        return create_kanban_board(path, columns, index=_index)
+
+    @mcp.tool()
+    def add_kanban_card_tool(
+        path: str,
+        column: str,
+        text: str,
+        done: bool = False,
+    ) -> dict:
+        """Add a card to a Kanban column. Card is inserted at the top of the column.
+        Returns {path, status, column, card, done}."""
+        return add_kanban_card(path, column, text, done=done, index=_index)
+
+    @mcp.tool()
+    def move_kanban_card_tool(
+        path: str,
+        card_text: str,
+        from_column: str,
+        to_column: str,
+        done: bool | None = None,
+    ) -> dict:
+        """Move a card from one column to another. done=true/false updates the tick state.
+        Returns {path, status, card, from, to}."""
+        return move_kanban_card(path, card_text, from_column, to_column, done=done, index=_index)
+
+    @mcp.tool()
+    def delete_kanban_card_tool(
+        path: str,
+        card_text: str,
+        column: str | None = None,
+    ) -> dict:
+        """Delete a card from the Kanban board. column limits the search to one column.
+        Returns {path, status, card}."""
+        return delete_kanban_card(path, card_text, column=column, index=_index)
 
 
-@mcp.tool()
-def create_kanban_board_tool(path: str, columns: list[str]) -> dict:
-    """Create a new Kanban board with the given column names.
-    Returns {path, status, columns}."""
-    return create_kanban_board(path, columns, index=_index)
+# ── Bases ─────────────────────────────────────────────────────────────────────
 
+if _feature_flags.enable_bases:
 
-@mcp.tool()
-def add_kanban_card_tool(
-    path: str,
-    column: str,
-    text: str,
-    done: bool = False,
-) -> dict:
-    """Add a card to a Kanban column. Card is inserted at the top of the column.
-    Returns {path, status, column, card, done}."""
-    return add_kanban_card(path, column, text, done=done, index=_index)
+    @mcp.tool()
+    def list_bases_tool() -> list[str]:
+        """List all Obsidian Bases (.base) files in the vault."""
+        return list_bases()
 
+    @mcp.tool()
+    def read_base_tool(path: str) -> dict:
+        """Read an Obsidian Bases file.
+        Returns {path, filters, formulas, properties, views}."""
+        return read_base(path)
 
-@mcp.tool()
-def move_kanban_card_tool(
-    path: str,
-    card_text: str,
-    from_column: str,
-    to_column: str,
-    done: bool | None = None,
-) -> dict:
-    """Move a card from one column to another. done=true/false updates the tick state.
-    Returns {path, status, card, from, to}."""
-    return move_kanban_card(path, card_text, from_column, to_column, done=done, index=_index)
+    @mcp.tool()
+    def write_base_tool(
+        path: str,
+        filters: dict | None = None,
+        formulas: dict | None = None,
+        properties: dict | None = None,
+        views: list[dict] | None = None,
+    ) -> dict:
+        """Create or fully overwrite a .base file.
+        filters: boolean tree ({and:[...]}, {or:[...]}, {not:...}) or a single
+        string statement, e.g. 'status != "done"' or 'file.hasTag("book")'.
+        formulas: name -> expression string. properties: name -> {displayName}.
+        views: list of {type, name, limit, filters, order, groupBy, summaries};
+        'type' (e.g. 'table'|'cards'|'list') is required per view.
+        Returns {path, status, views, known_properties} — known_properties is
+        collected from existing .base files in the vault to keep naming consistent."""
+        return write_base(path, filters=filters, formulas=formulas, properties=properties, views=views, index=_index)
 
-
-@mcp.tool()
-def delete_kanban_card_tool(
-    path: str,
-    card_text: str,
-    column: str | None = None,
-) -> dict:
-    """Delete a card from the Kanban board. column limits the search to one column.
-    Returns {path, status, card}."""
-    return delete_kanban_card(path, card_text, column=column, index=_index)
+    @mcp.tool()
+    def patch_base_tool(
+        path: str,
+        update_formulas: dict | None = None,
+        delete_formula_keys: list[str] | None = None,
+        update_properties: dict | None = None,
+        delete_property_keys: list[str] | None = None,
+        set_filters: dict | None = None,
+        add_views: list[dict] | None = None,
+        update_views: list[dict] | None = None,
+        delete_view_names: list[str] | None = None,
+    ) -> dict:
+        """Atomically update an existing .base file without rewriting it wholesale.
+        update_formulas/update_properties are merged by key. set_filters replaces
+        the whole filters block. update_views: each dict must include 'name'.
+        Returns {path, status, views}."""
+        return patch_base(
+            path,
+            update_formulas=update_formulas,
+            delete_formula_keys=delete_formula_keys,
+            update_properties=update_properties,
+            delete_property_keys=delete_property_keys,
+            set_filters=set_filters,
+            add_views=add_views,
+            update_views=update_views,
+            delete_view_names=delete_view_names,
+            index=_index,
+        )
 
 
 # ── Folders ───────────────────────────────────────────────────────────────────

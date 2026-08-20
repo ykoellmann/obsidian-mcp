@@ -23,6 +23,10 @@ class Config:
     oauth_github_client_id: str
     oauth_github_client_secret: str
     oauth_github_allowed_logins: list[str]
+    enable_canvas: bool
+    enable_excalidraw: bool
+    enable_kanban: bool
+    enable_bases: bool
 
     def __init__(self) -> None:
         raw_vault = os.environ.get("VAULT_PATH", "")
@@ -39,6 +43,12 @@ class Config:
 
         raw_exclude = os.environ.get("EXCLUDE_PATHS", "private,.obsidian")
         self.exclude_paths = [p.strip() for p in raw_exclude.split(",") if p.strip()]
+
+        # Optional plugin-format tool groups — opt-in, disabled by default.
+        self.enable_canvas = os.environ.get("ENABLE_CANVAS", "false").lower() in ("1", "true", "yes")
+        self.enable_excalidraw = os.environ.get("ENABLE_EXCALIDRAW", "false").lower() in ("1", "true", "yes")
+        self.enable_kanban = os.environ.get("ENABLE_KANBAN", "false").lower() in ("1", "true", "yes")
+        self.enable_bases = os.environ.get("ENABLE_BASES", "false").lower() in ("1", "true", "yes")
 
         self.transport = os.environ.get("TRANSPORT", "stdio")
         self.host = os.environ.get("HOST", "0.0.0.0")
