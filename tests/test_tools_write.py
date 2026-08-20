@@ -11,6 +11,7 @@ from obsidian_mcp.tools.write import (
     manage_tags,
     move_note,
     patch_frontmatter,
+    patch_frontmatter_batch,
     patch_note,
     restore_note,
     write_note,
@@ -58,6 +59,22 @@ def test_write_note_no_prior_frontmatter_untouched(tmp_path, vault_factory):
     result = write_note("note.md", "replacement body")
     assert result["frontmatter_preserved"] is False
     assert (tmp_path / "note.md").read_text() == "replacement body"
+
+
+def test_write_note_dry_run_does_not_write(tmp_path, vault_factory):
+    vault_factory({"note.md": "old content"})
+    result = write_note("note.md", "new content", dry_run=True)
+    assert result["status"] == "dry_run"
+    assert (tmp_path / "note.md").read_text() == "old content"
+    assert "new content" in result["diff"]
+    assert "old content" in result["diff"]
+
+
+def test_write_note_diff_on_real_write(tmp_path, vault_factory):
+    vault_factory({"note.md": "old"})
+    result = write_note("note.md", "new")
+    assert "-old" in result["diff"]
+    assert "+new" in result["diff"]
 
 
 def test_write_note_creates_subdirectories(tmp_path, vault_factory):
@@ -308,6 +325,52 @@ def test_patch_frontmatter_creates_fm_if_missing(tmp_path, vault_factory):
     assert "---" in content
     assert "status: active" in content
     assert "Just body text" in content
+
+
+def test_patch_frontmatter_dry_run_does_not_write(tmp_path, vault_factory):
+    vault_factory({"note.md": "---\nstatus: inbox\n---\nBody"})
+    result = patch_frontmatter("note.md", {"status": "done"}, dry_run=True)
+    assert result["status"] == "dry_run"
+    content = (tmp_path / "note.md").read_text()
+    assert "status: inbox" in content
+    assert "status: done" in result["preview"]
+    assert "+status: done" in result["diff"]
+
+
+def test_patch_frontmatter_diff_on_real_write(tmp_path, vault_factory):
+    vault_factory({"note.md": "---\nstatus: inbox\n---\nBody"})
+    result = patch_frontmatter("note.md", {"status": "done"})
+    assert "-status: inbox" in result["diff"]
+    assert "+status: done" in result["diff"]
+
+
+# ── patch_frontmatter_batch ───────────────────────────────────────────────
+
+def test_patch_frontmatter_batch_applies_all(tmp_path, vault_factory):
+    vault_factory({
+        "a.md": "---\nstatus: inbox\n---\nA",
+        "b.md": "---\nstatus: inbox\n---\nB",
+    })
+    result = patch_frontmatter_batch([
+        {"path": "a.md", "updates": {"status": "active"}},
+        {"path": "b.md", "updates": {"status": "done"}},
+    ])
+    assert len(result["succeeded"]) == 2
+    assert result["failed"] == []
+    assert "status: active" in (tmp_path / "a.md").read_text()
+    assert "status: done" in (tmp_path / "b.md").read_text()
+
+
+def test_patch_frontmatter_batch_partial_failure(tmp_path, vault_factory):
+    vault_factory({"a.md": "---\nstatus: inbox\n---\nA"})
+    result = patch_frontmatter_batch([
+        {"path": "a.md", "updates": {"status": "active"}},
+        {"path": "missing.md", "updates": {"status": "active"}},
+    ])
+    assert len(result["succeeded"]) == 1
+    assert len(result["failed"]) == 1
+    assert result["failed"][0]["path"] == "missing.md"
+    assert "status: active" in (tmp_path / "a.md").read_text()
 
 
 # ── manage_tags ───────────────────────────────────────────────────────────

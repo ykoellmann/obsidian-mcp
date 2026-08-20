@@ -129,6 +129,41 @@ def test_search_fuzzy_multi_word(vault_factory):
     assert len(results) == 1
 
 
+def test_search_fuzzy_threshold_stricter_excludes_loose_match(vault_factory):
+    vault_factory({"note.md": "Warenkorb ist leer."})
+    # "Warenträger" is loosely similar to "Warenkorb" — a low threshold
+    # matches it, a high one shouldn't.
+    assert len(search_notes("Warenträger", mode="fuzzy", threshold=0.5)) == 1
+    assert len(search_notes("Warenträger", mode="fuzzy", threshold=0.95)) == 0
+
+
+def test_search_field_filename_only_matches_md_files_by_name(vault_factory):
+    vault_factory({
+        "lockdown.md": "irrelevant body",
+        "other.md": "the word lock appears here in the body",
+    })
+    results = search_notes("lock", field="filename")
+    assert [r["path"] for r in results] == ["lockdown.md"]
+
+
+def test_search_frontmatter_filter_combines_with_text(vault_factory):
+    vault_factory({
+        "a.md": "---\ntype: ticket\n---\nSortierfolge muss stimmen",
+        "b.md": "---\ntype: note\n---\nSortierfolge auch hier erwähnt",
+    })
+    results = search_notes("Sortierfolge", frontmatter_filter={"type": "ticket"})
+    assert [r["path"] for r in results] == ["a.md"]
+
+
+def test_search_frontmatter_filter_operator(vault_factory):
+    vault_factory({
+        "a.md": "---\nstatus: active\n---\nkeyword here",
+        "b.md": "---\nstatus: done\n---\nkeyword here too",
+    })
+    results = search_notes("keyword", frontmatter_filter={"status": {"$ne": "done"}})
+    assert [r["path"] for r in results] == ["a.md"]
+
+
 # ── get_note_outline ──────────────────────────────────────────────────────
 
 def test_get_note_outline_headings(vault_factory):

@@ -37,6 +37,7 @@ from .tools.excalidraw import (
 from .tools.folders import (
     create_folder,
     delete_folder,
+    list_files,
     list_folder,
     list_trash,
     rename_folder,
@@ -75,6 +76,7 @@ from .tools.write import (
     manage_tags,
     move_note,
     patch_frontmatter,
+    patch_frontmatter_batch,
     patch_note,
     restore_note,
     write_note,
@@ -497,10 +499,23 @@ def search_notes_tool(
     tag: str | None = None,
     mode: str = "exact",
     limit: int = 20,
+    frontmatter_filter: dict | None = None,
+    field: str | None = None,
+    threshold: float = 0.8,
 ) -> list[dict]:
     """Full-text search with snippets and relevance ranking.
-    mode: 'exact' (default) | 'regex' | 'fuzzy'. Returns [{path, score, snippets, tags}]."""
-    return search_notes(query, tag=tag, mode=mode, limit=limit)
+    mode: 'exact' (default) | 'regex' | 'fuzzy'. Returns [{path, score, snippets, tags}].
+    frontmatter_filter: combine with the text search in one call — same shape
+    as query_notes_tool's (plain value = exact match, or {"$ne": v} /
+    {"$nin": [...]} / {"$exists": bool}).
+    field: None/'body' (default, search note content) | 'filename' (match
+    only the file name).
+    threshold: fuzzy-match similarity cutoff 0-1 (only used when mode='fuzzy';
+    lower = looser matches, higher = less noise)."""
+    return search_notes(
+        query, tag=tag, mode=mode, limit=limit,
+        frontmatter_filter=frontmatter_filter, field=field, threshold=threshold,
+    )
 
 
 @mcp.tool()
@@ -521,12 +536,15 @@ def get_note_outline_tool(path: str) -> dict:
 # ── Write ─────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def write_note_tool(path: str, content: str) -> dict:
+def write_note_tool(path: str, content: str, dry_run: bool = False) -> dict:
     """Write (create or overwrite) a note. Respects READ_ONLY and WRITE_PATHS.
     If `content` has no frontmatter of its own and a note already exists at
     `path`, its existing frontmatter is preserved rather than dropped —
-    check the returned `frontmatter_preserved` flag."""
-    return write_note(path, content, index=_index)
+    check the returned `frontmatter_preserved` flag. The result also carries
+    a `diff` (unified diff against the current file).
+    dry_run=True previews {preview, diff, frontmatter_preserved} without
+    writing anything — check it, then call again with dry_run=False."""
+    return write_note(path, content, index=_index, dry_run=dry_run)
 
 
 @mcp.tool()
@@ -595,10 +613,23 @@ def patch_frontmatter_tool(
     path: str,
     updates: dict,
     merge_arrays: bool = True,
+    dry_run: bool = False,
 ) -> dict:
     """Update specific YAML frontmatter keys without touching the note body.
-    merge_arrays=True merges list values (e.g. tags); False replaces them."""
-    return patch_frontmatter(path, updates, merge_arrays=merge_arrays, index=_index)
+    merge_arrays=True merges list values (e.g. tags); False replaces them.
+    Result carries a `diff` (unified diff against the current file).
+    dry_run=True previews {preview, diff, updated_keys} without writing —
+    check it, then call again with dry_run=False."""
+    return patch_frontmatter(path, updates, merge_arrays=merge_arrays, index=_index, dry_run=dry_run)
+
+
+@mcp.tool()
+def patch_frontmatter_batch_tool(updates: list[dict]) -> dict:
+    """Patch frontmatter on multiple notes in one call.
+    updates: list of {"path": str, "updates": dict, "merge_arrays": bool}
+    (merge_arrays defaults to True per entry). One entry failing doesn't
+    abort the rest — returns {succeeded: [...], failed: [{path, error}]}."""
+    return patch_frontmatter_batch(updates, index=_index)
 
 
 @mcp.tool()
@@ -1117,10 +1148,22 @@ if _feature_flags.enable_bases:
 # ── Folders ───────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def list_folder_tool(path: str = "") -> dict:
-    """List the immediate contents of a vault folder (non-hidden items only).
-    path='': root of the vault. Returns {path, folders: [...], files: [...]}."""
-    return list_folder(path)
+def list_folder_tool(path: str = "", recursive: bool = False, max_depth: int | None = None) -> dict:
+    """List the contents of a vault folder (non-hidden items only).
+    path='': root of the vault.
+    recursive=False (default): immediate contents only — {path, folders, files}.
+    recursive=True: full tree dump in one call — {path, tree: {folders: {name: tree}, files: [...]}}.
+    max_depth limits how many levels deep to descend (None = unlimited)."""
+    return list_folder(path, recursive=recursive, max_depth=max_depth)
+
+
+@mcp.tool()
+def list_files_tool(folder: str = "", extension: str | None = None) -> list[str]:
+    """List every file in the vault (or a subfolder), any type — not just
+    notes/attachments/bases/canvases (e.g. .lock files, stray non-Markdown
+    files). extension filters by suffix without the dot (e.g. "lock",
+    "canvas"); omit for everything. Hidden files/folders are skipped."""
+    return list_files(folder, extension=extension)
 
 
 @mcp.tool()

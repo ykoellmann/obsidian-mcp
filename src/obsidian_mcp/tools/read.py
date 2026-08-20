@@ -7,6 +7,7 @@ from pathlib import Path
 from ..config import get_config
 from ..domain.parser import parse_note
 from ..storage.filesystem import read_file, validate_path
+from .query import matches_frontmatter_filter
 
 
 def list_notes(folder: str = "", include_meta: bool = False) -> list:
@@ -81,10 +82,25 @@ def search_notes(
     tag: str | None = None,
     mode: str = "exact",
     limit: int = 20,
+    frontmatter_filter: dict | None = None,
+    field: str | None = None,
+    threshold: float = 0.8,
 ) -> list[dict]:
+    """Full-text search across the vault.
+    mode: 'exact' (default) | 'regex' | 'fuzzy'.
+    frontmatter_filter: same shape as query_notes_tool's (plain value = exact
+    match, or an operator dict like {"$ne": v}/{"$nin": [...]}/{"$exists": bool}) —
+    combines with the text search in a single call instead of filtering first
+    and grepping results after.
+    field: None/'body' (default, search line-by-line in the note body) |
+    'filename' (match only against the file name, not its content).
+    threshold: fuzzy-match similarity cutoff (0-1, only used when mode='fuzzy')."""
     cfg = get_config()
     root = cfg.vault_path
     results: list[dict] = []
+
+    if frontmatter_filter:
+        matches_frontmatter_filter({}, frontmatter_filter)  # validate operators up front
 
     try:
         pattern = re.compile(query, re.IGNORECASE) if mode == "regex" else None
@@ -100,9 +116,14 @@ def search_notes(
             note = parse_note(raw, path=rel)
             if tag and tag not in note.tags:
                 continue
+            if frontmatter_filter and not matches_frontmatter_filter(note.frontmatter, frontmatter_filter):
+                continue
 
-            lines = raw.splitlines()
-            snippets, score = _find_snippets(lines, query, pattern, mode)
+            if field == "filename":
+                snippets, score = _match_filename(p.name, query, pattern, mode, threshold)
+            else:
+                lines = raw.splitlines()
+                snippets, score = _find_snippets(lines, query, pattern, mode, threshold)
             if score == 0:
                 continue
 
@@ -112,6 +133,21 @@ def search_notes(
 
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:limit]
+
+
+def _match_filename(
+    name: str,
+    query: str,
+    pattern: re.Pattern | None,
+    mode: str,
+    threshold: float,
+) -> tuple[list[dict], int]:
+    """Match `query` against a bare filename instead of note body lines —
+    reuses _find_snippets' line-scoring logic on a single-line input."""
+    snippets, score = _find_snippets([name], query, pattern, mode, threshold)
+    if snippets:
+        snippets = [{"line": 0, "context": [{"line": 0, "text": name, "match": True}]}]
+    return snippets, score
 
 
 _EMBED_RE = re.compile(r"!\[\[([^\]#|^]+?)(?:#([^\]|^]+?))?(?:\|[^\]]*)?\]\]")
@@ -213,6 +249,7 @@ def _find_snippets(
     query: str,
     pattern: re.Pattern | None,
     mode: str,
+    threshold: float = 0.8,
 ) -> tuple[list[dict], int]:
     snippets: list[dict] = []
     total_score = 0
@@ -226,7 +263,7 @@ def _find_snippets(
             matched = bool(pattern.search(line))
             line_score = 2 if matched else 0
         elif mode == "fuzzy":
-            line_score = _fuzzy_score(line_lower, query_lower)
+            line_score = _fuzzy_score(line_lower, query_lower, threshold)
             matched = line_score > 0
         else:
             if query_lower in line_lower:
@@ -253,15 +290,17 @@ def _find_snippets(
     return snippets, total_score
 
 
-def _fuzzy_score(line_lower: str, query_lower: str) -> int:
-    """Fuzzy match: all query words must find a similar word in the line (ratio ≥ 0.8)."""
+def _fuzzy_score(line_lower: str, query_lower: str, threshold: float = 0.8) -> int:
+    """Fuzzy match: all query words must find a similar word in the line
+    (ratio >= threshold, default 0.8 — lower it for looser/more tolerant
+    matches, raise it to cut down on unrelated noise)."""
     if query_lower in line_lower:
         return 2
     query_words = query_lower.split()
     line_words = line_lower.split()
     matched_words = 0
     for qw in query_words:
-        if any(SequenceMatcher(None, qw, lw).ratio() >= 0.8 for lw in line_words):
+        if any(SequenceMatcher(None, qw, lw).ratio() >= threshold for lw in line_words):
             matched_words += 1
     return matched_words if matched_words == len(query_words) and query_words else 0
 
