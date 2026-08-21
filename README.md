@@ -146,6 +146,25 @@ If you enable GitHub OAuth (see [Option B](#option-b-github-oauth-claudeai-webmo
 
 The image has a built-in `HEALTHCHECK` against `GET /health` (unauthenticated, no vault content — just `{status, vault_path, index_ready}`), visible in `docker ps`/`docker compose ps`. Only meaningful for `TRANSPORT=http`/`sse`; a no-op for `stdio`.
 
+### Health-Check Cron (Frontmatter Schema)
+
+Separate from the `/health` liveness check above: `scripts/health_check.py` runs `lint_schema_tool`'s logic directly (no MCP client needed) and, only if it finds notes whose frontmatter violates the enums declared in your `_AI_INSTRUCTIONS.md`, drops a report note into your vault's inbox folder. Silent when the vault is clean — no note, no noise.
+
+```bash
+# One-off / manual run:
+VAULT_PATH=/path/to/vault HEALTH_CHECK_INBOX=00-Inbox python scripts/health_check.py
+```
+
+To run it weekly via cron against the running container:
+
+```cron
+# crontab -e (on the Docker host)
+0 6 * * 1 docker exec obsidian-mcp-obsidian-mcp-1 \
+  env VAULT_PATH=/vault HEALTH_CHECK_INBOX=00-Inbox python scripts/health_check.py
+```
+
+Swap the container name for whatever `docker compose ps` shows, and `HEALTH_CHECK_INBOX` for your vault's actual inbox folder (default `Inbox`).
+
 ## Remote Setup (Recommended)
 
 Run obsidian-mcp on a server and connect to it remotely. Network transports
