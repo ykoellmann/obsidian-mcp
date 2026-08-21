@@ -67,6 +67,7 @@ from .tools.query import (
     query_notes,
     resolve_alias,
 )
+from .tools.audit import get_audit_log, get_note_history, log_write
 from .tools.lint import lint_schema
 from .tools.read import get_note_outline, list_notes, read_note, render_note, search_notes
 from .tools.templates import create_from_template, list_templates
@@ -546,7 +547,10 @@ def write_note_tool(path: str, content: str, dry_run: bool = False) -> dict:
     a `diff` (unified diff against the current file).
     dry_run=True previews {preview, diff, frontmatter_preserved} without
     writing anything — check it, then call again with dry_run=False."""
-    return write_note(path, content, index=_index, dry_run=dry_run)
+    result = write_note(path, content, index=_index, dry_run=dry_run)
+    if result.get("status") != "dry_run":
+        log_write("write_note_tool", path, "wrote note")
+    return result
 
 
 @mcp.tool()
@@ -560,7 +564,9 @@ def patch_note_tool(
     """Edit a section or block reference inside a note.
     mode: 'replace' (default) | 'insert_before' | 'insert_after' | 'append'.
     target_type: 'heading' (default) | 'block_ref' (use section='^block-id')."""
-    return patch_note(path, section, new_content, mode=mode, target_type=target_type, index=_index)
+    result = patch_note(path, section, new_content, mode=mode, target_type=target_type, index=_index)
+    log_write("patch_note_tool", path, f"patched section {section!r} ({mode})")
+    return result
 
 
 @mcp.tool()
@@ -579,14 +585,19 @@ def patch_note_text_tool(
     count: max replacements (default 1, first match only); 0 = replace all.
     dry_run=True previews {replacements, preview, diff} without writing.
     Raises ValueError if `find` doesn't match anything."""
-    return patch_note_text(path, find, replace, mode=mode, count=count, dry_run=dry_run, index=_index)
+    result = patch_note_text(path, find, replace, mode=mode, count=count, dry_run=dry_run, index=_index)
+    if result.get("status") != "dry_run":
+        log_write("patch_note_text_tool", path, f"replaced {result.get('replacements')} match(es)")
+    return result
 
 
 @mcp.tool()
 def delete_note_tool(path: str, trash: bool = True) -> dict:
     """Delete a note from the vault.
     trash=True (default) moves it to .trash/ instead of permanent deletion."""
-    return delete_note(path, trash=trash, index=_index)
+    result = delete_note(path, trash=trash, index=_index)
+    log_write("delete_note_tool", path, f"deleted (trash={trash})")
+    return result
 
 
 @mcp.tool()
@@ -595,7 +606,9 @@ def restore_note_tool(trashed_name: str, to_path: str) -> dict:
     to_path: where to put it back — the original folder can't be recovered
     from the trash entry alone, so you choose the destination.
     Returns {from, to, status}."""
-    return restore_note(trashed_name, to_path, index=_index)
+    result = restore_note(trashed_name, to_path, index=_index)
+    log_write("restore_note_tool", to_path, f"restored from .trash/{trashed_name}")
+    return result
 
 
 @mcp.tool()
@@ -614,7 +627,14 @@ def find_replace_in_vault_tool(
     (READ_ONLY or outside WRITE_PATHS) are skipped and listed under
     skipped_write_protected rather than aborting the whole run.
     Returns {replaced_in, total_replacements, skipped_write_protected} when dry_run=False."""
-    return find_replace_in_vault(search, replace, mode=mode, folder=folder, dry_run=dry_run, index=_index)
+    result = find_replace_in_vault(search, replace, mode=mode, folder=folder, dry_run=dry_run, index=_index)
+    if not result.get("dry_run"):
+        log_write(
+            "find_replace_in_vault_tool",
+            folder or None,
+            f"replaced in {len(result.get('replaced_in', []))} note(s)",
+        )
+    return result
 
 
 @mcp.tool()
@@ -626,7 +646,9 @@ def append_to_note_tool(
 ) -> dict:
     """Append content to a note without reading and rewriting the whole file.
     section: optional heading to append under. create=True creates the note if missing."""
-    return append_to_note(path, content, section=section, create=create, index=_index)
+    result = append_to_note(path, content, section=section, create=create, index=_index)
+    log_write("append_to_note_tool", path, "appended content" + (f" under {section!r}" if section else ""))
+    return result
 
 
 @mcp.tool()
@@ -641,7 +663,10 @@ def patch_frontmatter_tool(
     Result carries a `diff` (unified diff against the current file).
     dry_run=True previews {preview, diff, updated_keys} without writing —
     check it, then call again with dry_run=False."""
-    return patch_frontmatter(path, updates, merge_arrays=merge_arrays, index=_index, dry_run=dry_run)
+    result = patch_frontmatter(path, updates, merge_arrays=merge_arrays, index=_index, dry_run=dry_run)
+    if result.get("status") != "dry_run":
+        log_write("patch_frontmatter_tool", path, f"updated keys: {list(updates.keys())}")
+    return result
 
 
 @mcp.tool()
@@ -650,7 +675,10 @@ def patch_frontmatter_batch_tool(updates: list[dict]) -> dict:
     updates: list of {"path": str, "updates": dict, "merge_arrays": bool}
     (merge_arrays defaults to True per entry). One entry failing doesn't
     abort the rest — returns {succeeded: [...], failed: [{path, error}]}."""
-    return patch_frontmatter_batch(updates, index=_index)
+    result = patch_frontmatter_batch(updates, index=_index)
+    for entry in result.get("succeeded", []):
+        log_write("patch_frontmatter_batch_tool", entry.get("path"), f"updated keys: {entry.get('updated_keys')}")
+    return result
 
 
 @mcp.tool()
@@ -661,14 +689,18 @@ def manage_tags_tool(
 ) -> dict:
     """Add or remove tags on a note. Updates frontmatter tags array and strips
     inline #tag occurrences from the body. Returns {added, removed}."""
-    return manage_tags(path, add=add, remove=remove, index=_index)
+    result = manage_tags(path, add=add, remove=remove, index=_index)
+    log_write("manage_tags_tool", path, f"+{add or []} -{remove or []}")
+    return result
 
 
 @mcp.tool()
 def move_note_tool(from_path: str, to_path: str) -> dict:
     """Rename or move a note. Automatically rewrites all wikilinks in the vault
     that reference the old path. Returns {from, to, updated_links_in}."""
-    return move_note(from_path, to_path, index=_index)
+    result = move_note(from_path, to_path, index=_index)
+    log_write("move_note_tool", to_path, f"moved from {from_path}")
+    return result
 
 
 # ── Query / Graph ─────────────────────────────────────────────────────────────
@@ -689,6 +721,28 @@ def get_notes_by_tag_tool(tag: str) -> list[str]:
 def get_vault_conventions_tool() -> str:
     """Return the vault's AI instructions / conventions from _AI_INSTRUCTIONS.md."""
     return get_vault_conventions()
+
+
+@mcp.tool()
+def get_audit_log_tool(
+    path: str | None = None,
+    tool: str | None = None,
+    since: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Query the append-only log of write-tool activity (who/what changed,
+    not just the .trash/ state after the fact). Most recent first.
+    path/tool/since are optional filters (since: ISO timestamp, inclusive).
+    Entries: {timestamp, tool, path, summary}. Covers the core note/folder
+    write tools; canvas/kanban/excalidraw/bases writes aren't logged yet."""
+    return get_audit_log(path=path, tool=tool, since=since, limit=limit)
+
+
+@mcp.tool()
+def get_note_history_tool(path: str, limit: int = 20) -> list[dict]:
+    """Audit-log entries for one specific note, most recent first —
+    what changed and when, without needing to know which tool was used."""
+    return get_note_history(path, limit=limit)
 
 
 @mcp.tool()
@@ -1204,7 +1258,9 @@ def list_files_tool(folder: str = "", extension: str | None = None) -> list[str]
 def create_folder_tool(path: str) -> dict:
     """Create a folder (and any missing parents) in the vault.
     Returns {path, status}."""
-    return create_folder(path)
+    result = create_folder(path)
+    log_write("create_folder_tool", path, "created folder")
+    return result
 
 
 @mcp.tool()
@@ -1212,7 +1268,9 @@ def delete_folder_tool(path: str, trash: bool = True) -> dict:
     """Delete a vault folder.
     trash=True (default) moves it to .trash/ instead of permanent deletion.
     Returns {path, status, trash}."""
-    return delete_folder(path, trash=trash)
+    result = delete_folder(path, trash=trash)
+    log_write("delete_folder_tool", path, f"deleted folder (trash={trash})")
+    return result
 
 
 @mcp.tool()
@@ -1220,7 +1278,9 @@ def rename_folder_tool(from_path: str, to_path: str) -> dict:
     """Rename or move a vault folder. Rewrites path-based wikilinks in all
     notes that reference notes inside the moved folder.
     Returns {from, to, notes_moved, updated_links_in}."""
-    return rename_folder(from_path, to_path, index=_index)
+    result = rename_folder(from_path, to_path, index=_index)
+    log_write("rename_folder_tool", to_path, f"renamed from {from_path}")
+    return result
 
 
 @mcp.tool()
@@ -1238,7 +1298,9 @@ def restore_folder_tool(trashed_name: str, to_path: str) -> dict:
     to_path: where to put it back — the original parent path can't be
     recovered from the trash entry alone, so you choose the destination.
     Returns {path, status, notes_restored}."""
-    return restore_folder(trashed_name, to_path, index=_index)
+    result = restore_folder(trashed_name, to_path, index=_index)
+    log_write("restore_folder_tool", to_path, f"restored from .trash/{trashed_name}")
+    return result
 
 
 # ── MCP Resources ─────────────────────────────────────────────────────────────
