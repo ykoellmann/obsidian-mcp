@@ -67,6 +67,7 @@ from .tools.query import (
     query_notes,
     resolve_alias,
 )
+from .tools.lint import lint_schema
 from .tools.read import get_note_outline, list_notes, read_note, render_note, search_notes
 from .tools.templates import create_from_template, list_templates
 from .tools.write import (
@@ -688,6 +689,19 @@ def get_notes_by_tag_tool(tag: str) -> list[str]:
 def get_vault_conventions_tool() -> str:
     """Return the vault's AI instructions / conventions from _AI_INSTRUCTIONS.md."""
     return get_vault_conventions()
+
+
+@mcp.tool()
+def lint_schema_tool() -> dict:
+    """Validate every note's frontmatter against the enum fields declared in
+    the vault's _AI_INSTRUCTIONS.md (under a "Frontmatter Schema" heading,
+    e.g. `status: inbox | active | done | archived`). Returns
+    {schema, violations: [{path, field, found, expected_enum}]} — only the
+    deviations, not a full vault dump. A field that's simply missing on a
+    note isn't a violation, only a present value outside the declared enum
+    is. Returns an empty schema/violations pair if no enum schema can be
+    parsed from _AI_INSTRUCTIONS.md."""
+    return lint_schema(_index)
 
 
 @mcp.tool()
