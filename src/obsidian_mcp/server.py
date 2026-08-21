@@ -69,6 +69,7 @@ from .tools.query import (
 )
 from .tools.audit import get_audit_log, get_note_history, log_write
 from .tools.lint import lint_schema
+from .tools.similarity import find_similar_notes
 from .tools.read import get_note_outline, list_notes, read_note, render_note, search_notes
 from .tools.templates import create_from_template, list_templates
 from .tools.write import (
@@ -534,6 +535,25 @@ def get_note_outline_tool(path: str) -> dict:
     Returns {headings, block_refs, frontmatter_keys, tags, word_count, line_count}.
     Efficient for large notes where you only need structure."""
     return get_note_outline(path)
+
+
+@mcp.tool()
+def find_similar_notes_tool(
+    text: str,
+    limit: int = 5,
+    exclude_path: str | None = None,
+    min_score: float = 0.1,
+) -> list[dict]:
+    """Find conceptually related notes even when the wording differs — for
+    duplicate prevention before creating a new note ("does this topic
+    already exist under different vocabulary?"). Ranks by TF-IDF cosine
+    similarity over the vault's own vocabulary (a lightweight heuristic,
+    not a transformer embedding model — it catches shared distinctive
+    words across differently-phrased notes, not pure synonym rewrites).
+    exclude_path: skip a note (e.g. the one you're editing) from results.
+    min_score: filters out noise-level matches (0-1, higher = stricter).
+    Returns [{path, score}], most similar first."""
+    return find_similar_notes(text, _index, limit=limit, exclude_path=exclude_path, min_score=min_score)
 
 
 # ── Write ─────────────────────────────────────────────────────────────────────
