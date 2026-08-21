@@ -555,6 +555,71 @@ def _match_snippets(raw: str, pattern: re.Pattern, limit: int = 3) -> list[dict]
     return snippets
 
 
+def patch_note_text(
+    path: str,
+    find: str,
+    replace: str,
+    mode: str = "exact",
+    count: int = 1,
+    dry_run: bool = False,
+    index: VaultIndex | None = None,
+) -> dict:
+    """Find and replace text anywhere in a note's body — no heading/block-ref
+    anchor required, unlike patch_note_tool. For a handful of scattered
+    single-note edits (e.g. "bump this one enum value" inside a long note)
+    this is far cheaper than reading, rewriting, and re-sending the whole
+    note through write_note_tool.
+
+    mode: 'exact' (literal substring, default) | 'regex'.
+    count: max replacements (default 1, first match only); 0 = replace all.
+    dry_run=True (default False) previews matches and the resulting diff
+    without writing anything.
+    Raises ValueError if `find` doesn't match anything in the note.
+    """
+    cfg = get_config()
+    validate_path(cfg.vault_path, path)
+    _check_write_permission(path)
+
+    full_path = cfg.vault_path / path
+    if not full_path.exists():
+        raise FileNotFoundError(f"Note not found: {path!r}")
+
+    if mode == "regex":
+        try:
+            pattern = re.compile(find)
+        except re.error as exc:
+            raise ValueError(f"Invalid regex: {exc}") from exc
+    else:
+        pattern = re.compile(re.escape(find))
+
+    lock = acquire_lock(str(full_path))
+    try:
+        raw = full_path.read_text(encoding="utf-8")
+        replace_count = count if count > 0 else 0
+        patched, n = pattern.subn(replace, raw, count=replace_count)
+        if n == 0:
+            raise ValueError(f"{find!r} not found in {path!r}")
+        diff = _unified_diff(raw, patched, path)
+
+        if dry_run:
+            return {
+                "path": path,
+                "status": "dry_run",
+                "replacements": n,
+                "preview": _match_snippets(raw, pattern, limit=5),
+                "diff": diff,
+            }
+
+        write_file_atomic(cfg.vault_path, path, patched)
+    finally:
+        lock.release()
+
+    if index is not None:
+        index.update(path)
+
+    return {"path": path, "status": "patched", "replacements": n, "diff": diff}
+
+
 def find_replace_in_vault(
     search: str,
     replace: str,

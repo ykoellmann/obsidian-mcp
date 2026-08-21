@@ -13,6 +13,7 @@ from obsidian_mcp.tools.write import (
     patch_frontmatter,
     patch_frontmatter_batch,
     patch_note,
+    patch_note_text,
     restore_note,
     write_note,
 )
@@ -176,6 +177,60 @@ def test_patch_note_block_ref_append(tmp_path, vault_factory):
     content = (tmp_path / "note.md").read_text()
     assert "AFTER" in content
     assert content.index("^myblock") < content.index("AFTER")
+
+
+# ── patch_note_text ───────────────────────────────────────────────────────
+
+def test_patch_note_text_exact_replace(tmp_path, vault_factory):
+    vault_factory({"note.md": "status: inbox | active | done | archived\nOther line.\n"})
+    result = patch_note_text(
+        "note.md",
+        "status: inbox | active | done | archived",
+        "status: inbox | active | in-progress | done | archived",
+    )
+    assert result["replacements"] == 1
+    content = (tmp_path / "note.md").read_text()
+    assert "in-progress" in content
+    assert "Other line." in content
+
+
+def test_patch_note_text_regex_mode(tmp_path, vault_factory):
+    vault_factory({"note.md": "version: 1.0.0\n"})
+    patch_note_text("note.md", r"\d+\.\d+\.\d+", "2.0.0", mode="regex")
+    assert (tmp_path / "note.md").read_text() == "version: 2.0.0\n"
+
+
+def test_patch_note_text_count_zero_replaces_all(tmp_path, vault_factory):
+    vault_factory({"note.md": "foo foo foo\n"})
+    result = patch_note_text("note.md", "foo", "bar", count=0)
+    assert result["replacements"] == 3
+    assert (tmp_path / "note.md").read_text() == "bar bar bar\n"
+
+
+def test_patch_note_text_count_one_replaces_first_only(tmp_path, vault_factory):
+    vault_factory({"note.md": "foo foo foo\n"})
+    patch_note_text("note.md", "foo", "bar", count=1)
+    assert (tmp_path / "note.md").read_text() == "bar foo foo\n"
+
+
+def test_patch_note_text_not_found_raises(tmp_path, vault_factory):
+    vault_factory({"note.md": "content\n"})
+    with pytest.raises(ValueError, match="not found"):
+        patch_note_text("note.md", "nonexistent", "x")
+
+
+def test_patch_note_text_dry_run_does_not_write(tmp_path, vault_factory):
+    vault_factory({"note.md": "old value\n"})
+    result = patch_note_text("note.md", "old", "new", dry_run=True)
+    assert result["status"] == "dry_run"
+    assert (tmp_path / "note.md").read_text() == "old value\n"
+    assert "+new value" in result["diff"]
+
+
+def test_patch_note_text_missing_note_raises(vault_factory):
+    vault_factory({})
+    with pytest.raises(FileNotFoundError):
+        patch_note_text("nonexistent.md", "a", "b")
 
 
 # ── delete_note ───────────────────────────────────────────────────────────

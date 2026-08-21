@@ -78,6 +78,7 @@ from .tools.write import (
     patch_frontmatter,
     patch_frontmatter_batch,
     patch_note,
+    patch_note_text,
     restore_note,
     write_note,
 )
@@ -559,6 +560,25 @@ def patch_note_tool(
     mode: 'replace' (default) | 'insert_before' | 'insert_after' | 'append'.
     target_type: 'heading' (default) | 'block_ref' (use section='^block-id')."""
     return patch_note(path, section, new_content, mode=mode, target_type=target_type, index=_index)
+
+
+@mcp.tool()
+def patch_note_text_tool(
+    path: str,
+    find: str,
+    replace: str,
+    mode: str = "exact",
+    count: int = 1,
+    dry_run: bool = False,
+) -> dict:
+    """Find and replace text anywhere in one note's body — no heading/block-ref
+    anchor required, unlike patch_note_tool. Cheaper than write_note_tool for
+    a scattered single-note edit (e.g. bumping one enum value inside a long note).
+    mode: 'exact' (default, literal substring) | 'regex'.
+    count: max replacements (default 1, first match only); 0 = replace all.
+    dry_run=True previews {replacements, preview, diff} without writing.
+    Raises ValueError if `find` doesn't match anything."""
+    return patch_note_text(path, find, replace, mode=mode, count=count, dry_run=dry_run, index=_index)
 
 
 @mcp.tool()
