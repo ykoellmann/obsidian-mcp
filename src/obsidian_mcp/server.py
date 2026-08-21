@@ -104,17 +104,27 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 
 ### Reading & Search
 - `list_notes_tool(folder, include_meta)` — list notes; include_meta=True adds title/tags/status/mtime
+- `list_files_tool(folder, extension)` — list every file (any type, not just notes), optional extension filter
 - `read_note_tool(path)` — full note: content, frontmatter, tags, wikilinks, tasks, inline_fields
 - `get_note_outline_tool(path)` — headings, block refs, frontmatter keys — efficient for large notes
-- `search_notes_tool(query, tag, mode, limit)` — full-text search with snippets; mode: exact|regex|fuzzy
+- `search_notes_tool(query, tag, mode, limit, frontmatter_filter, field, threshold)` — full-text search
+  with snippets; mode: exact|regex|fuzzy; field: None|'filename'; combine with frontmatter_filter in one call
+- `find_similar_notes_tool(text, limit, exclude_path, min_score)` — TF-IDF similarity search for
+  duplicate prevention ("does this topic already exist under different wording?")
 - `render_note_tool(path, depth)` — resolves ![[embed]] transclusions inline
+- `lint_schema_tool()` — validate frontmatter against the enums declared in _AI_INSTRUCTIONS.md
 
 ### Writing
-- `write_note_tool(path, content)` — create or overwrite a note
+- `write_note_tool(path, content, dry_run)` — create or overwrite a note; preserves existing
+  frontmatter if the new content has none; dry_run previews {preview, diff} without writing
 - `patch_note_tool(path, section, new_content, mode, target_type)` — edit one section;
   mode: replace|insert_before|insert_after|append — target_type: heading|block_ref
+- `patch_note_text_tool(path, find, replace, mode, count, dry_run)` — find/replace anywhere in a
+  note's body, no heading/block-ref anchor required
 - `append_to_note_tool(path, content, section, create)` — append to end or under a heading
-- `patch_frontmatter_tool(path, updates, merge_arrays)` — update YAML keys without touching the body
+- `patch_frontmatter_tool(path, updates, merge_arrays, dry_run)` — update YAML keys without touching
+  the body; dry_run previews {preview, diff} without writing
+- `patch_frontmatter_batch_tool(updates)` — patch frontmatter on multiple notes in one call
 - `manage_tags_tool(path, add, remove)` — add/remove tags in frontmatter and inline
 - `delete_note_tool(path, trash)` — trash=True (default) moves to .trash/
 - `restore_note_tool(trashed_name, to_path)` — undo a trashed delete; trashed_name from list_trash_tool
@@ -123,7 +133,8 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
   every note; dry_run=True (default) previews matches before writing anything
 
 ### Folders
-- `list_folder_tool(path)` — immediate contents (path="" = vault root); hides dotfiles
+- `list_folder_tool(path, recursive, max_depth)` — contents (path="" = vault root); hides dotfiles;
+  recursive=True returns a full tree dump in one call
 - `create_folder_tool(path)` — create folder, parents auto-created
 - `delete_folder_tool(path, trash)` — delete or trash a folder
 - `restore_folder_tool(trashed_name, to_path)` — undo a trashed delete; trashed_name from list_trash_tool
@@ -131,11 +142,15 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 - `list_trash_tool()` — see what's sitting in .trash/, with the names restore_*_tool expects
 
 ### Querying & Graph
-- `query_notes_tool(tags, status, frontmatter_filter, inline_field_filter, sort_by, limit, folder)` — Dataview-like filter
+- `query_notes_tool(tags, status, frontmatter_filter, inline_field_filter, sort_by, limit, folder)` —
+  Dataview-like filter; frontmatter_filter values may be exact or an operator dict
+  ($ne/$eq/$in/$nin/$exists)
 - `get_backlinks_tool(path)` — notes that link to this note
 - `get_broken_links_tool()` — wikilinks pointing to non-existent notes
 - `get_orphans_tool(exclude_folders)` — notes with no incoming backlinks
 - `get_link_graph_tool(root, depth, direction)` — BFS link graph; direction: outgoing|incoming|both
+- `get_audit_log_tool(path, tool, since, limit)` / `get_note_history_tool(path, limit)` — write-action
+  audit trail (what changed, when, with which tool), most recent first
 - `get_vault_stats_tool()` — note/link counts, orphans, most-linked notes
 - `get_tasks_tool(status, folder, tag)` — tasks across vault; status: open|done|all
 - `get_notes_by_tag_tool(tag)`, `get_tag_tree_tool()`, `list_all_tags_tool(sort_by)`

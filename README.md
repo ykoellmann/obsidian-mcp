@@ -22,11 +22,14 @@ The intended setup is to host obsidian-mcp on a server or NAS where your vault i
 
 ## Features
 
-- **Read & Search** — read notes, search full-text (exact/regex/fuzzy), render embedded transclusions, inspect note outlines
-- **Write** — create/overwrite notes, patch sections, append content, update frontmatter, manage tags, move notes with automatic wikilink rewriting
-- **Folders** — list, create, delete, rename folders; renaming rewrites path-based wikilinks vault-wide
+- **Read & Search** — read notes, search full-text (exact/regex/fuzzy, optionally combined with a frontmatter filter or scoped to filenames), render embedded transclusions, inspect note outlines, list every file in the vault regardless of type
+- **Duplicate prevention** — `find_similar_notes_tool` ranks notes by TF-IDF similarity so a new note doesn't duplicate an existing one under different wording
+- **Schema linting** — `lint_schema_tool` validates frontmatter against the enums declared in your own `_AI_INSTRUCTIONS.md`, plus an optional cron-friendly health-check script
+- **Write** — create/overwrite notes (with automatic frontmatter preservation, dry-run previews, and unified diffs), patch sections or anchor-less body text, append content, update frontmatter (single or batch), manage tags, move notes with automatic wikilink rewriting
+- **Folders** — list (optionally recursive with a full tree dump), create, delete, rename folders; renaming rewrites path-based wikilinks vault-wide
 - **Query & Graph** — backlinks, broken links, orphan detection, BFS link graph, vault stats, task collection across vault
-- **Dataview-like queries** — filter notes by tags, status, frontmatter fields, or inline fields (`key:: value`)
+- **Dataview-like queries** — filter notes by tags, status, frontmatter fields (exact match or `$ne`/`$in`/`$nin`/`$exists` operators), or inline fields (`key:: value`)
+- **Audit log** — every write-tool call is recorded ({timestamp, tool, path, summary}); `get_audit_log_tool`/`get_note_history_tool` query it
 - **Periodic Notes** — read/preview daily, weekly, monthly, quarterly, yearly journal notes from templates
 - **Canvas** *(opt-in via `ENABLE_CANVAS`)* — read, create, and patch Obsidian Canvas (`.canvas`) files
 - **Excalidraw** *(opt-in via `ENABLE_EXCALIDRAW`)* — read, create, and patch Obsidian Excalidraw (`*.excalidraw.md`) drawings
