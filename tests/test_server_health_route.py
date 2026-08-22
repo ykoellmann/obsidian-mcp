@@ -15,7 +15,7 @@ def _client():
 @pytest.mark.asyncio
 async def test_health_before_startup_returns_503(monkeypatch):
     monkeypatch.setattr(server, "_cfg", None)
-    monkeypatch.setattr(server, "_index", None)
+    monkeypatch.setattr(server, "_indices", {})
 
     async with _client() as client:
         resp = await client.get("/health")
@@ -27,8 +27,9 @@ async def test_health_before_startup_returns_503(monkeypatch):
 @pytest.mark.asyncio
 async def test_health_ready_returns_ok(tmp_path, vault_factory, monkeypatch):
     idx = vault_factory({"note.md": "# Hello"})
-    monkeypatch.setattr(server, "_cfg", server.get_config())
-    monkeypatch.setattr(server, "_index", idx)
+    cfg = server.get_config()
+    monkeypatch.setattr(server, "_cfg", cfg)
+    monkeypatch.setattr(server, "_indices", {cfg.default_vault_name: idx})
 
     async with _client() as client:
         resp = await client.get("/health")
@@ -46,8 +47,9 @@ async def test_health_requires_no_auth(tmp_path, vault_factory, monkeypatch):
     it exposes no vault content, only process liveness."""
     idx = vault_factory({})
     monkeypatch.setenv("API_KEY", "test-key")
-    monkeypatch.setattr(server, "_cfg", server.get_config())
-    monkeypatch.setattr(server, "_index", idx)
+    cfg = server.get_config()
+    monkeypatch.setattr(server, "_cfg", cfg)
+    monkeypatch.setattr(server, "_indices", {cfg.default_vault_name: idx})
 
     async with _client() as client:
         resp = await client.get("/health")

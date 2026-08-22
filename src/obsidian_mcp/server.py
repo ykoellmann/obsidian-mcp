@@ -11,10 +11,18 @@ import threading
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, AuthProvider, MultiAuth, TokenVerifier
 from fastmcp.server.auth.providers.github import GitHubProvider
+from fastmcp.server.dependencies import get_access_token
+from fastmcp.server.middleware import Middleware, MiddlewareContext
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from .config import get_config
+from .config import (
+    ConfigError,
+    get_config,
+    load_vaults_file,
+    reset_current_vault,
+    set_current_vault,
+)
 from .domain.index import VaultIndex
 from .storage.filesystem import PathTraversalError, read_file, validate_path
 from .storage.watcher import VaultWatcher
@@ -350,15 +358,21 @@ def _load_instructions() -> str:
 
 
 class _APIKeyAuthProvider(TokenVerifier):
-    """Simple static API-key auth. Clients must send: Authorization: Bearer <key>."""
+    """Static API-key auth, one or more keys. Clients must send:
+    Authorization: Bearer <key>. client_id on the returned AccessToken is
+    the matched key itself — in multi-vault mode that's what
+    VaultResolutionMiddleware looks up in the identities table (single-key
+    mode has no such lookup, so the exact client_id value doesn't matter
+    there beyond being stable)."""
 
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, api_keys: list[str]) -> None:
         super().__init__()
-        self._key = api_key
+        self._keys = api_keys
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        if hmac.compare_digest(token, self._key):
-            return AccessToken(token=token, client_id="api-key", scopes=[])
+        for key in self._keys:
+            if hmac.compare_digest(token, key):
+                return AccessToken(token=token, client_id=key, scopes=[])
         logger.warning("Rejected request with invalid API key")
         return None
 
@@ -387,22 +401,45 @@ class _RestrictedGitHubVerifier(TokenVerifier):
         return result
 
 
-def _build_auth() -> AuthProvider | None:
-    # Reads os.environ directly (not get_config()) so this module can still be
-    # imported without VAULT_PATH set (e.g. during testing or linting).
-    # Config.__init__ performs the actual validation of these values later.
+def _identities_from_env() -> tuple[list[str], list[str]]:
+    """(api_keys, allowed_github_logins) — from VAULTS_CONFIG if set, else
+    the legacy single-vault env vars. Reads os.environ directly (not
+    get_config()) so this module can still be imported without VAULT_PATH
+    set (e.g. during testing or linting); a broken VAULTS_CONFIG here is
+    swallowed (falls back to empty — no auth configured) rather than
+    raised, since Config.__init__ is the actual place that validates it and
+    fails loudly at real startup. Don't let a parse error here silently
+    grant unauthenticated access, though — an empty result just means no
+    verifier gets built at all, so the server refuses to start over the
+    network per the has_api_keys/oauth_configured check in Config.__init__."""
+    vaults_config_path = os.environ.get("VAULTS_CONFIG", "")
+    if vaults_config_path:
+        try:
+            _vaults, identities = load_vaults_file(vaults_config_path)
+        except ConfigError:
+            return [], []
+        api_keys = [i.value for i in identities if i.type == "api_key"]
+        allowed_logins = [i.value for i in identities if i.type == "github_login"]
+        return api_keys, allowed_logins
+
     key = os.environ.get("API_KEY") or os.environ.get("OBSIDIAN_MCP_API_KEY")
-    api_key_verifier = _APIKeyAuthProvider(key) if key else None
+    api_keys = [key] if key else []
+    allowed_logins = [
+        login.strip().lower()
+        for login in os.environ.get("OAUTH_GITHUB_ALLOWED_LOGINS", "").split(",")
+        if login.strip()
+    ]
+    return api_keys, allowed_logins
+
+
+def _build_auth() -> AuthProvider | None:
+    api_keys, allowed_logins = _identities_from_env()
+    api_key_verifier = _APIKeyAuthProvider(api_keys) if api_keys else None
 
     client_id = os.environ.get("OAUTH_GITHUB_CLIENT_ID")
     client_secret = os.environ.get("OAUTH_GITHUB_CLIENT_SECRET")
     github_provider = None
     if client_id and client_secret:
-        allowed_logins = [
-            login.strip().lower()
-            for login in os.environ.get("OAUTH_GITHUB_ALLOWED_LOGINS", "").split(",")
-            if login.strip()
-        ]
         base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
         # Client registrations + encrypted tokens persist under FastMCP's own
@@ -441,13 +478,95 @@ def _build_auth() -> AuthProvider | None:
     return None
 
 
-# Initialized in main() — None at import time so the module can be imported
-# without VAULT_PATH set (e.g. during testing or linting).
+class _CurrentVaultIndex:
+    """Every existing @mcp.tool()/@mcp.resource() call site passes/uses
+    `_index` as a single VaultIndex — this proxy lets that keep working
+    completely unchanged even though there's now one VaultIndex per
+    configured vault. Attribute access is forwarded to whichever vault's
+    index the current context resolves to (contextvars, set per tool call
+    by VaultResolutionMiddleware in multi-vault mode; the single configured
+    vault otherwise)."""
+
+    def __getattr__(self, name: str):
+        vault_name = get_config().resolve_vault_name()
+        return getattr(_indices[vault_name], name)
+
+
+def _resolve_identity(cfg) -> object:
+    """Find the Identity (config.Identity) matching the current request's
+    AccessToken — GitHub login if the token carries one (OAuth), else the
+    API key itself (client_id, see _APIKeyAuthProvider). Raises
+    PermissionError if there's no authenticated identity or no VAULTS_CONFIG
+    entry for it — never silently falls back to some default vault for an
+    identity nothing was configured for."""
+    access_token = get_access_token()
+    if access_token is None:
+        raise PermissionError("No authenticated identity available to resolve a vault for")
+
+    login = str((access_token.claims or {}).get("login", "")).lower()
+    candidates = [("github_login", login)] if login else []
+    candidates.append(("api_key", access_token.client_id))
+
+    for itype, value in candidates:
+        if not value:
+            continue
+        for identity in cfg.identities:
+            if identity.type == itype and identity.value == value:
+                return identity
+
+    raise PermissionError("This identity has no vault access configured in VAULTS_CONFIG")
+
+
+class VaultResolutionMiddleware(Middleware):
+    """In multi-vault mode, resolves which vault a tool call/resource read
+    operates on and sets the current-vault contextvar for its duration —
+    every tools/*.py function then transparently sees the right
+    get_config().vault_path/write_paths/exclude_paths/read_only and the
+    right VaultIndex (via _CurrentVaultIndex above), without any of them
+    needing to know multi-vault exists. A no-op pass-through in
+    single-vault mode (VAULTS_CONFIG unset).
+
+    Phase 1 only: each identity must resolve to exactly one vault (its
+    "default" in VAULTS_CONFIG) — there's no `vault` tool parameter yet to
+    pick a different one for an identity with several. See the multi-vault
+    plan for the Phase 2 follow-up (explicit vault= switching).
+
+    Not covered here: the /attachments/* and /health custom HTTP routes
+    don't go through MCP tool-call dispatch, so this middleware never runs
+    for them — they still resolve to Config.default_vault_name (the first
+    configured vault) regardless of which identity is calling. Fine for
+    Phase 1's target use case (isolated vaults, mostly note-tool traffic);
+    flagged here so it isn't a silent surprise.
+    """
+
+    async def _resolve_and_run(self, context: MiddlewareContext, call_next):
+        cfg = get_config()
+        if not cfg.multi_vault:
+            return await call_next(context)
+
+        identity = _resolve_identity(cfg)
+        token = set_current_vault(identity.default)
+        try:
+            return await call_next(context)
+        finally:
+            reset_current_vault(token)
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        return await self._resolve_and_run(context, call_next)
+
+    async def on_read_resource(self, context: MiddlewareContext, call_next):
+        return await self._resolve_and_run(context, call_next)
+
+
+# Initialized in main() — empty at import time so the module can be imported
+# without VAULT_PATH/VAULTS_CONFIG set (e.g. during testing or linting).
 _cfg = None
-_index: VaultIndex | None = None
-_watcher = None
+_indices: dict[str, VaultIndex] = {}
+_watchers: dict[str, VaultWatcher] = {}
+_index = _CurrentVaultIndex()
 
 mcp = FastMCP(name="obsidian-mcp", instructions=_load_instructions(), auth=_build_auth())
+mcp.add_middleware(VaultResolutionMiddleware())
 
 
 def _feature_flags_from_env() -> tuple[bool, bool, bool, bool]:
@@ -961,6 +1080,13 @@ async def _check_bearer_token(request: Request, cfg) -> bool:
 
 
 def _check_scoped_token(request: Request, cfg, method: str, path: str) -> bool:
+    # cfg.api_key is always "" in multi-vault mode (VAULTS_CONFIG) — scoped
+    # attachment tokens are signed against one single global key, which
+    # multi-vault mode deliberately doesn't have. create_attachment_token_tool
+    # still works there in the sense that it won't error, but tokens it
+    # mints will never verify; _check_bearer_token's plain Authorization:
+    # Bearer <key> path above still works fine in multi-vault mode, since it
+    # goes through the full multi-key/OAuth verifier instead.
     if not cfg.api_key:
         return False
     exp = request.query_params.get("exp")
@@ -975,18 +1101,22 @@ async def health_route(request: Request) -> Response:
     """Unauthenticated liveness/readiness check for Docker HEALTHCHECK,
     uptime monitors, etc. Returns no vault content, so no auth is required.
 
-    Returns {status: "starting"|"ok", vault_path, index_ready}.
-    503 while the server hasn't finished VaultIndex._cfg/_index setup yet
-    (main() hasn't run), 200 once ready — index_ready itself may still be
-    False right after startup while the initial index build is in progress.
+    Returns {status: "starting"|"ok", vault_path, index_ready}. In
+    multi-vault mode, vault_path/index_ready are for Config.default_vault_name
+    (the first configured vault) — this route doesn't go through
+    VaultResolutionMiddleware, so there's no per-identity vault to report on.
+    503 while the server hasn't finished setup yet (main() hasn't run or
+    hasn't populated _indices yet), 200 once ready — index_ready itself may
+    still be False right after startup while the initial index build is in
+    progress.
     """
-    if _cfg is None or _index is None:
+    if _cfg is None or not _indices:
         return JSONResponse({"status": "starting"}, status_code=503)
     return JSONResponse(
         {
             "status": "ok",
             "vault_path": str(_cfg.vault_path),
-            "index_ready": _index.is_ready(),
+            "index_ready": _indices[_cfg.default_vault_name].is_ready(),
         }
     )
 
@@ -1364,12 +1494,17 @@ def vault_tags_resource() -> list:
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global _cfg, _index, _watcher
+    global _cfg
     _cfg = get_config()
-    _index = VaultIndex(_cfg.vault_path, exclude_paths=_cfg.exclude_paths)
-    _watcher = VaultWatcher(_cfg.vault_path)
-    threading.Thread(target=_index.build, daemon=True).start()
-    _watcher.start(on_change=_index.update)
+    for name, vault in _cfg.vaults.items():
+        index = VaultIndex(vault.path, exclude_paths=vault.exclude_paths)
+        watcher = VaultWatcher(vault.path)
+        _indices[name] = index
+        _watchers[name] = watcher
+        threading.Thread(target=index.build, daemon=True).start()
+        watcher.start(on_change=index.update)
+    if _cfg.multi_vault:
+        logger.info("Multi-vault mode: %d vault(s) configured (%s)", len(_cfg.vaults), ", ".join(_cfg.vaults))
     if _cfg.transport == "stdio":
         logger.info("Starting obsidian-mcp (transport=stdio)")
         mcp.run(transport=_cfg.transport)

@@ -5,7 +5,13 @@ import json
 
 import pytest
 
-from obsidian_mcp.config import Config, ConfigError, load_vaults_file, reset_current_vault, set_current_vault
+from obsidian_mcp.config import (
+    Config,
+    ConfigError,
+    load_vaults_file,
+    reset_current_vault,
+    set_current_vault,
+)
 
 
 def _base_env(monkeypatch, tmp_path):
