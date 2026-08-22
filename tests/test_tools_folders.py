@@ -5,6 +5,7 @@ import pytest
 from obsidian_mcp.tools.folders import (
     create_folder,
     delete_folder,
+    list_files,
     list_folder,
     list_trash,
     rename_folder,
@@ -171,6 +172,71 @@ def test_list_folder_non_dir_raises(vault_factory):
     vault_factory({"note.md": "content"})
     with pytest.raises(ValueError, match="Not a folder"):
         list_folder("note.md")
+
+
+def test_list_folder_recursive_full_tree(vault_factory):
+    vault_factory({
+        "a.md": "A",
+        "Projekte/active.md": "active",
+        "Projekte/Sub/deep.md": "deep",
+    })
+    result = list_folder(recursive=True)
+    assert result["path"] == "/"
+    assert "a.md" in result["tree"]["files"]
+    assert "Projekte/active.md" in result["tree"]["folders"]["Projekte"]["files"]
+    assert "Projekte/Sub/deep.md" in result["tree"]["folders"]["Projekte"]["folders"]["Sub"]["files"]
+
+
+def test_list_folder_recursive_max_depth(vault_factory):
+    vault_factory({
+        "Projekte/active.md": "active",
+        "Projekte/Sub/deep.md": "deep",
+    })
+    result = list_folder(recursive=True, max_depth=1)
+    # depth 1 = immediate children only; "Sub" itself doesn't get descended into
+    assert "Projekte" in result["tree"]["folders"]
+    assert result["tree"]["folders"]["Projekte"]["folders"] == {}
+
+
+def test_list_folder_recursive_hides_dotfiles(tmp_path, vault_factory):
+    vault_factory({"a.md": "A"})
+    (tmp_path / ".obsidian").mkdir()
+    result = list_folder(recursive=True)
+    assert ".obsidian" not in result["tree"]["folders"]
+
+
+# ── list_files ────────────────────────────────────────────────────────────
+
+def test_list_files_returns_all_types(vault_factory):
+    vault_factory({"note.md": "A", "note.md.lock": "lock"})
+    results = list_files()
+    assert "note.md" in results
+    assert "note.md.lock" in results
+
+
+def test_list_files_extension_filter(vault_factory):
+    vault_factory({"note.md": "A", "note.md.lock": "lock", "other.canvas": "{}"})
+    results = list_files(extension="lock")
+    assert results == ["note.md.lock"]
+
+
+def test_list_files_extension_filter_dot_optional(vault_factory):
+    vault_factory({"a.canvas": "{}", "b.md": "content"})
+    assert list_files(extension=".canvas") == ["a.canvas"]
+
+
+def test_list_files_folder_scope(vault_factory):
+    vault_factory({"a.md": "A", "Projekte/b.md": "B"})
+    results = list_files(folder="Projekte")
+    assert results == ["Projekte/b.md"]
+
+
+def test_list_files_skips_hidden(tmp_path, vault_factory):
+    vault_factory({"a.md": "A"})
+    (tmp_path / ".trash").mkdir()
+    (tmp_path / ".trash" / "x.md").write_text("x")
+    results = list_files()
+    assert all(not r.startswith(".trash") for r in results)
 
 
 # ── rename_folder ─────────────────────────────────────────────────────────

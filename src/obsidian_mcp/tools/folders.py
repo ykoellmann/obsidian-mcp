@@ -101,8 +101,17 @@ def restore_folder(trashed_name: str, to_path: str, index: VaultIndex | None = N
     return {"path": to_path, "status": "restored", "notes_restored": notes_restored}
 
 
-def list_folder(path: str = "") -> dict:
-    """List the immediate contents of a vault folder (non-hidden files and subfolders)."""
+def list_folder(path: str = "", recursive: bool = False, max_depth: int | None = None) -> dict:
+    """List the contents of a vault folder (non-hidden files and subfolders).
+
+    recursive=False (default): only the immediate contents — unchanged
+    behavior, `{path, folders, files}`.
+    recursive=True: a full tree dump in one call instead of one
+    list_folder_tool round-trip per level. max_depth limits how many levels
+    deep to descend (None = unlimited); depth 1 is `path`'s immediate
+    children, same as non-recursive. Returns `{path, tree}` where `tree` is
+    a nested `{folders: {name: tree}, files: [...]}` structure.
+    """
     cfg = get_config()
     target = validate_path(cfg.vault_path, path) if path else cfg.vault_path
 
@@ -111,18 +120,66 @@ def list_folder(path: str = "") -> dict:
     if not target.is_dir():
         raise ValueError(f"Not a folder: {path!r}")
 
-    folders: list[str] = []
+    if not recursive:
+        folders: list[str] = []
+        files: list[str] = []
+        for item in sorted(target.iterdir()):
+            if item.name.startswith("."):
+                continue
+            rel = str(item.relative_to(cfg.vault_path))
+            if item.is_dir():
+                folders.append(rel)
+            else:
+                files.append(rel)
+        return {"path": path or "/", "folders": folders, "files": files}
+
+    tree = _build_tree(target, cfg.vault_path, depth=1, max_depth=max_depth)
+    return {"path": path or "/", "tree": tree}
+
+
+def _build_tree(dir_path: Path, vault_root: Path, depth: int, max_depth: int | None) -> dict:
+    """depth = the level of the subfolders about to be listed (1 = dir_path's
+    immediate children). A subfolder is always listed; its own contents are
+    only descended into if there's depth budget left (max_depth is None, or
+    depth < max_depth) — otherwise it appears as an empty stub."""
+    folders: dict[str, dict] = {}
     files: list[str] = []
-    for item in sorted(target.iterdir()):
+    for item in sorted(dir_path.iterdir()):
         if item.name.startswith("."):
             continue
-        rel = str(item.relative_to(cfg.vault_path))
         if item.is_dir():
-            folders.append(rel)
+            if max_depth is not None and depth >= max_depth:
+                folders[item.name] = {"folders": {}, "files": []}
+            else:
+                folders[item.name] = _build_tree(item, vault_root, depth + 1, max_depth)
         else:
-            files.append(rel)
+            files.append(str(item.relative_to(vault_root)))
+    return {"folders": folders, "files": files}
 
-    return {"path": path or "/", "folders": folders, "files": files}
+
+def list_files(folder: str = "", extension: str | None = None) -> list[str]:
+    """List every file in the vault (or a subfolder), any type — not just
+    notes/attachments/bases/canvases. extension filters by suffix without
+    the dot (e.g. "lock" to find .lock files, "canvas", "base"); omit for
+    everything. Hidden files/folders (dotfiles, .trash/) are skipped, same
+    as list_folder_tool."""
+    cfg = get_config()
+    base = validate_path(cfg.vault_path, folder) if folder else cfg.vault_path
+    if not base.exists():
+        raise FileNotFoundError(f"Folder not found: {folder!r}")
+
+    suffix = f".{extension.lstrip('.')}" if extension else None
+    results: list[str] = []
+    for item in base.rglob("*"):
+        if not item.is_file():
+            continue
+        if any(part.startswith(".") for part in item.relative_to(cfg.vault_path).parts):
+            continue
+        if suffix and item.suffix != suffix:
+            continue
+        results.append(str(item.relative_to(cfg.vault_path)))
+
+    return sorted(results)
 
 
 def rename_folder(

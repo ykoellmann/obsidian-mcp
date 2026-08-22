@@ -26,6 +26,7 @@ from .tools.attachments import (
     verify_attachment_token,
     write_attachment_bytes,
 )
+from .tools.audit import get_audit_log, get_note_history, log_write
 from .tools.bases import list_bases, patch_base, read_base, write_base
 from .tools.canvas import list_canvases, patch_canvas, read_canvas, write_canvas
 from .tools.excalidraw import (
@@ -37,6 +38,7 @@ from .tools.excalidraw import (
 from .tools.folders import (
     create_folder,
     delete_folder,
+    list_files,
     list_folder,
     list_trash,
     rename_folder,
@@ -49,6 +51,7 @@ from .tools.kanban import (
     move_kanban_card,
     read_kanban,
 )
+from .tools.lint import lint_schema
 from .tools.prompts import daily_note_prompt, weekly_review_prompt
 from .tools.query import (
     get_backlinks,
@@ -67,6 +70,7 @@ from .tools.query import (
     resolve_alias,
 )
 from .tools.read import get_note_outline, list_notes, read_note, render_note, search_notes
+from .tools.similarity import find_similar_notes
 from .tools.templates import create_from_template, list_templates
 from .tools.write import (
     append_to_note,
@@ -75,7 +79,9 @@ from .tools.write import (
     manage_tags,
     move_note,
     patch_frontmatter,
+    patch_frontmatter_batch,
     patch_note,
+    patch_note_text,
     restore_note,
     write_note,
 )
@@ -98,17 +104,27 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 
 ### Reading & Search
 - `list_notes_tool(folder, include_meta)` — list notes; include_meta=True adds title/tags/status/mtime
+- `list_files_tool(folder, extension)` — list every file (any type, not just notes), optional extension filter
 - `read_note_tool(path)` — full note: content, frontmatter, tags, wikilinks, tasks, inline_fields
 - `get_note_outline_tool(path)` — headings, block refs, frontmatter keys — efficient for large notes
-- `search_notes_tool(query, tag, mode, limit)` — full-text search with snippets; mode: exact|regex|fuzzy
+- `search_notes_tool(query, tag, mode, limit, frontmatter_filter, field, threshold)` — full-text search
+  with snippets; mode: exact|regex|fuzzy; field: None|'filename'; combine with frontmatter_filter in one call
+- `find_similar_notes_tool(text, limit, exclude_path, min_score)` — TF-IDF similarity search for
+  duplicate prevention ("does this topic already exist under different wording?")
 - `render_note_tool(path, depth)` — resolves ![[embed]] transclusions inline
+- `lint_schema_tool()` — validate frontmatter against the enums declared in _AI_INSTRUCTIONS.md
 
 ### Writing
-- `write_note_tool(path, content)` — create or overwrite a note
+- `write_note_tool(path, content, dry_run)` — create or overwrite a note; preserves existing
+  frontmatter if the new content has none; dry_run previews {preview, diff} without writing
 - `patch_note_tool(path, section, new_content, mode, target_type)` — edit one section;
   mode: replace|insert_before|insert_after|append — target_type: heading|block_ref
+- `patch_note_text_tool(path, find, replace, mode, count, dry_run)` — find/replace anywhere in a
+  note's body, no heading/block-ref anchor required
 - `append_to_note_tool(path, content, section, create)` — append to end or under a heading
-- `patch_frontmatter_tool(path, updates, merge_arrays)` — update YAML keys without touching the body
+- `patch_frontmatter_tool(path, updates, merge_arrays, dry_run)` — update YAML keys without touching
+  the body; dry_run previews {preview, diff} without writing
+- `patch_frontmatter_batch_tool(updates)` — patch frontmatter on multiple notes in one call
 - `manage_tags_tool(path, add, remove)` — add/remove tags in frontmatter and inline
 - `delete_note_tool(path, trash)` — trash=True (default) moves to .trash/
 - `restore_note_tool(trashed_name, to_path)` — undo a trashed delete; trashed_name from list_trash_tool
@@ -117,7 +133,8 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
   every note; dry_run=True (default) previews matches before writing anything
 
 ### Folders
-- `list_folder_tool(path)` — immediate contents (path="" = vault root); hides dotfiles
+- `list_folder_tool(path, recursive, max_depth)` — contents (path="" = vault root); hides dotfiles;
+  recursive=True returns a full tree dump in one call
 - `create_folder_tool(path)` — create folder, parents auto-created
 - `delete_folder_tool(path, trash)` — delete or trash a folder
 - `restore_folder_tool(trashed_name, to_path)` — undo a trashed delete; trashed_name from list_trash_tool
@@ -125,11 +142,15 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 - `list_trash_tool()` — see what's sitting in .trash/, with the names restore_*_tool expects
 
 ### Querying & Graph
-- `query_notes_tool(tags, status, frontmatter_filter, inline_field_filter, sort_by, limit, folder)` — Dataview-like filter
+- `query_notes_tool(tags, status, frontmatter_filter, inline_field_filter, sort_by, limit, folder)` —
+  Dataview-like filter; frontmatter_filter values may be exact or an operator dict
+  ($ne/$eq/$in/$nin/$exists)
 - `get_backlinks_tool(path)` — notes that link to this note
 - `get_broken_links_tool()` — wikilinks pointing to non-existent notes
 - `get_orphans_tool(exclude_folders)` — notes with no incoming backlinks
 - `get_link_graph_tool(root, depth, direction)` — BFS link graph; direction: outgoing|incoming|both
+- `get_audit_log_tool(path, tool, since, limit)` / `get_note_history_tool(path, limit)` — write-action
+  audit trail (what changed, when, with which tool), most recent first
 - `get_vault_stats_tool()` — note/link counts, orphans, most-linked notes
 - `get_tasks_tool(status, folder, tag)` — tasks across vault; status: open|done|all
 - `get_notes_by_tag_tool(tag)`, `get_tag_tree_tool()`, `list_all_tags_tool(sort_by)`
@@ -497,10 +518,23 @@ def search_notes_tool(
     tag: str | None = None,
     mode: str = "exact",
     limit: int = 20,
+    frontmatter_filter: dict | None = None,
+    field: str | None = None,
+    threshold: float = 0.8,
 ) -> list[dict]:
     """Full-text search with snippets and relevance ranking.
-    mode: 'exact' (default) | 'regex' | 'fuzzy'. Returns [{path, score, snippets, tags}]."""
-    return search_notes(query, tag=tag, mode=mode, limit=limit)
+    mode: 'exact' (default) | 'regex' | 'fuzzy'. Returns [{path, score, snippets, tags}].
+    frontmatter_filter: combine with the text search in one call — same shape
+    as query_notes_tool's (plain value = exact match, or {"$ne": v} /
+    {"$nin": [...]} / {"$exists": bool}).
+    field: None/'body' (default, search note content) | 'filename' (match
+    only the file name).
+    threshold: fuzzy-match similarity cutoff 0-1 (only used when mode='fuzzy';
+    lower = looser matches, higher = less noise)."""
+    return search_notes(
+        query, tag=tag, mode=mode, limit=limit,
+        frontmatter_filter=frontmatter_filter, field=field, threshold=threshold,
+    )
 
 
 @mcp.tool()
@@ -518,15 +552,40 @@ def get_note_outline_tool(path: str) -> dict:
     return get_note_outline(path)
 
 
+@mcp.tool()
+def find_similar_notes_tool(
+    text: str,
+    limit: int = 5,
+    exclude_path: str | None = None,
+    min_score: float = 0.1,
+) -> list[dict]:
+    """Find conceptually related notes even when the wording differs — for
+    duplicate prevention before creating a new note ("does this topic
+    already exist under different vocabulary?"). Ranks by TF-IDF cosine
+    similarity over the vault's own vocabulary (a lightweight heuristic,
+    not a transformer embedding model — it catches shared distinctive
+    words across differently-phrased notes, not pure synonym rewrites).
+    exclude_path: skip a note (e.g. the one you're editing) from results.
+    min_score: filters out noise-level matches (0-1, higher = stricter).
+    Returns [{path, score}], most similar first."""
+    return find_similar_notes(text, _index, limit=limit, exclude_path=exclude_path, min_score=min_score)
+
+
 # ── Write ─────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def write_note_tool(path: str, content: str) -> dict:
+def write_note_tool(path: str, content: str, dry_run: bool = False) -> dict:
     """Write (create or overwrite) a note. Respects READ_ONLY and WRITE_PATHS.
     If `content` has no frontmatter of its own and a note already exists at
     `path`, its existing frontmatter is preserved rather than dropped —
-    check the returned `frontmatter_preserved` flag."""
-    return write_note(path, content, index=_index)
+    check the returned `frontmatter_preserved` flag. The result also carries
+    a `diff` (unified diff against the current file).
+    dry_run=True previews {preview, diff, frontmatter_preserved} without
+    writing anything — check it, then call again with dry_run=False."""
+    result = write_note(path, content, index=_index, dry_run=dry_run)
+    if result.get("status") != "dry_run":
+        log_write("write_note_tool", path, "wrote note")
+    return result
 
 
 @mcp.tool()
@@ -540,14 +599,40 @@ def patch_note_tool(
     """Edit a section or block reference inside a note.
     mode: 'replace' (default) | 'insert_before' | 'insert_after' | 'append'.
     target_type: 'heading' (default) | 'block_ref' (use section='^block-id')."""
-    return patch_note(path, section, new_content, mode=mode, target_type=target_type, index=_index)
+    result = patch_note(path, section, new_content, mode=mode, target_type=target_type, index=_index)
+    log_write("patch_note_tool", path, f"patched section {section!r} ({mode})")
+    return result
+
+
+@mcp.tool()
+def patch_note_text_tool(
+    path: str,
+    find: str,
+    replace: str,
+    mode: str = "exact",
+    count: int = 1,
+    dry_run: bool = False,
+) -> dict:
+    """Find and replace text anywhere in one note's body — no heading/block-ref
+    anchor required, unlike patch_note_tool. Cheaper than write_note_tool for
+    a scattered single-note edit (e.g. bumping one enum value inside a long note).
+    mode: 'exact' (default, literal substring) | 'regex'.
+    count: max replacements (default 1, first match only); 0 = replace all.
+    dry_run=True previews {replacements, preview, diff} without writing.
+    Raises ValueError if `find` doesn't match anything."""
+    result = patch_note_text(path, find, replace, mode=mode, count=count, dry_run=dry_run, index=_index)
+    if result.get("status") != "dry_run":
+        log_write("patch_note_text_tool", path, f"replaced {result.get('replacements')} match(es)")
+    return result
 
 
 @mcp.tool()
 def delete_note_tool(path: str, trash: bool = True) -> dict:
     """Delete a note from the vault.
     trash=True (default) moves it to .trash/ instead of permanent deletion."""
-    return delete_note(path, trash=trash, index=_index)
+    result = delete_note(path, trash=trash, index=_index)
+    log_write("delete_note_tool", path, f"deleted (trash={trash})")
+    return result
 
 
 @mcp.tool()
@@ -556,7 +641,9 @@ def restore_note_tool(trashed_name: str, to_path: str) -> dict:
     to_path: where to put it back — the original folder can't be recovered
     from the trash entry alone, so you choose the destination.
     Returns {from, to, status}."""
-    return restore_note(trashed_name, to_path, index=_index)
+    result = restore_note(trashed_name, to_path, index=_index)
+    log_write("restore_note_tool", to_path, f"restored from .trash/{trashed_name}")
+    return result
 
 
 @mcp.tool()
@@ -575,7 +662,14 @@ def find_replace_in_vault_tool(
     (READ_ONLY or outside WRITE_PATHS) are skipped and listed under
     skipped_write_protected rather than aborting the whole run.
     Returns {replaced_in, total_replacements, skipped_write_protected} when dry_run=False."""
-    return find_replace_in_vault(search, replace, mode=mode, folder=folder, dry_run=dry_run, index=_index)
+    result = find_replace_in_vault(search, replace, mode=mode, folder=folder, dry_run=dry_run, index=_index)
+    if not result.get("dry_run"):
+        log_write(
+            "find_replace_in_vault_tool",
+            folder or None,
+            f"replaced in {len(result.get('replaced_in', []))} note(s)",
+        )
+    return result
 
 
 @mcp.tool()
@@ -587,7 +681,9 @@ def append_to_note_tool(
 ) -> dict:
     """Append content to a note without reading and rewriting the whole file.
     section: optional heading to append under. create=True creates the note if missing."""
-    return append_to_note(path, content, section=section, create=create, index=_index)
+    result = append_to_note(path, content, section=section, create=create, index=_index)
+    log_write("append_to_note_tool", path, "appended content" + (f" under {section!r}" if section else ""))
+    return result
 
 
 @mcp.tool()
@@ -595,10 +691,29 @@ def patch_frontmatter_tool(
     path: str,
     updates: dict,
     merge_arrays: bool = True,
+    dry_run: bool = False,
 ) -> dict:
     """Update specific YAML frontmatter keys without touching the note body.
-    merge_arrays=True merges list values (e.g. tags); False replaces them."""
-    return patch_frontmatter(path, updates, merge_arrays=merge_arrays, index=_index)
+    merge_arrays=True merges list values (e.g. tags); False replaces them.
+    Result carries a `diff` (unified diff against the current file).
+    dry_run=True previews {preview, diff, updated_keys} without writing —
+    check it, then call again with dry_run=False."""
+    result = patch_frontmatter(path, updates, merge_arrays=merge_arrays, index=_index, dry_run=dry_run)
+    if result.get("status") != "dry_run":
+        log_write("patch_frontmatter_tool", path, f"updated keys: {list(updates.keys())}")
+    return result
+
+
+@mcp.tool()
+def patch_frontmatter_batch_tool(updates: list[dict]) -> dict:
+    """Patch frontmatter on multiple notes in one call.
+    updates: list of {"path": str, "updates": dict, "merge_arrays": bool}
+    (merge_arrays defaults to True per entry). One entry failing doesn't
+    abort the rest — returns {succeeded: [...], failed: [{path, error}]}."""
+    result = patch_frontmatter_batch(updates, index=_index)
+    for entry in result.get("succeeded", []):
+        log_write("patch_frontmatter_batch_tool", entry.get("path"), f"updated keys: {entry.get('updated_keys')}")
+    return result
 
 
 @mcp.tool()
@@ -609,14 +724,18 @@ def manage_tags_tool(
 ) -> dict:
     """Add or remove tags on a note. Updates frontmatter tags array and strips
     inline #tag occurrences from the body. Returns {added, removed}."""
-    return manage_tags(path, add=add, remove=remove, index=_index)
+    result = manage_tags(path, add=add, remove=remove, index=_index)
+    log_write("manage_tags_tool", path, f"+{add or []} -{remove or []}")
+    return result
 
 
 @mcp.tool()
 def move_note_tool(from_path: str, to_path: str) -> dict:
     """Rename or move a note. Automatically rewrites all wikilinks in the vault
     that reference the old path. Returns {from, to, updated_links_in}."""
-    return move_note(from_path, to_path, index=_index)
+    result = move_note(from_path, to_path, index=_index)
+    log_write("move_note_tool", to_path, f"moved from {from_path}")
+    return result
 
 
 # ── Query / Graph ─────────────────────────────────────────────────────────────
@@ -637,6 +756,41 @@ def get_notes_by_tag_tool(tag: str) -> list[str]:
 def get_vault_conventions_tool() -> str:
     """Return the vault's AI instructions / conventions from _AI_INSTRUCTIONS.md."""
     return get_vault_conventions()
+
+
+@mcp.tool()
+def get_audit_log_tool(
+    path: str | None = None,
+    tool: str | None = None,
+    since: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Query the append-only log of write-tool activity (who/what changed,
+    not just the .trash/ state after the fact). Most recent first.
+    path/tool/since are optional filters (since: ISO timestamp, inclusive).
+    Entries: {timestamp, tool, path, summary}. Covers the core note/folder
+    write tools; canvas/kanban/excalidraw/bases writes aren't logged yet."""
+    return get_audit_log(path=path, tool=tool, since=since, limit=limit)
+
+
+@mcp.tool()
+def get_note_history_tool(path: str, limit: int = 20) -> list[dict]:
+    """Audit-log entries for one specific note, most recent first —
+    what changed and when, without needing to know which tool was used."""
+    return get_note_history(path, limit=limit)
+
+
+@mcp.tool()
+def lint_schema_tool() -> dict:
+    """Validate every note's frontmatter against the enum fields declared in
+    the vault's _AI_INSTRUCTIONS.md (under a "Frontmatter Schema" heading,
+    e.g. `status: inbox | active | done | archived`). Returns
+    {schema, violations: [{path, field, found, expected_enum}]} — only the
+    deviations, not a full vault dump. A field that's simply missing on a
+    note isn't a violation, only a present value outside the declared enum
+    is. Returns an empty schema/violations pair if no enum schema can be
+    parsed from _AI_INSTRUCTIONS.md."""
+    return lint_schema(_index)
 
 
 @mcp.tool()
@@ -1117,17 +1271,31 @@ if _feature_flags.enable_bases:
 # ── Folders ───────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def list_folder_tool(path: str = "") -> dict:
-    """List the immediate contents of a vault folder (non-hidden items only).
-    path='': root of the vault. Returns {path, folders: [...], files: [...]}."""
-    return list_folder(path)
+def list_folder_tool(path: str = "", recursive: bool = False, max_depth: int | None = None) -> dict:
+    """List the contents of a vault folder (non-hidden items only).
+    path='': root of the vault.
+    recursive=False (default): immediate contents only — {path, folders, files}.
+    recursive=True: full tree dump in one call — {path, tree: {folders: {name: tree}, files: [...]}}.
+    max_depth limits how many levels deep to descend (None = unlimited)."""
+    return list_folder(path, recursive=recursive, max_depth=max_depth)
+
+
+@mcp.tool()
+def list_files_tool(folder: str = "", extension: str | None = None) -> list[str]:
+    """List every file in the vault (or a subfolder), any type — not just
+    notes/attachments/bases/canvases (e.g. .lock files, stray non-Markdown
+    files). extension filters by suffix without the dot (e.g. "lock",
+    "canvas"); omit for everything. Hidden files/folders are skipped."""
+    return list_files(folder, extension=extension)
 
 
 @mcp.tool()
 def create_folder_tool(path: str) -> dict:
     """Create a folder (and any missing parents) in the vault.
     Returns {path, status}."""
-    return create_folder(path)
+    result = create_folder(path)
+    log_write("create_folder_tool", path, "created folder")
+    return result
 
 
 @mcp.tool()
@@ -1135,7 +1303,9 @@ def delete_folder_tool(path: str, trash: bool = True) -> dict:
     """Delete a vault folder.
     trash=True (default) moves it to .trash/ instead of permanent deletion.
     Returns {path, status, trash}."""
-    return delete_folder(path, trash=trash)
+    result = delete_folder(path, trash=trash)
+    log_write("delete_folder_tool", path, f"deleted folder (trash={trash})")
+    return result
 
 
 @mcp.tool()
@@ -1143,7 +1313,9 @@ def rename_folder_tool(from_path: str, to_path: str) -> dict:
     """Rename or move a vault folder. Rewrites path-based wikilinks in all
     notes that reference notes inside the moved folder.
     Returns {from, to, notes_moved, updated_links_in}."""
-    return rename_folder(from_path, to_path, index=_index)
+    result = rename_folder(from_path, to_path, index=_index)
+    log_write("rename_folder_tool", to_path, f"renamed from {from_path}")
+    return result
 
 
 @mcp.tool()
@@ -1161,7 +1333,9 @@ def restore_folder_tool(trashed_name: str, to_path: str) -> dict:
     to_path: where to put it back — the original parent path can't be
     recovered from the trash entry alone, so you choose the destination.
     Returns {path, status, notes_restored}."""
-    return restore_folder(trashed_name, to_path, index=_index)
+    result = restore_folder(trashed_name, to_path, index=_index)
+    log_write("restore_folder_tool", to_path, f"restored from .trash/{trashed_name}")
+    return result
 
 
 # ── MCP Resources ─────────────────────────────────────────────────────────────

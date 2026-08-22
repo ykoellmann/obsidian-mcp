@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import uuid
@@ -33,13 +34,36 @@ def _check_write_permission(relative_path: str) -> None:
             )
 
 
-def write_note(path: str, content: str, index: VaultIndex | None = None) -> dict:
+def _unified_diff(before: str, after: str, path: str) -> str:
+    """Unified diff between two full note texts, git-diff-style — lets a
+    caller see exactly what a write/patch changed without re-reading the
+    note before and after."""
+    return "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+        )
+    )
+
+
+def write_note(
+    path: str,
+    content: str,
+    index: VaultIndex | None = None,
+    dry_run: bool = False,
+) -> dict:
     """Write (create or overwrite) a note.
 
     If `content` has no YAML frontmatter of its own and a note already exists
     at `path` with frontmatter, that existing frontmatter is carried over
     onto the new body instead of being silently dropped — an overwrite that
     only changes the body shouldn't destroy status/tags/created/etc.
+
+    dry_run=True previews the result (including the merged frontmatter and a
+    unified diff against the current file) without writing anything —
+    check the preview before setting dry_run=False.
     """
     cfg = get_config()
     validate_path(cfg.vault_path, path)
@@ -49,16 +73,26 @@ def write_note(path: str, content: str, index: VaultIndex | None = None) -> dict
     full_path = str(full_path_obj)
     lock = acquire_lock(full_path)
     try:
+        before = full_path_obj.read_text(encoding="utf-8") if full_path_obj.exists() else ""
+
         frontmatter_preserved = False
         if not _FM_RE.match(content) and full_path_obj.exists():
-            try:
-                existing_raw = full_path_obj.read_text(encoding="utf-8")
-            except Exception:
-                existing_raw = ""
-            existing_fm, _ = _parse_frontmatter(existing_raw)
+            existing_fm, _ = _parse_frontmatter(before)
             if existing_fm:
                 content = _serialize_frontmatter(existing_fm, content)
                 frontmatter_preserved = True
+
+        diff = _unified_diff(before, content, path)
+
+        if dry_run:
+            return {
+                "path": path,
+                "status": "dry_run",
+                "frontmatter_preserved": frontmatter_preserved,
+                "preview": content,
+                "diff": diff,
+            }
+
         write_file_atomic(cfg.vault_path, path, content)
     finally:
         lock.release()
@@ -66,7 +100,12 @@ def write_note(path: str, content: str, index: VaultIndex | None = None) -> dict
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "written", "frontmatter_preserved": frontmatter_preserved}
+    return {
+        "path": path,
+        "status": "written",
+        "frontmatter_preserved": frontmatter_preserved,
+        "diff": diff,
+    }
 
 
 def patch_note(
@@ -254,8 +293,14 @@ def patch_frontmatter(
     updates: dict,
     merge_arrays: bool = True,
     index: VaultIndex | None = None,
+    dry_run: bool = False,
 ) -> dict:
-    """Update specific YAML frontmatter keys. Arrays are merged by default."""
+    """Update specific YAML frontmatter keys. Arrays are merged by default.
+
+    dry_run=True previews the resulting frontmatter and a unified diff
+    without writing anything — check the preview before setting
+    dry_run=False.
+    """
     cfg = get_config()
     validate_path(cfg.vault_path, path)
     _check_write_permission(path)
@@ -268,6 +313,17 @@ def patch_frontmatter(
     try:
         raw = full_path.read_text(encoding="utf-8")
         patched = _apply_frontmatter_updates(raw, updates, merge_arrays)
+        diff = _unified_diff(raw, patched, path)
+
+        if dry_run:
+            return {
+                "path": path,
+                "status": "dry_run",
+                "updated_keys": list(updates.keys()),
+                "preview": patched,
+                "diff": diff,
+            }
+
         write_file_atomic(cfg.vault_path, path, patched)
     finally:
         lock.release()
@@ -275,7 +331,42 @@ def patch_frontmatter(
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "frontmatter_patched", "updated_keys": list(updates.keys())}
+    return {
+        "path": path,
+        "status": "frontmatter_patched",
+        "updated_keys": list(updates.keys()),
+        "diff": diff,
+    }
+
+
+def patch_frontmatter_batch(
+    updates: list[dict],
+    index: VaultIndex | None = None,
+) -> dict:
+    """Patch frontmatter on multiple notes in one call instead of one
+    patch_frontmatter_tool call per note.
+
+    updates: list of {"path": str, "updates": dict, "merge_arrays": bool}
+    (merge_arrays defaults to True per entry, same as patch_frontmatter_tool).
+    One entry failing (missing note, bad path, ...) doesn't abort the rest —
+    each result lands in `succeeded` or `failed`.
+    """
+    succeeded: list[dict] = []
+    failed: list[dict] = []
+    for entry in updates:
+        path = entry.get("path")
+        try:
+            result = patch_frontmatter(
+                path,
+                entry.get("updates", {}),
+                merge_arrays=entry.get("merge_arrays", True),
+                index=index,
+            )
+            succeeded.append(result)
+        except Exception as exc:
+            failed.append({"path": path, "error": str(exc)})
+
+    return {"succeeded": succeeded, "failed": failed}
 
 
 _FM_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
@@ -462,6 +553,71 @@ def _match_snippets(raw: str, pattern: re.Pattern, limit: int = 3) -> list[dict]
             if len(snippets) >= limit:
                 break
     return snippets
+
+
+def patch_note_text(
+    path: str,
+    find: str,
+    replace: str,
+    mode: str = "exact",
+    count: int = 1,
+    dry_run: bool = False,
+    index: VaultIndex | None = None,
+) -> dict:
+    """Find and replace text anywhere in a note's body — no heading/block-ref
+    anchor required, unlike patch_note_tool. For a handful of scattered
+    single-note edits (e.g. "bump this one enum value" inside a long note)
+    this is far cheaper than reading, rewriting, and re-sending the whole
+    note through write_note_tool.
+
+    mode: 'exact' (literal substring, default) | 'regex'.
+    count: max replacements (default 1, first match only); 0 = replace all.
+    dry_run=True (default False) previews matches and the resulting diff
+    without writing anything.
+    Raises ValueError if `find` doesn't match anything in the note.
+    """
+    cfg = get_config()
+    validate_path(cfg.vault_path, path)
+    _check_write_permission(path)
+
+    full_path = cfg.vault_path / path
+    if not full_path.exists():
+        raise FileNotFoundError(f"Note not found: {path!r}")
+
+    if mode == "regex":
+        try:
+            pattern = re.compile(find)
+        except re.error as exc:
+            raise ValueError(f"Invalid regex: {exc}") from exc
+    else:
+        pattern = re.compile(re.escape(find))
+
+    lock = acquire_lock(str(full_path))
+    try:
+        raw = full_path.read_text(encoding="utf-8")
+        replace_count = count if count > 0 else 0
+        patched, n = pattern.subn(replace, raw, count=replace_count)
+        if n == 0:
+            raise ValueError(f"{find!r} not found in {path!r}")
+        diff = _unified_diff(raw, patched, path)
+
+        if dry_run:
+            return {
+                "path": path,
+                "status": "dry_run",
+                "replacements": n,
+                "preview": _match_snippets(raw, pattern, limit=5),
+                "diff": diff,
+            }
+
+        write_file_atomic(cfg.vault_path, path, patched)
+    finally:
+        lock.release()
+
+    if index is not None:
+        index.update(path)
+
+    return {"path": path, "status": "patched", "replacements": n, "diff": diff}
 
 
 def find_replace_in_vault(
