@@ -1,128 +1,102 @@
-"""Folder management tools: create, delete, list, and rename vault folders."""
+"""Folder management tools backed by the central vault storage gateway."""
+
 from __future__ import annotations
 
 import re
-import shutil
-import uuid
-from pathlib import Path
+import stat
 
 from ..config import get_config
 from ..domain.index import VaultIndex
-from ..storage.filesystem import validate_path, write_file_atomic
-from .write import _check_write_permission
+from ..storage.filesystem import VaultStorage
+from ..storage.locking import acquire_lock
+
+
+def _storage() -> VaultStorage:
+    return VaultStorage.from_config()
 
 
 def create_folder(path: str) -> dict:
-    """Create a folder (and any missing parent directories) inside the vault."""
-    cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-    if target.exists() and not target.is_dir():
+    storage = _storage()
+    if not path or path in (".", "/", "\\"):
+        raise ValueError("A child folder path is required")
+    target = storage.resolve_write(path)
+    if storage.exists(target.relative, read=False) and not stat.S_ISDIR(
+        storage.stat(target.relative, read=False).st_mode
+    ):
         raise ValueError(f"A file already exists at: {path!r}")
-    _check_write_permission(path.rstrip("/") + "/.keep")
-    target.mkdir(parents=True, exist_ok=True)
-    return {"path": path, "status": "created"}
+    storage.make_dir(target.relative)
+    return {"path": target.relative, "status": "created"}
 
 
 def delete_folder(path: str, trash: bool = True) -> dict:
-    """Delete or trash a vault folder."""
-    cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-    _check_write_permission(path.rstrip("/") + "/.keep")
-    if not target.exists():
+    storage = _storage()
+    target = storage.resolve_delete(path, permanent=not trash)
+    if not storage.exists(target.relative, read=False):
         raise FileNotFoundError(f"Folder not found: {path!r}")
-    if not target.is_dir():
+    if not stat.S_ISDIR(storage.stat(target.relative, read=False).st_mode):
         raise ValueError(f"Not a folder: {path!r}")
-
-    if trash:
-        trash_dir = cfg.vault_path / ".trash"
-        trash_dir.mkdir(exist_ok=True)
-        dest = trash_dir / Path(path).name
-        if dest.exists():
-            dest = trash_dir / f"{Path(path).name}-{uuid.uuid4().hex[:8]}"
-        shutil.move(str(target), str(dest))
-    else:
-        shutil.rmtree(target)
-
-    return {"path": path, "status": "deleted", "trash": trash}
+    cfg = get_config()
+    lock = acquire_lock(target.relative, lock_path=cfg.lock_path)
+    try:
+        if trash:
+            storage.trash(target.relative)
+        else:
+            storage.delete(target.relative, permanent=True)
+    finally:
+        lock.release()
+    return {"path": target.relative, "status": "deleted", "trash": trash}
 
 
 def list_trash() -> dict:
-    """List top-level items sitting in .trash/ (from delete_note/delete_folder
-    with trash=True). Names here are what restore_note_tool/restore_folder_tool
-    expect as trashed_name — they may differ from the original name if a
-    collision at delete time appended a random suffix."""
-    cfg = get_config()
-    trash_dir = cfg.vault_path / ".trash"
-    if not trash_dir.exists():
-        return {"items": []}
-
     items = []
-    for item in sorted(trash_dir.iterdir()):
+    for item in _storage().list_trash():
         items.append(
             {
                 "name": item.name,
-                "type": "folder" if item.is_dir() else "file",
-                "size_bytes": item.stat().st_size if item.is_file() else None,
-                "mtime": item.stat().st_mtime,
+                "type": "folder" if item.is_dir else "file",
+                "size_bytes": item.size_bytes,
+                "mtime": item.mtime,
             }
         )
     return {"items": items}
 
 
 def restore_folder(trashed_name: str, to_path: str, index: VaultIndex | None = None) -> dict:
-    """Restore a folder previously moved to .trash/ (via delete_folder trash=True).
-
-    trashed_name: the folder name as it sits under .trash/ (see list_trash_tool).
-    to_path: where to put it back (you choose it; the original parent path
-    isn't recoverable from the trash entry alone).
-    """
     if "/" in trashed_name or "\\" in trashed_name or trashed_name in (".", ".."):
         raise ValueError(f"trashed_name must be a bare name, not a path: {trashed_name!r}")
-
-    cfg = get_config()
-    to_dir = validate_path(cfg.vault_path, to_path)
-    _check_write_permission(to_path.rstrip("/") + "/.keep")
-
-    trash_src = cfg.vault_path / ".trash" / trashed_name
-    if not trash_src.exists() or not trash_src.is_dir():
+    storage = _storage()
+    destination = storage.resolve_write(to_path)
+    info = storage.trash_info(trashed_name)
+    if not info.is_dir:
         raise FileNotFoundError(f"No trashed folder named {trashed_name!r} in .trash/")
-    if to_dir.exists():
-        raise FileExistsError(f"Target already exists: {to_path!r}")
-
-    to_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(trash_src), str(to_dir))
+    restored = storage.restore(trashed_name, destination.relative)
 
     notes_restored = 0
     if index is not None:
-        for p in to_dir.rglob("*.md"):
-            index.update(str(p.relative_to(cfg.vault_path)))
-            notes_restored += 1
-
-    return {"path": to_path, "status": "restored", "notes_restored": notes_restored}
+        for p in storage.tree_paths(restored.relative):
+            rel = p.relative
+            if not rel.lower().endswith(".md"):
+                continue
+            if storage.policy.can_read(rel):
+                index.update(rel)
+                notes_restored += 1
+    return {"path": restored.relative, "status": "restored", "notes_restored": notes_restored}
 
 
 def list_folder(path: str = "") -> dict:
-    """List the immediate contents of a vault folder (non-hidden files and subfolders)."""
-    cfg = get_config()
-    target = validate_path(cfg.vault_path, path) if path else cfg.vault_path
-
-    if not target.exists():
-        raise FileNotFoundError(f"Folder not found: {path!r}")
-    if not target.is_dir():
-        raise ValueError(f"Not a folder: {path!r}")
-
+    storage = _storage()
+    target = storage.resolve_read(path, allow_empty=True)
     folders: list[str] = []
     files: list[str] = []
-    for item in sorted(target.iterdir()):
-        if item.name.startswith("."):
+    try:
+        entries = storage.list_dir(target.relative)
+    except NotADirectoryError as exc:
+        raise ValueError(f"Not a folder: {path!r}") from exc
+    for entry in entries:
+        if entry.name.startswith("."):
             continue
-        rel = str(item.relative_to(cfg.vault_path))
-        if item.is_dir():
-            folders.append(rel)
-        else:
-            files.append(rel)
-
-    return {"path": path or "/", "folders": folders, "files": files}
+        (folders if entry.is_dir else files).append(entry.relative)
+    return {"path": target.relative or "/", "folders": folders, "files": files}
 
 
 def rename_folder(
@@ -130,75 +104,74 @@ def rename_folder(
     to_path: str,
     index: VaultIndex | None = None,
 ) -> dict:
-    """Rename or move a vault folder.
-
-    Rewrites path-based wikilinks ([[from_path/note]]) in all vault notes.
-    Stem-based links ([[note]]) are unaffected — they resolve by filename.
-    """
-    cfg = get_config()
-    from_dir = validate_path(cfg.vault_path, from_path)
-    to_dir = validate_path(cfg.vault_path, to_path)
-    _check_write_permission(from_path.rstrip("/") + "/.keep")
-    _check_write_permission(to_path.rstrip("/") + "/.keep")
-
-    if not from_dir.exists():
+    """Move a folder after preauthorizing every note rewritten for links."""
+    storage = _storage()
+    source = storage.resolve_delete(from_path)
+    destination = storage.resolve_write(to_path)
+    from_path, to_path = source.relative, destination.relative
+    if to_path.startswith(from_path + "/"):
+        raise ValueError("Destination cannot be inside the source folder")
+    if not storage.exists(source.relative, read=False):
         raise FileNotFoundError(f"Folder not found: {from_path!r}")
-    if not from_dir.is_dir():
+    if not stat.S_ISDIR(storage.stat(source.relative, read=False).st_mode):
         raise ValueError(f"Not a folder: {from_path!r}")
-    if to_dir.exists():
+    if storage.exists(destination.relative, read=False):
         raise FileExistsError(f"Target already exists: {to_path!r}")
 
-    # Notes inside the folder (paths before rename)
-    notes_inside = [
-        str(p.relative_to(cfg.vault_path))
-        for p in from_dir.rglob("*.md")
-    ]
-
-    from_prefix = from_path.replace("\\", "/").rstrip("/")
-    to_prefix = to_path.replace("\\", "/").rstrip("/")
-
-    # Match [[from_path/anything]] with optional |alias or #heading suffix
+    source_paths = storage.authorize_tree(from_path, destination=to_path)
+    notes_inside = [rel for rel in source_paths if rel.lower().endswith(".md")]
+    from_prefix = from_path.rstrip("/")
+    to_prefix = to_path.rstrip("/")
     link_re = re.compile(
         r"\[\[(" + re.escape(from_prefix) + r"/)([^\]|#]*)((?:[|#][^\]]*)?)\]\]",
         re.IGNORECASE,
     )
 
-    # Rewrite path-based links in ALL vault notes (including those being moved)
     updated_files: list[str] = []
-    for md_file in sorted(cfg.vault_path.rglob("*.md")):
+    files_to_rewrite: list[tuple[str, str]] = []
+    for candidate in storage.tree_paths(""):
+        rel = candidate.relative
+        if not rel.lower().endswith(".md"):
+            continue
         try:
-            raw = md_file.read_text(encoding="utf-8", errors="replace")
-            if not link_re.search(raw):
-                continue
-            rewritten = link_re.sub(
-                lambda m, _tp=to_prefix: f"[[{_tp}/{m.group(2)}{m.group(3)}]]", raw
-            )
-            rel = str(md_file.relative_to(cfg.vault_path))
-            write_file_atomic(cfg.vault_path, rel, rewritten)
-            updated_files.append(rel)
+            raw = storage.read_text(rel)
         except Exception:
-            pass
+            continue
+        if link_re.search(raw):
+            storage.resolve_write(rel)  # preflight before any mutation
+            files_to_rewrite.append((rel, raw))
 
-    # Move the folder
-    to_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(from_dir), str(to_dir))
+    cfg = get_config()
+    locks = [acquire_lock(rel, lock_path=cfg.lock_path) for rel, _ in files_to_rewrite]
+    locks.append(acquire_lock(from_path, lock_path=cfg.lock_path))
+    try:
+        for rel, raw in files_to_rewrite:
+            rewritten = link_re.sub(
+                lambda m: f"[[{to_prefix}/{m.group(2)}{m.group(3)}]]", raw
+            )
+            storage.write_text_atomic(rel, rewritten)
+            updated_files.append(rel)
+        storage.move(from_path, to_path)
+    finally:
+        for lock in reversed(locks):
+            lock.release()
 
-    # Update index
     if index is not None:
         for rel in notes_inside:
             index.remove(rel)
-        for p in to_dir.rglob("*.md"):
-            index.update(str(p.relative_to(cfg.vault_path)))
-        external_updates = [
-            f for f in updated_files
-            if not f.startswith(from_prefix + "/") and f != from_prefix
-        ]
-        for rel in external_updates:
-            index.update(rel)
+        for candidate in storage.tree_paths(to_path):
+            rel = candidate.relative
+            if not rel.lower().endswith(".md"):
+                continue
+            if storage.policy.can_read(rel):
+                index.update(rel)
+        for rel in updated_files:
+            if not rel.startswith(from_prefix + "/"):
+                index.update(rel)
 
     external_changes = [
-        f for f in updated_files
-        if not f.startswith(from_prefix + "/") and f != from_prefix
+        rel for rel in updated_files
+        if not rel.startswith(from_prefix + "/") and rel != from_prefix
     ]
     return {
         "from": from_path,

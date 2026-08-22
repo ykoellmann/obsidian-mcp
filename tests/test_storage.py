@@ -55,6 +55,20 @@ def test_lock_timeout(tmp_path):
     lock1.release()
 
 
+def test_configured_lock_creation_failure_does_not_fallback(tmp_path, monkeypatch):
+    lock_root = tmp_path / "locks"
+    real_mkdir = type(lock_root).mkdir
+
+    def fail_configured_path(self, *args, **kwargs):
+        if self == lock_root:
+            raise PermissionError("configured lock path unavailable")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(lock_root), "mkdir", fail_configured_path)
+    with pytest.raises(PermissionError, match="configured lock path unavailable"):
+        acquire_lock("note.md", lock_path=lock_root)
+
+
 def test_read_file_via_config_vault_path(vault_factory):
     vault_factory({"note.md": "# Hello\nWorld"})
     from obsidian_mcp.config import get_config
@@ -62,3 +76,11 @@ def test_read_file_via_config_vault_path(vault_factory):
     content = read_file(cfg.vault_path, "note.md")
     assert "Hello" in content
     assert "World" in content
+
+
+def test_compatibility_helper_rejects_configured_vault_descendant(tmp_path, vault_factory):
+    vault_factory({})
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    with pytest.raises(PathTraversalError, match="inside the configured vault"):
+        validate_path(nested, "note.md")

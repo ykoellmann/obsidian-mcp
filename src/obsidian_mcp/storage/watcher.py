@@ -6,6 +6,9 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+from .filesystem import VaultStorage
+from .policy import VaultAccessPolicy
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,8 +20,15 @@ class VaultWatcher:
     Set WATCH_MODE=poll to force polling.
     """
 
-    def __init__(self, vault_root: Path, poll_interval: float = 2.0) -> None:
+    def __init__(
+        self,
+        vault_root: Path,
+        poll_interval: float = 2.0,
+        policy: VaultAccessPolicy | None = None,
+    ) -> None:
         self._vault_root = vault_root
+        self._policy = policy or VaultAccessPolicy(vault_root)
+        self._storage = VaultStorage(self._policy)
         self._poll_interval = poll_interval
         self._observer = None
         self._poll_thread: threading.Thread | None = None
@@ -43,20 +53,48 @@ class VaultWatcher:
             from watchdog.observers import Observer
 
             vault_root = self._vault_root
+            policy = self._policy
 
             class _Handler(FileSystemEventHandler):
+                @staticmethod
+                def _relative(path: str) -> str | None:
+                    try:
+                        return Path(path).relative_to(vault_root).as_posix()
+                    except (ValueError, OSError):
+                        return None
+
                 def on_modified(self, event):
-                    if not event.is_directory and event.src_path.endswith(".md"):
-                        rel = str(Path(event.src_path).relative_to(vault_root))
+                    if event.is_directory:
+                        return
+                    rel = self._relative(event.src_path)
+                    if rel and rel.lower().endswith(".md") and policy.can_read(rel):
                         on_change(rel)
 
                 def on_created(self, event):
                     self.on_modified(event)
 
                 def on_deleted(self, event):
-                    if not event.is_directory and event.src_path.endswith(".md"):
-                        rel = str(Path(event.src_path).relative_to(vault_root))
+                    rel = self._relative(event.src_path)
+                    if not rel:
+                        return
+                    # Directory deletion/move events are passed through too;
+                    # VaultIndex.update removes all indexed descendants when
+                    # the path no longer exists.
+                    if event.is_directory or rel.lower().endswith(".md"):
                         on_change(rel)
+
+                def on_moved(self, event):
+                    old_rel = self._relative(event.src_path)
+                    new_rel = self._relative(event.dest_path)
+                    if old_rel and (event.is_directory or old_rel.lower().endswith(".md")):
+                        on_change(old_rel)
+                    if not new_rel:
+                        return
+                    if event.is_directory:
+                        if policy.can_read(new_rel):
+                            on_change(new_rel)
+                    elif new_rel.lower().endswith(".md") and policy.can_read(new_rel):
+                        on_change(new_rel)
 
             self._observer = Observer()
             self._observer.schedule(_Handler(), str(self._vault_root), recursive=True)
@@ -75,16 +113,17 @@ class VaultWatcher:
             while not self._stop_event.is_set():
                 try:
                     current: dict[str, float] = {}
-                    for p in self._vault_root.rglob("*.md"):
-                        rel = str(p.relative_to(self._vault_root))
-                        current[rel] = p.stat().st_mtime
+                    for path in self._storage.list_files():
+                        if path.relative.lower().endswith(".md"):
+                            current[path.relative] = self._storage.stat(path.relative).st_mtime
 
                     for rel, mtime in current.items():
-                        if mtimes.get(rel) != mtime:
+                        if self._policy.can_read(rel) and mtimes.get(rel) != mtime:
                             on_change(rel)
 
                     for rel in set(mtimes) - set(current):
-                        on_change(rel)
+                        if self._policy.can_read(rel):
+                            on_change(rel)
 
                     mtimes.clear()
                     mtimes.update(current)

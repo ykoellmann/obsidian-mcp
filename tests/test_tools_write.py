@@ -173,8 +173,9 @@ def test_delete_note_to_trash(tmp_path, vault_factory):
 
 def test_delete_note_permanent(tmp_path, vault_factory):
     vault_factory({"note.md": "content"})
-    delete_note("note.md", trash=False)
-    assert not (tmp_path / "note.md").exists()
+    with pytest.raises(Exception, match="Permanent deletion is disabled"):
+        delete_note("note.md", trash=False)
+    assert (tmp_path / "note.md").exists()
     assert not (tmp_path / ".trash").exists()
 
 

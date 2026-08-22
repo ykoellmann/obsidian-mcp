@@ -26,7 +26,7 @@ def test_delete_removes_backlinks(vault_factory):
         "target.md": "I am target.",
     })
     assert "source.md" in idx.get_backlinks("target.md")
-    delete_note("source.md", trash=False, index=idx)
+    delete_note("source.md", trash=True, index=idx)
     assert "source.md" not in idx.get_backlinks("target.md")
 
 

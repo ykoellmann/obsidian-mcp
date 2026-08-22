@@ -11,6 +11,11 @@ services:
       - PORT=${PORT:-8000}
       - READ_ONLY=${READ_ONLY:-false}
       - WRITE_PATHS=${WRITE_PATHS:-}
+      - DENY_READ_PATHS=${DENY_READ_PATHS:-.obsidian/,.trash/}
+      - DENY_WRITE_PATHS=${DENY_WRITE_PATHS:-.obsidian/,.trash/,_AI_INSTRUCTIONS.md}
+      - ALLOW_PERMANENT_DELETE=${ALLOW_PERMANENT_DELETE:-false}
+      - MAX_ATTACHMENT_BYTES=${MAX_ATTACHMENT_BYTES:-26214400}
+      - LOCK_PATH=${LOCK_PATH:-/data/locks}
       - EXCLUDE_PATHS=${EXCLUDE_PATHS:-private,.obsidian}
       # Optional plugin-format tool groups — each disabled by default (opt-in).
       # See .env.example for details.
@@ -18,6 +23,10 @@ services:
       - ENABLE_EXCALIDRAW=${ENABLE_EXCALIDRAW:-false}
       - ENABLE_KANBAN=${ENABLE_KANBAN:-false}
       - ENABLE_BASES=${ENABLE_BASES:-false}
+      - ENABLE_MOVE=${ENABLE_MOVE:-false}
+      - ENABLE_FOLDER_RENAME=${ENABLE_FOLDER_RENAME:-false}
+      - ENABLE_BULK_REPLACE=${ENABLE_BULK_REPLACE:-false}
+      - ENABLE_DELETE=${ENABLE_DELETE:-false}
       - API_KEY=${API_KEY:-}
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
       # Optional second auth variant for the claude.ai Custom Connector (OAuth-only).
@@ -30,12 +39,15 @@ services:
       - FASTMCP_HOME=${FASTMCP_HOME:-}
     volumes:
       - ${HOST_VAULT_PATH}:/vault
+      # Keep application state and locks outside the synced vault.
+      - mcp-data:/data
       # Uncomment if OAUTH_GITHUB_* is configured, to keep claude.ai logged in
       # across container restarts:
       # - fastmcp-data:/data/fastmcp
     ports:
       - "8000:8000"
 
-# Uncomment alongside the volume above:
-# volumes:
-#   fastmcp-data:
+volumes:
+  mcp-data:
+  # Uncomment the service volume above if GitHub OAuth is enabled.
+  # fastmcp-data:

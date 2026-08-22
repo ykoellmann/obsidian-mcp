@@ -71,6 +71,63 @@ async def test_upload_route_rejects_markdown(tmp_path, vault_factory, monkeypatc
     assert resp.status_code == 400
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [".env", ".hidden/file.png", "extensionless", "script.py", "script.sh", "config.yaml"],
+)
+async def test_upload_route_rejects_unsafe_attachment_names(path, vault_factory, monkeypatch):
+    vault_factory({})
+    monkeypatch.setenv("API_KEY", "test-key")
+
+    async with _client() as client:
+        resp = await client.put(
+            f"/attachments/{path}",
+            content=b"unsafe",
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_upload_route_rejects_declared_oversize(tmp_path, vault_factory, monkeypatch):
+    vault_factory({})
+    monkeypatch.setenv("API_KEY", "test-key")
+    monkeypatch.setenv("MAX_ATTACHMENT_BYTES", "3")
+
+    async with _client() as client:
+        resp = await client.put(
+            "/attachments/file.png",
+            content=b"1234",
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+    assert resp.status_code == 413
+    assert not (tmp_path / "file.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_upload_route_rejects_streamed_oversize(tmp_path, vault_factory, monkeypatch):
+    vault_factory({})
+    monkeypatch.setenv("API_KEY", "test-key")
+    monkeypatch.setenv("MAX_ATTACHMENT_BYTES", "3")
+
+    async def body():
+        yield b"12"
+        yield b"34"
+
+    async with _client() as client:
+        resp = await client.put(
+            "/attachments/file.png",
+            content=body(),
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+    assert resp.status_code == 413
+    assert not (tmp_path / "file.png").exists()
+
+
 # ── GET (download) ───────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio

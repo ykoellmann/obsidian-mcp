@@ -52,8 +52,9 @@ def test_delete_folder_to_trash(tmp_path, vault_factory):
 
 def test_delete_folder_permanent(tmp_path, vault_factory):
     vault_factory({"Temp/note.md": "content"})
-    delete_folder("Temp", trash=False)
-    assert not (tmp_path / "Temp").exists()
+    with pytest.raises(Exception, match="Permanent deletion is disabled"):
+        delete_folder("Temp", trash=False)
+    assert (tmp_path / "Temp" / "note.md").exists()
     assert not (tmp_path / ".trash" / "Temp").exists()
 
 
@@ -85,6 +86,23 @@ def test_list_trash_lists_files_and_folders(tmp_path, vault_factory):
     items = list_trash()["items"]
     names = {i["name"]: i["type"] for i in items}
     assert names == {"a.md": "file", "Temp": "folder"}
+
+
+def test_trash_metadata_is_narrow_exception_to_denied_read(tmp_path, vault_factory, monkeypatch):
+    vault_factory({"a.md": "secret"})
+    monkeypatch.setenv("DENY_READ_PATHS", ".obsidian,.trash")
+    monkeypatch.setenv("LOCK_PATH", str(tmp_path.parent / f"{tmp_path.name}-locks"))
+    import obsidian_mcp.config as cfg_mod
+
+    cfg_mod._config = None
+    from obsidian_mcp.storage.policy import ReadPermissionError
+    from obsidian_mcp.tools.read import read_note
+    from obsidian_mcp.tools.write import delete_note
+
+    delete_note("a.md", trash=True)
+    assert list_trash()["items"][0]["name"] == "a.md"
+    with pytest.raises(ReadPermissionError):
+        read_note(".trash/a.md")
 
 
 def test_restore_folder_puts_it_back(tmp_path, vault_factory):

@@ -36,7 +36,7 @@ async def test_health_ready_returns_ok(tmp_path, vault_factory, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
-    assert body["vault_path"] == str(tmp_path)
+    assert "vault_path" not in body
     assert body["index_ready"] is True
 
 

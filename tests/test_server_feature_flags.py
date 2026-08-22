@@ -10,7 +10,10 @@ import pytest
 import obsidian_mcp.config as cfg_mod
 import obsidian_mcp.server as server_mod
 
-_FLAG_ENV = ("ENABLE_CANVAS", "ENABLE_EXCALIDRAW", "ENABLE_KANBAN", "ENABLE_BASES")
+_FLAG_ENV = (
+    "ENABLE_CANVAS", "ENABLE_EXCALIDRAW", "ENABLE_KANBAN", "ENABLE_BASES",
+    "ENABLE_MOVE", "ENABLE_FOLDER_RENAME", "ENABLE_BULK_REPLACE", "ENABLE_DELETE",
+)
 
 _GROUP_TOOLS = {
     "canvas": {"list_canvases_tool", "read_canvas_tool", "write_canvas_tool", "patch_canvas_tool"},
@@ -23,6 +26,13 @@ _GROUP_TOOLS = {
         "add_kanban_card_tool", "move_kanban_card_tool", "delete_kanban_card_tool",
     },
     "bases": {"list_bases_tool", "read_base_tool", "write_base_tool", "patch_base_tool"},
+}
+
+_HIGH_RISK_TOOLS = {
+    "move": {"move_note_tool"},
+    "folder_rename": {"rename_folder_tool"},
+    "bulk_replace": {"find_replace_in_vault_tool"},
+    "delete": {"delete_note_tool", "delete_folder_tool"},
 }
 
 
@@ -42,6 +52,19 @@ async def test_all_flags_disabled_by_default(monkeypatch):
     names = {t.name for t in tools}
     for group_tools in _GROUP_TOOLS.values():
         assert names.isdisjoint(group_tools)
+    for group_tools in _HIGH_RISK_TOOLS.values():
+        assert names.isdisjoint(group_tools)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag, tools_for_flag", _HIGH_RISK_TOOLS.items())
+async def test_high_risk_flags_register_only_their_tools(monkeypatch, flag, tools_for_flag):
+    server = _reload_server(monkeypatch, **{flag: True})
+    names = {tool.name for tool in await server.mcp.list_tools()}
+    assert tools_for_flag <= names
+    for other_flag, other_tools in _HIGH_RISK_TOOLS.items():
+        if other_flag != flag:
+            assert names.isdisjoint(other_tools)
 
 
 @pytest.mark.asyncio

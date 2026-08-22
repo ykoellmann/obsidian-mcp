@@ -14,16 +14,15 @@ read — same tradeoff kanban.py makes for the Kanban plugin's settings block.
 from __future__ import annotations
 
 import json
-import os
 import re
 import uuid
 
 from ..config import get_config
 from ..domain.index import VaultIndex
 from ..domain.parser import parse_note
-from ..storage.filesystem import validate_path
+from ..storage.filesystem import VaultStorage
 from ..storage.locking import acquire_lock
-from .write import _check_write_permission
+from ..storage.policy import InvalidFileTypeError
 
 _DRAWING_BLOCK_RE = re.compile(r"## Drawing\s*\n```json\n(.*?)\n```", re.DOTALL)
 
@@ -51,10 +50,9 @@ excalidraw-plugin: parsed
 
 def list_excalidraw() -> list[str]:
     cfg = get_config()
-    root = cfg.vault_path
+    storage = VaultStorage.from_config(cfg)
     return sorted(
-        str(p.relative_to(root))
-        for p in root.rglob("*.excalidraw.md")
+        p.relative for p in storage.list_files() if p.relative.lower().endswith(".excalidraw.md")
     )
 
 
@@ -62,11 +60,15 @@ def read_excalidraw(path: str) -> dict:
     """Parse an Excalidraw file.
     Returns {path, elements, app_state, files}."""
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-    if not target.exists():
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".excalidraw.md"):
+        raise InvalidFileTypeError("Excalidraw paths must end in .excalidraw.md")
+    target = storage.resolve_read(path)
+    path = target.relative
+    if not storage.exists(path, read=True):
         raise FileNotFoundError(f"Excalidraw file not found: {path!r}")
 
-    raw = target.read_text(encoding="utf-8")
+    raw = storage.read_text(path)
     note = parse_note(raw, path=path)
     if "excalidraw-plugin" not in note.frontmatter:
         raise ValueError(
@@ -94,16 +96,18 @@ def write_excalidraw(
     x, y, width, height. Element 'id' is auto-generated if omitted.
     """
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".excalidraw.md"):
+        raise InvalidFileTypeError("Excalidraw paths must end in .excalidraw.md")
+    target = storage.resolve_write(path)
+    path = target.relative
 
     built_elements = [_normalize_element(e) for e in (elements or [])]
     data = _build_scene(built_elements, app_state or {})
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    lock = acquire_lock(str(target))
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
-        _write_excalidraw_atomic(target, data)
+        storage.write_text_atomic(path, _build_excalidraw_content(data))
     finally:
         lock.release()
 
@@ -125,14 +129,17 @@ def patch_excalidraw(
     update_elements: each dict must include 'id'; other fields are merged in.
     """
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
-    if not target.exists():
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".excalidraw.md"):
+        raise InvalidFileTypeError("Excalidraw paths must end in .excalidraw.md")
+    target = storage.resolve_write(path)
+    path = target.relative
+    if not storage.exists(path, read=False):
         raise FileNotFoundError(f"Excalidraw file not found: {path!r}")
 
-    lock = acquire_lock(str(target))
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
-        raw = target.read_text(encoding="utf-8")
+        raw = storage.read_text(path)
         data = _extract_scene(raw, path)
         elements: list[dict] = data.get("elements", [])
 
@@ -152,7 +159,7 @@ def patch_excalidraw(
             elements.extend(_normalize_element(e) for e in add_elements)
 
         new_data = _build_scene(elements, data.get("appState", {}))
-        _write_excalidraw_atomic(target, new_data)
+        storage.write_text_atomic(path, _build_excalidraw_content(new_data))
     finally:
         lock.release()
 
@@ -197,13 +204,6 @@ def _build_scene(elements: list[dict], app_state: dict) -> dict:
     }
 
 
-def _write_excalidraw_atomic(target, data: dict) -> None:
+def _build_excalidraw_content(data: dict) -> str:
     drawing_json = json.dumps(data, indent=2, ensure_ascii=False)
-    content = _FILE_TEMPLATE.format(drawing_json=drawing_json)
-    tmp = target.parent / f".tmp-{uuid.uuid4().hex}.md"
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        os.replace(tmp, target)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+    return _FILE_TEMPLATE.format(drawing_json=drawing_json)

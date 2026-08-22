@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+import stat
 import threading
 from collections import defaultdict
 from pathlib import Path
 
+from ..storage.filesystem import VaultStorage
+from ..storage.policy import VaultAccessPolicy
 from .parser import parse_note
 
 logger = logging.getLogger(__name__)
@@ -15,9 +18,16 @@ class IndexBuildingError(Exception):
 
 
 class VaultIndex:
-    def __init__(self, vault_root: Path, exclude_paths: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        vault_root: Path,
+        exclude_paths: list[str] | None = None,
+        policy: VaultAccessPolicy | None = None,
+    ) -> None:
         self._vault_root = vault_root
         self._exclude_paths = exclude_paths or []
+        self._policy = policy or VaultAccessPolicy(vault_root)
+        self._storage = VaultStorage(self._policy)
         self._lock = threading.Lock()
         self._ready = False
         self._backlinks: dict[str, set[str]] = defaultdict(set)
@@ -28,7 +38,14 @@ class VaultIndex:
         self._all_notes: set[str] = set()
 
     def build(self) -> None:
-        md_files = [p for p in self._vault_root.rglob("*.md") if not self._is_excluded(p)]
+        # Discover through the storage gateway.  In addition to applying the
+        # read policy this walks directories with O_NOFOLLOW, so a denied or
+        # symlinked subtree is never fed to the indexer.
+        md_files = [
+            path
+            for path in self._storage.list_files()
+            if path.relative.lower().endswith(".md") and not self._is_excluded(path.relative)
+        ]
         with self._lock:
             # Mark not-ready before clearing so concurrent readers see IndexBuildingError
             # rather than empty results during a rebuild.
@@ -41,9 +58,9 @@ class VaultIndex:
             self._all_notes.clear()
 
         for md_file in md_files:
-            rel = str(md_file.relative_to(self._vault_root))
+            rel = md_file.relative
             try:
-                raw = md_file.read_text(encoding="utf-8", errors="replace")
+                raw = self._storage.read_text(rel)
                 note = parse_note(raw, path=rel)
                 self._index_note(rel, note)
             except Exception:
@@ -54,17 +71,38 @@ class VaultIndex:
         logger.info("VaultIndex ready – %d notes indexed", len(self._all_notes))
 
     def update(self, path: str) -> None:
-        full = self._vault_root / path
-        if not full.exists() or self._is_excluded(full):
+        try:
+            rel = self._policy.canonicalize(path).relative
+        except Exception:
             self.remove(path)
             return
+        # Purge the old canonical entry before checking the new filesystem
+        # state. This is important when a readable note is renamed into a
+        # denied subtree: the watcher may report only the destination path.
+        self.remove(rel)
+        if not self._policy.can_read(rel) or self._is_excluded(rel) or not self._storage.exists(rel):
+            self._remove_descendants(rel)
+            return
         try:
-            raw = full.read_text(encoding="utf-8", errors="replace")
-            note = parse_note(raw, path=path)
-            self.remove(path)
-            self._index_note(path, note)
+            info = self._storage.stat(rel)
+            if stat.S_ISDIR(info.st_mode):
+                for candidate in self._storage.list_files(rel):
+                    if candidate.relative.lower().endswith(".md") and not self._is_excluded(candidate.relative):
+                        self.update(candidate.relative)
+                return
+            raw = self._storage.read_text(rel)
+            note = parse_note(raw, path=rel)
+            self.remove(rel)
+            self._index_note(rel, note)
         except Exception:
             logger.exception("Failed to update index for %s", path)
+
+    def _remove_descendants(self, path: str) -> None:
+        prefix = path.rstrip("/") + "/"
+        with self._lock:
+            stale = [note for note in self._all_notes if note.startswith(prefix)]
+        for note in stale:
+            self.remove(note)
 
     def remove(self, path: str) -> None:
         with self._lock:
@@ -193,11 +231,16 @@ class VaultIndex:
         if not self._ready:
             raise IndexBuildingError("Index is still being built – try again shortly")
 
-    def _is_excluded(self, path: Path) -> bool:
-        parts = path.relative_to(self._vault_root).parts
-        if any(part in self._exclude_paths for part in parts):
+    def _is_excluded(self, path: str | Path) -> bool:
+        if isinstance(path, Path):
+            rel = "/".join(path.relative_to(self._vault_root).parts)
+            name = path.name
+        else:
+            rel = path.replace("\\", "/").strip("/")
+            name = Path(rel).name
+        if any(rel == rule or rel.startswith(rule.rstrip("/") + "/") for rule in self._exclude_paths):
             return True
         # Excalidraw files are *.md so they'd otherwise get tag/wikilink-parsed
         # as regular notes — their body is an embedded JSON scene, not prose,
         # and things like "#ffffff" hex colors would show up as bogus tags.
-        return path.name.endswith(".excalidraw.md")
+        return name.endswith(".excalidraw.md")

@@ -3,11 +3,24 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
+
+from .storage.policy import VaultPathError, path_rules_from_env
 
 
 class ConfigError(Exception):
     pass
+
+
+class _ImmutableList(list):
+    """List-shaped configuration value that cannot be changed in place."""
+
+    def _immutable(self, *args, **kwargs):
+        raise TypeError("Configuration collections are immutable")
+
+    __delitem__ = __setitem__ = append = clear = extend = insert = pop = remove = reverse = sort = _immutable
+    __iadd__ = __imul__ = _immutable
 
 
 class Config:
@@ -15,6 +28,11 @@ class Config:
     read_only: bool
     write_paths: list[str]
     exclude_paths: list[str]
+    deny_read_paths: list[str]
+    deny_write_paths: list[str]
+    lock_path: Path
+    allow_permanent_delete: bool
+    max_attachment_bytes: int
     transport: str
     host: str
     port: int
@@ -27,6 +45,17 @@ class Config:
     enable_excalidraw: bool
     enable_kanban: bool
     enable_bases: bool
+    enable_move: bool
+    enable_folder_rename: bool
+    enable_bulk_replace: bool
+    enable_delete: bool
+
+    _initialized: bool = False
+
+    def __setattr__(self, name, value):
+        if getattr(self, "_initialized", False):
+            raise AttributeError("Config is immutable after startup")
+        object.__setattr__(self, name, value)
 
     def __init__(self) -> None:
         raw_vault = os.environ.get("VAULT_PATH", "")
@@ -39,16 +68,58 @@ class Config:
         self.read_only = os.environ.get("READ_ONLY", "false").lower() in ("1", "true", "yes")
 
         raw_write = os.environ.get("WRITE_PATHS", "")
-        self.write_paths = [p.strip() for p in raw_write.split(",") if p.strip()]
+        try:
+            self.write_paths = _ImmutableList(path_rules_from_env(raw_write, name="WRITE_PATHS"))
+            self.deny_read_paths = _ImmutableList(path_rules_from_env(
+                os.environ.get("DENY_READ_PATHS", ".obsidian/,.trash/"),
+                name="DENY_READ_PATHS",
+            ))
+            self.deny_write_paths = _ImmutableList(path_rules_from_env(
+                os.environ.get("DENY_WRITE_PATHS", ".obsidian/,.trash/,_AI_INSTRUCTIONS.md"),
+                name="DENY_WRITE_PATHS",
+            ))
+            # EXCLUDE_PATHS remains a discovery/index filter, but normalize it
+            # as well so component-aware matching is consistent everywhere.
+            self.exclude_paths = _ImmutableList(path_rules_from_env(
+                os.environ.get("EXCLUDE_PATHS", "private,.obsidian"),
+                name="EXCLUDE_PATHS",
+            ))
+        except VaultPathError as exc:
+            raise ConfigError(str(exc)) from exc
 
-        raw_exclude = os.environ.get("EXCLUDE_PATHS", "private,.obsidian")
-        self.exclude_paths = [p.strip() for p in raw_exclude.split(",") if p.strip()]
+        raw_lock_path = os.environ.get("LOCK_PATH", "")
+        if raw_lock_path:
+            self.lock_path = Path(raw_lock_path).expanduser().resolve()
+        elif os.environ.get("FASTMCP_HOME"):
+            self.lock_path = (Path(os.environ["FASTMCP_HOME"]).expanduser() / "locks").resolve()
+        else:
+            # Native installs need a usable lock domain without requiring a
+            # root-owned /data directory. Docker supplies /data/locks
+            # explicitly in its Compose configuration.
+            self.lock_path = (Path(tempfile.gettempdir()) / "obsidian-mcp-locks").resolve()
+        if self.lock_path == self.vault_path or self.vault_path in self.lock_path.parents:
+            raise ConfigError("LOCK_PATH must be outside VAULT_PATH")
+
+        self.allow_permanent_delete = os.environ.get(
+            "ALLOW_PERMANENT_DELETE", "false"
+        ).lower() in ("1", "true", "yes")
+        raw_max_attachment_bytes = os.environ.get("MAX_ATTACHMENT_BYTES", str(25 * 1024 * 1024))
+        try:
+            self.max_attachment_bytes = int(raw_max_attachment_bytes)
+        except ValueError as exc:
+            raise ConfigError("MAX_ATTACHMENT_BYTES must be a positive integer") from exc
+        if self.max_attachment_bytes <= 0:
+            raise ConfigError("MAX_ATTACHMENT_BYTES must be a positive integer")
 
         # Optional plugin-format tool groups — opt-in, disabled by default.
         self.enable_canvas = os.environ.get("ENABLE_CANVAS", "false").lower() in ("1", "true", "yes")
         self.enable_excalidraw = os.environ.get("ENABLE_EXCALIDRAW", "false").lower() in ("1", "true", "yes")
         self.enable_kanban = os.environ.get("ENABLE_KANBAN", "false").lower() in ("1", "true", "yes")
         self.enable_bases = os.environ.get("ENABLE_BASES", "false").lower() in ("1", "true", "yes")
+        self.enable_move = os.environ.get("ENABLE_MOVE", "false").lower() in ("1", "true", "yes")
+        self.enable_folder_rename = os.environ.get("ENABLE_FOLDER_RENAME", "false").lower() in ("1", "true", "yes")
+        self.enable_bulk_replace = os.environ.get("ENABLE_BULK_REPLACE", "false").lower() in ("1", "true", "yes")
+        self.enable_delete = os.environ.get("ENABLE_DELETE", "false").lower() in ("1", "true", "yes")
 
         self.transport = os.environ.get("TRANSPORT", "stdio")
         self.host = os.environ.get("HOST", "0.0.0.0")
@@ -59,9 +130,9 @@ class Config:
         self.oauth_github_client_id = os.environ.get("OAUTH_GITHUB_CLIENT_ID", "")
         self.oauth_github_client_secret = os.environ.get("OAUTH_GITHUB_CLIENT_SECRET", "")
         raw_logins = os.environ.get("OAUTH_GITHUB_ALLOWED_LOGINS", "")
-        self.oauth_github_allowed_logins = [
+        self.oauth_github_allowed_logins = _ImmutableList([
             login.strip().lower() for login in raw_logins.split(",") if login.strip()
-        ]
+        ])
         oauth_configured = bool(self.oauth_github_client_id or self.oauth_github_client_secret)
         if oauth_configured:
             if not (self.oauth_github_client_id and self.oauth_github_client_secret):
@@ -87,6 +158,7 @@ class Config:
                 f"TRANSPORT={self.transport} "
                 "(the server would otherwise be reachable without authentication)"
             )
+        object.__setattr__(self, "_initialized", True)
 
 
 _config: Config | None = None

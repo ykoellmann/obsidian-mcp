@@ -6,22 +6,23 @@ from pathlib import Path
 
 from ..config import get_config
 from ..domain.parser import parse_note
-from ..storage.filesystem import read_file, validate_path
+from ..storage.filesystem import VaultStorage
 
 
 def list_notes(folder: str = "", include_meta: bool = False) -> list:
     cfg = get_config()
-    root = cfg.vault_path
-    base = validate_path(root, folder) if folder else root
+    storage = VaultStorage.from_config(cfg)
 
     results = []
-    for p in base.rglob("*.md"):
-        rel = str(p.relative_to(root))
+    for resolved in storage.list_files(folder):
+        p, rel = resolved.absolute, resolved.relative
+        if p.suffix.lower() != ".md":
+            continue
         if _is_excluded(rel, cfg.exclude_paths):
             continue
         if include_meta:
             try:
-                raw = p.read_text(encoding="utf-8", errors="replace")
+                raw = storage.read_text(rel)
                 note = parse_note(raw, path=rel)
                 results.append({
                     "path": rel,
@@ -29,7 +30,7 @@ def list_notes(folder: str = "", include_meta: bool = False) -> list:
                     "tags": note.tags,
                     "status": note.frontmatter.get("status"),
                     "created": str(note.frontmatter.get("created", "")),
-                    "mtime": p.stat().st_mtime,
+                    "mtime": storage.stat(rel).st_mtime,
                 })
             except Exception:
                 results.append({"path": rel, "title": p.stem, "tags": [], "status": None, "created": "", "mtime": 0.0})
@@ -41,7 +42,7 @@ def list_notes(folder: str = "", include_meta: bool = False) -> list:
 
 def read_note(path: str) -> dict:
     cfg = get_config()
-    raw = read_file(cfg.vault_path, path)
+    raw = VaultStorage.from_config(cfg).read_text(path)
     note = parse_note(raw, path=path)
     return {
         "content": note.content,
@@ -83,7 +84,7 @@ def search_notes(
     limit: int = 20,
 ) -> list[dict]:
     cfg = get_config()
-    root = cfg.vault_path
+    storage = VaultStorage.from_config(cfg)
     results: list[dict] = []
 
     try:
@@ -91,12 +92,14 @@ def search_notes(
     except re.error:
         pattern = None
 
-    for p in root.rglob("*.md"):
-        rel = str(p.relative_to(root))
+    for resolved in storage.list_files():
+        p, rel = resolved.absolute, resolved.relative
+        if p.suffix.lower() != ".md":
+            continue
         if _is_excluded(rel, cfg.exclude_paths):
             continue
         try:
-            raw = p.read_text(encoding="utf-8", errors="replace")
+            raw = storage.read_text(rel)
             note = parse_note(raw, path=rel)
             if tag and tag not in note.tags:
                 continue
@@ -122,7 +125,7 @@ def get_note_outline(path: str) -> dict:
     """Return the structural map of a note: headings, block refs, frontmatter keys.
     Does not return body text — efficient for large notes."""
     cfg = get_config()
-    raw = read_file(cfg.vault_path, path)
+    raw = VaultStorage.from_config(cfg).read_text(path)
     note = parse_note(raw, path=path)
 
     headings = [
@@ -149,18 +152,19 @@ def render_note(path: str, depth: int = 1) -> str:
     """Read a note and resolve all ![[embed]] transclusions inline.
     depth controls recursion (0 = raw content, 1 = one level, 2 = two levels)."""
     cfg = get_config()
-    raw = read_file(cfg.vault_path, path)
+    storage = VaultStorage.from_config(cfg)
+    raw = storage.read_text(path)
     if depth == 0:
         return raw
 
     def _replace(m: re.Match) -> str:
         target_stem = m.group(1).strip()
         heading = (m.group(2) or "").strip()
-        target_rel = _find_note_by_stem(cfg.vault_path, target_stem, cfg.exclude_paths)
+        target_rel = _find_note_by_stem(cfg.vault_path, target_stem, cfg.exclude_paths, storage=storage)
         if target_rel is None:
             return m.group(0)
         try:
-            target_raw = read_file(cfg.vault_path, target_rel)
+            target_raw = storage.read_text(target_rel)
             if heading:
                 target_raw = _extract_section(target_raw, heading)
             if depth > 1:
@@ -172,10 +176,23 @@ def render_note(path: str, depth: int = 1) -> str:
     return _EMBED_RE.sub(_replace, raw)
 
 
-def _find_note_by_stem(root: Path, stem: str, exclude_paths: list[str]) -> str | None:
+def _find_note_by_stem(
+    root: Path,
+    stem: str,
+    exclude_paths: list[str],
+    *,
+    storage: VaultStorage | None = None,
+) -> str | None:
     stem_lower = stem.lower()
-    for p in root.rglob("*.md"):
-        rel = str(p.relative_to(root))
+    # A missing gateway is a programming error/closed result, not permission
+    # to fall back to unrestricted filesystem traversal.
+    if storage is None:
+        return None
+    candidates = storage.list_files()
+    for resolved in candidates:
+        p, rel = resolved.absolute, resolved.relative
+        if p.suffix.lower() != ".md":
+            continue
         if _is_excluded(rel, exclude_paths):
             continue
         if p.stem.lower() == stem_lower:
@@ -267,5 +284,9 @@ def _fuzzy_score(line_lower: str, query_lower: str) -> int:
 
 
 def _is_excluded(rel_path: str, exclude_paths: list[str]) -> bool:
-    parts = Path(rel_path).parts
-    return any(part in exclude_paths for part in parts)
+    normalized = rel_path.replace("\\", "/").strip("/")
+    return any(
+        normalized == rule.rstrip("/")
+        or normalized.startswith(rule.rstrip("/") + "/")
+        for rule in exclude_paths
+    )

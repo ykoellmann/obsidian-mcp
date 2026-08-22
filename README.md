@@ -67,6 +67,9 @@ VAULT_PATH=/path/to/your/obsidian/vault
 # Optional:
 # READ_ONLY=true            # prevent all writes
 # WRITE_PATHS=Notes/,Inbox/ # restrict writes to specific folders
+# DENY_READ_PATHS=.obsidian/,.trash/ # security boundary for all reads
+# DENY_WRITE_PATHS=.obsidian/,.trash/,_AI_INSTRUCTIONS.md
+# ALLOW_PERMANENT_DELETE=false
 # TRANSPORT=stdio           # stdio (default), http (recommended for network use), or sse (legacy)
 ```
 
@@ -88,11 +91,22 @@ for the two auth variants in detail.
 # ENABLE_EXCALIDRAW=true  # *.excalidraw.md file tools
 # ENABLE_KANBAN=true      # Kanban board tools
 # ENABLE_BASES=true       # .base file tools (Obsidian core plugin, 1.9.0+)
+
+# High-impact mutations are absent from the MCP tool list unless enabled.
+# ENABLE_MOVE=true             # move_note_tool
+# ENABLE_FOLDER_RENAME=true    # rename_folder_tool
+# ENABLE_BULK_REPLACE=true     # find_replace_in_vault_tool
+# ENABLE_DELETE=true           # delete_note_tool and delete_folder_tool
 ```
 
 Each defaults to `false`. A disabled group's tools aren't just refused at
 call time — they're never registered, so they don't appear in the tool list
 at all.
+
+The high-impact mutation groups are similarly opt-in: set `ENABLE_MOVE`,
+`ENABLE_FOLDER_RENAME`, `ENABLE_BULK_REPLACE`, or `ENABLE_DELETE` to register
+the corresponding tools. Their underlying Python functions remain available
+for local/unit-test use and future transactional implementations.
 
 ## Usage with Claude Code
 
@@ -144,7 +158,41 @@ The `docker-compose.yml` pulls the pre-built image from GHCR — no cloning or b
 
 If you enable GitHub OAuth (see [Option B](#option-b-github-oauth-claudeai-webmobile-custom-connector)), uncomment the `fastmcp-data` volume in `docker-compose.yml` so logins survive container restarts.
 
-The image has a built-in `HEALTHCHECK` against `GET /health` (unauthenticated, no vault content — just `{status, vault_path, index_ready}`), visible in `docker ps`/`docker compose ps`. Only meaningful for `TRANSPORT=http`/`sse`; a no-op for `stdio`.
+The image has a built-in `HEALTHCHECK` against `GET /health` (unauthenticated, no vault content or filesystem paths — just `{status, index_ready}`), visible in `docker ps`/`docker compose ps`. Only meaningful for `TRANSPORT=http`/`sse`; a no-op for `stdio`.
+
+### Hardened home-server Compose profile
+
+For a home server where Cloudflare Tunnel is the only network entry point,
+use [`docker-compose.home-server.yml`](docker-compose.home-server.yml). It
+builds the MCP image from the checked-out source, bind-mounts the complete
+vault read-only, overlays only the two configured AI memory/output directories
+read-write, sets matching `WRITE_PATHS`, runs as the configured non-root
+UID/GID, and publishes no host port. The MCP service is only on an internal
+network; `cloudflared` has that network plus a separate normal egress network
+so it can reach Cloudflare without making MCP externally reachable.
+
+Create the nested writable directories before starting it, set
+`HOST_VAULT_PATH`, `AI_MEMORY_PATH`, `AI_OUTPUT_PATH`, `PUID`, `PGID`,
+`MCP_DATA_PATH`, `API_KEY`, `CLOUDFLARE_TUNNEL_TOKEN`, and a digest-pinned
+`CLOUDFLARED_IMAGE` (for example,
+`cloudflare/cloudflared@sha256:<digest>`) in `.env`. Create the data directory
+and make it owned by `PUID:PGID`; it stores `/data/locks` and application state.
+Cloudflare Access Managed OAuth authenticates the edge, but it does not inject
+this application's bearer API key. Clients must still send `API_KEY` to the
+origin; trusted-proxy header injection is a future phase, not part of this
+profile. Then run:
+
+```bash
+docker compose -f docker-compose.home-server.yml up -d
+```
+
+The static Compose checks are covered by the test suite. A real deployment
+test (Docker mount precedence, host UID/GID permissions, and the Cloudflare
+Tunnel route) remains environment-specific and must be run on the target
+server before relying on it. To update Cloudflared, choose a reviewed release,
+resolve its immutable `RepoDigest`, update `CLOUDFLARED_IMAGE`, then recreate
+the sidecar; rebuild the MCP service after source changes with
+`docker compose -f docker-compose.home-server.yml build --pull`.
 
 ## Remote Setup (Recommended)
 
@@ -289,15 +337,15 @@ Full parameter documentation is embedded in the server and shown automatically t
 
 ```
 src/obsidian_mcp/
-├── config.py          # env-based config (VAULT_PATH, READ_ONLY, WRITE_PATHS)
+├── config.py          # env-based config and read/write security boundaries
 ├── server.py          # FastMCP entry point, tool and resource registrations
 ├── domain/
 │   ├── models.py      # Note dataclass (frontmatter, tags, wikilinks, tasks, …)
 │   ├── parser.py      # Markdown parser (YAML frontmatter, wikilinks, block refs, …)
 │   └── index.py       # VaultIndex — alias resolution, backlinks, tag tree, BFS
 ├── storage/
-│   ├── filesystem.py  # atomic writes (temp + os.replace), path validation
-│   ├── locking.py     # per-file filelock to prevent concurrent write conflicts
+│   ├── filesystem.py  # VaultStorage authorization and atomic writes
+│   ├── locking.py     # hashed locks outside the synced vault
 │   └── watcher.py     # watchdog-based vault change detection (polling fallback)
 └── tools/
     ├── read.py        # read_note, search_notes, render_note, get_note_outline

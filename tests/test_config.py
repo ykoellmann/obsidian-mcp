@@ -1,9 +1,13 @@
 """Tests for GitHub OAuth config validation (obsidian_mcp/config.py)."""
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from obsidian_mcp.config import Config, ConfigError
+from obsidian_mcp.storage.locking import acquire_lock
 
 
 def _base_env(monkeypatch, tmp_path):
@@ -76,4 +80,69 @@ def test_network_transport_requires_api_key_or_oauth(tmp_path, monkeypatch):
     monkeypatch.setenv("TRANSPORT", "sse")
 
     with pytest.raises(ConfigError, match="API_KEY or GitHub OAuth"):
+        Config()
+
+
+def test_security_path_defaults_and_lock_outside_vault(tmp_path, monkeypatch):
+    _base_env(monkeypatch, tmp_path)
+    cfg = Config()
+    assert cfg.deny_read_paths == [".obsidian", ".trash"]
+    assert cfg.deny_write_paths == [".obsidian", ".trash", "_AI_INSTRUCTIONS.md"]
+    assert cfg.allow_permanent_delete is False
+    assert tmp_path not in cfg.lock_path.parents
+    assert cfg.enable_move is False
+    assert cfg.enable_folder_rename is False
+    assert cfg.enable_bulk_replace is False
+    assert cfg.enable_delete is False
+
+
+def test_native_default_lock_path_is_external_and_usable(tmp_path, monkeypatch):
+    _base_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("LOCK_PATH", raising=False)
+    monkeypatch.delenv("FASTMCP_HOME", raising=False)
+    cfg = Config()
+
+    assert cfg.lock_path == (Path(tempfile.gettempdir()) / "obsidian-mcp-locks").resolve()
+    assert cfg.lock_path != cfg.vault_path
+    lock = acquire_lock("native-test", lock_path=cfg.lock_path)
+    lock.release()
+
+
+def test_security_path_lists_normalize_separators(tmp_path, monkeypatch):
+    _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("WRITE_PATHS", "AI\\Memory/")
+    monkeypatch.setenv("DENY_READ_PATHS", "private/")
+    cfg = Config()
+    assert cfg.write_paths == ["AI/Memory"]
+    assert cfg.deny_read_paths == ["private"]
+    with pytest.raises((AttributeError, TypeError)):
+        cfg.write_paths.append("other")
+    with pytest.raises(AttributeError):
+        cfg.read_only = True
+    original = list(cfg.write_paths)
+    with pytest.raises(TypeError):
+        cfg.write_paths += ["other"]
+    with pytest.raises(TypeError):
+        cfg.write_paths *= 2
+    assert cfg.write_paths == original
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "not-an-int"])
+def test_max_attachment_bytes_must_be_positive(tmp_path, monkeypatch, value):
+    _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("MAX_ATTACHMENT_BYTES", value)
+    with pytest.raises(ConfigError, match="MAX_ATTACHMENT_BYTES"):
+        Config()
+
+
+def test_max_attachment_bytes_defaults_to_25_mib(tmp_path, monkeypatch):
+    _base_env(monkeypatch, tmp_path)
+    assert Config().max_attachment_bytes == 25 * 1024 * 1024
+
+
+@pytest.mark.parametrize("setting", ["WRITE_PATHS", "DENY_READ_PATHS", "DENY_WRITE_PATHS", "EXCLUDE_PATHS"])
+def test_security_path_lists_reject_escape(tmp_path, monkeypatch, setting):
+    _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(setting, "../outside")
+    with pytest.raises(ConfigError):
         Config()
