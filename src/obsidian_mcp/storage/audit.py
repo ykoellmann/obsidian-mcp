@@ -5,7 +5,7 @@ staying invisible to note-facing tools the same way `.trash/`/`.obsidian` do."""
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .locking import acquire_lock
@@ -19,7 +19,7 @@ def _audit_path(vault_root: Path) -> Path:
 
 def append_entry(vault_root: Path, tool: str, path: str | None, summary: str) -> None:
     entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        "timestamp": datetime.now(UTC).isoformat(timespec="microseconds"),
         "tool": tool,
         "path": path,
         "summary": summary,

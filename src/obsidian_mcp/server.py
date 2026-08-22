@@ -26,6 +26,7 @@ from .tools.attachments import (
     verify_attachment_token,
     write_attachment_bytes,
 )
+from .tools.audit import get_audit_log, get_note_history, log_write
 from .tools.bases import list_bases, patch_base, read_base, write_base
 from .tools.canvas import list_canvases, patch_canvas, read_canvas, write_canvas
 from .tools.excalidraw import (
@@ -50,6 +51,7 @@ from .tools.kanban import (
     move_kanban_card,
     read_kanban,
 )
+from .tools.lint import lint_schema
 from .tools.prompts import daily_note_prompt, weekly_review_prompt
 from .tools.query import (
     get_backlinks,
@@ -67,10 +69,8 @@ from .tools.query import (
     query_notes,
     resolve_alias,
 )
-from .tools.audit import get_audit_log, get_note_history, log_write
-from .tools.lint import lint_schema
-from .tools.similarity import find_similar_notes
 from .tools.read import get_note_outline, list_notes, read_note, render_note, search_notes
+from .tools.similarity import find_similar_notes
 from .tools.templates import create_from_template, list_templates
 from .tools.write import (
     append_to_note,
