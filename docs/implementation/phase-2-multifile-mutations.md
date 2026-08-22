@@ -62,11 +62,21 @@ class PlannedMove:
     original_revision: str
 
 @dataclass(frozen=True)
+class PlannedDelete:
+    path: VaultPath
+    original_revision: str
+
+@dataclass(frozen=True)
+class PlannedDirectoryCreate:
+    path: VaultPath
+
+@dataclass(frozen=True)
 class MutationPlan:
     operation: str
     writes: tuple[PlannedWrite, ...]
     moves: tuple[PlannedMove, ...]
-    deletes: tuple[VaultPath, ...]
+    deletes: tuple[PlannedDelete, ...]
+    directory_creates: tuple[PlannedDirectoryCreate, ...]
     index_changes: tuple[IndexChange, ...]
 ```
 
@@ -75,9 +85,10 @@ the first directory, lock or temporary file is created.
 
 Each plan should have a stable digest derived from the complete deterministic
 mutation payload: operation type and parameters, canonical paths, original
-revisions, proposed-content hashes and every other semantic field. Different
-committed bytes or parameters must always produce a different digest. Return it
-from dry runs so a caller can approve one specific plan.
+revisions, proposed-content hashes, every directory creation and every other
+semantic field. Different committed bytes, paths or parameters must always
+produce a different digest. Return it from dry runs so a caller can approve one
+specific plan.
 
 ## Execution sequence
 
@@ -95,7 +106,9 @@ from dry runs so a caller can approve one specific plan.
 
 - Read source content and revisions.
 - Calculate all rewritten file contents in memory.
-- Record destination directory creation, if needed.
+- Record every missing destination directory, including missing parents, as a
+  `PlannedDirectoryCreate`; do not derive or create directories during commit
+  that were absent from the approved plan.
 - Record index removals and updates.
 - Do not mutate disk.
 
@@ -103,7 +116,8 @@ from dry runs so a caller can approve one specific plan.
 
 - Require write authorization for every `PlannedWrite`.
 - Require source and destination authorization for every `PlannedMove`.
-- Require delete authorization for every deletion.
+- Require delete authorization for every `PlannedDelete`.
+- Require write authorization for every `PlannedDirectoryCreate`.
 - Reject the entire plan if any affected path is protected or outside
   `WRITE_PATHS`.
 - Return a structured list of blocked paths without exposing denied content.
@@ -113,6 +127,9 @@ from dry runs so a caller can approve one specific plan.
 - Re-read and SHA-256 hash every planned existing path; metadata may avoid
   unnecessary work only when a content hash is still validated before commit.
 - Confirm its revision matches the planned revision.
+- Confirm each `PlannedDelete` still has its `original_revision`.
+- Confirm every planned directory destination is still absent and every
+  unplanned parent required by the commit already exists as a real directory.
 - Confirm destinations still do not exist unless overwrite was explicitly
   planned.
 - Abort with a conflict before staging if anything changed.
@@ -126,7 +143,8 @@ from dry runs so a caller can approve one specific plan.
 
 ### 6. Revalidate under lock
 
-- Recheck revisions and destination existence.
+- Recheck write, move and delete revisions plus directory destination
+  non-existence.
 - This protects against concurrent MCP operations.
 - Phase 3 addresses non-cooperating sync writers.
 
@@ -145,15 +163,20 @@ partial-commit window and keep a recoverable journal:
 1. write a transaction journal beneath the configured external transaction
    directory;
 2. snapshot original file contents or create recovery copies outside the vault;
-3. replace backlink/bulk-edit files in stable order;
-4. move the source to its destination;
-5. mark the journal committed;
-6. update the in-memory index;
-7. remove recovery data after a retention period.
+3. journal an intent and create each approved directory in parent-first order;
+4. replace backlink/bulk-edit files in stable order;
+5. delete only files whose content still matches `original_revision`;
+6. move the source to its destination;
+7. mark the journal committed;
+8. update the in-memory index;
+9. remove recovery data after a retention period.
 
 If a commit step fails, attempt rollback from the recovery copies. If rollback
 is incomplete, retain the journal and return a recovery-required error. Never
 claim the operation succeeded partially without listing its state.
+Rollback removes a transaction-created directory only when the journal proves
+this transaction created it and it is still empty; an unexpected child makes
+recovery fail closed rather than deleting another writer's data.
 
 ### 9. Report
 

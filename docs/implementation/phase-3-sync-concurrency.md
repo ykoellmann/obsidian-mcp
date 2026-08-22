@@ -153,13 +153,18 @@ Maintain a small SQLite operation ledger at the configured external
 operation-ledger path, never inside the vault:
 
 ```text
-operation_id
 principal_id
+operation_id
 tool_name
 target_path
 request_digest
+status                    # pending | complete
+initial_revision
+expected_result_revision
 result_revision
+result_json
 created_at
+PRIMARY KEY (principal_id, operation_id)
 ```
 
 Rules:
@@ -167,8 +172,15 @@ Rules:
 - the same principal, operation ID and request digest returns the stored result;
 - reuse with different content is rejected;
 - records expire after a configurable retention period;
-- durably reserve a pending operation before replacement, record the expected
-  post-state, and reconcile a crash after replacement before allowing a retry;
+- use `BEGIN IMMEDIATE` plus the composite primary key to atomically reserve a
+  unique pending operation before replacement; a concurrent retry must observe
+  that reservation rather than execute the append again;
+- persist `initial_revision` and `expected_result_revision` in the pending row,
+  then atomically transition it to `complete` with `result_revision` and
+  `result_json` after replacement;
+- on retry, reconcile a pending row against its expected post-state: finalize
+  the result when the replacement is proven, retry only when the original state
+  is proven, and otherwise return outcome-unknown without appending again;
 - do not store note content in the ledger.
 
 For append-heavy memory, prefer one event per uniquely named file over repeatedly
