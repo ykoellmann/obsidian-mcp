@@ -304,4 +304,3 @@ transaction layers to either engine.
 - Commit failures are recoverable from a journal.
 - Destructive tools are absent from the MCP tool list unless explicitly
   enabled.
-

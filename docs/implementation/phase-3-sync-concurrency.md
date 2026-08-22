@@ -380,4 +380,3 @@ Run a fake or test Sync writer beside MCP against bind mounts:
 - The recommended nested-mount deployment passes an end-to-end sync test.
 - A documented and tested backup restoration procedure exists before production
   writes are enabled.
-

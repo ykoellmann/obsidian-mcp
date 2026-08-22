@@ -313,4 +313,3 @@ Verify that:
 - A repository search for direct filesystem mutation has no unexplained result.
 - Documentation states clearly which settings are discovery filters and which
   are security boundaries.
-
