@@ -28,11 +28,23 @@ services:
       # Only needed if OAUTH_GITHUB_* above is set: persists OAuth logins
       # across container restarts (mount fastmcp-data below to use it).
       - FASTMCP_HOME=${FASTMCP_HOME:-}
+      # Multiple isolated vaults instead of one: set this (and mount both
+      # the config file and every vault path it references below), which
+      # makes VAULT_PATH/WRITE_PATHS/EXCLUDE_PATHS/API_KEY/
+      # OAUTH_GITHUB_ALLOWED_LOGINS above unused. See README "Multi-Vault
+      # Setup" and vaults.json.example. Leave unset for the single-vault
+      # setup this file uses by default.
+      - VAULTS_CONFIG=${VAULTS_CONFIG:-}
     volumes:
       - ${HOST_VAULT_PATH}:/vault
       # Uncomment if OAUTH_GITHUB_* is configured, to keep claude.ai logged in
       # across container restarts:
       # - fastmcp-data:/data/fastmcp
+      # Multi-vault (see VAULTS_CONFIG above): mount the config file itself
+      # plus every vault path it references, e.g.:
+      # - ./vaults.json:/data/vaults.json:ro
+      # - /path/to/private-vault:/vaults/private
+      # - /path/to/monari-vault:/vaults/monari
     ports:
       - "8000:8000"
 

@@ -37,6 +37,7 @@ The intended setup is to host obsidian-mcp on a server or NAS where your vault i
 - **Bases** *(opt-in via `ENABLE_BASES`)* — read, create, and patch Obsidian Bases (`.base`) files — YAML-defined table/cards/list views over existing frontmatter properties
 - **Attachments** — list, read (text or base64), and add binary files
 - **Two auth variants** — a static API key (Claude Code, Desktop, curl) and, optionally, GitHub OAuth (claude.ai Web/Mobile Custom Connector) — usable independently or at the same time
+- **Multi-vault** *(opt-in via `VAULTS_CONFIG`)* — serve several fully isolated vaults from one deployment, each identity (API key or GitHub login) mapped to only the vault(s) it may access
 - **Templates** — render Obsidian templates with built-in (`{{date}}`, `{{title}}`, …) and custom variables
 - **MCP Resources** — expose vault notes, stats, and tags as MCP resources for direct context injection
 - **MCP Prompts** — `weekly_review`, `daily_note` starting points for common workflows
@@ -264,6 +265,61 @@ etc.) automatically and redirects you to GitHub to log in on first connect.
 > path (see `docker-compose.yml`) to avoid that.
 
 Keep the vault synced on the server with Syncthing, git+cron, rclone, or Obsidian Sync — obsidian-mcp picks up changes automatically via its file watcher.
+
+## Multi-Vault Setup
+
+By default obsidian-mcp serves one vault (`VAULT_PATH`). If you need several
+completely separate vaults from one deployment — e.g. a private vault and a
+work vault, each only reachable by its own identity — set `VAULTS_CONFIG` to
+the path of a JSON file instead, and every `VAULT_PATH`/`WRITE_PATHS`/
+`EXCLUDE_PATHS`/`API_KEY`/`OAUTH_GITHUB_ALLOWED_LOGINS` setting is ignored in
+favor of it. See [`vaults.json.example`](vaults.json.example):
+
+```json
+{
+  "vaults": {
+    "private": {"path": "/vaults/private", "exclude_paths": ["private", ".obsidian"]},
+    "monari":  {"path": "/vaults/monari",  "write_paths": ["02-Areas/monari/"]}
+  },
+  "identities": [
+    {"type": "api_key",      "value": "sk-...",              "vaults": ["private"]},
+    {"type": "github_login", "value": "your-github-username", "vaults": ["private", "monari"], "default": "private"}
+  ]
+}
+```
+
+```env
+VAULT_PATH=              # unused — vaults.json defines paths instead
+VAULTS_CONFIG=/data/vaults.json
+TRANSPORT=http
+```
+
+Each `identities` entry is either an **API key** (`Authorization: Bearer
+<value>`, same as [Option A](#option-a-api-key-claude-code-claude-desktop-curl-mcp-remote)
+above) or a **GitHub login** (same allowlist mechanism as
+[Option B](#option-b-github-oauth-claudeai-webmobile-custom-connector) — set
+`OAUTH_GITHUB_CLIENT_ID`/`SECRET`/`PUBLIC_BASE_URL` as usual, just skip
+`OAUTH_GITHUB_ALLOWED_LOGINS` since `vaults.json` replaces it). Both kinds
+can be mixed and used at the same time, exactly like today. Whichever
+identity a request authenticates as, every tool call is transparently
+scoped to that identity's vault(s) — there is no way to reach a vault an
+identity isn't listed for.
+
+**Currently (Phase 1):** each identity resolves to exactly one vault, the
+first one in its `"vaults"` list (or `"default"` if you set it explicitly
+when listing more than one — useful for forward-compatibility, but a second
+entry has no effect yet). Support for switching between several vaults
+allowed to the same identity within one session is planned but not built
+yet. `mount your vault twice under two identities` is the workaround today
+if one person genuinely needs both.
+
+> **Known limitations:** `/attachments/*` and `/health` don't go through
+> per-tool-call auth resolution, so they always operate on the first vault
+> listed in `vaults.json`, regardless of which identity is calling.
+> `create_attachment_token_tool`'s short-lived scoped tokens don't work in
+> multi-vault mode (they're signed against a single global key, which
+> multi-vault setups don't have) — use a plain `Authorization: Bearer`
+> request against `/attachments/*` instead.
 
 ## Vault Conventions (Customization)
 
