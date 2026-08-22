@@ -54,9 +54,18 @@ ALLOW_PERMANENT_DELETE=false
 
 Defaults should prioritize safety for a network deployment:
 
+- `READ_ONLY`: `true`; operators must explicitly opt into network writes
+- `WRITE_PATHS`: a narrow, non-empty set whenever `READ_ONLY=false`
 - `DENY_READ_PATHS`: `.obsidian/,.trash/`
 - `DENY_WRITE_PATHS`: `.obsidian/,.trash/,_AI_INSTRUCTIONS.md`
 - `ALLOW_PERMANENT_DELETE`: `false`
+
+An empty `WRITE_PATHS` with `READ_ONLY=false` retains unrestricted-write
+compatibility and must be an explicit operator choice, not the documented
+network default. Slash-suffixed rules grant a directory and its descendants;
+rules without a trailing slash grant only that exact path. Deploy security
+boundaries on a case-sensitive filesystem; deny rules are case-folded as an
+additional safeguard for common local case-insensitive filesystems.
 
 `EXCLUDE_PATHS` may continue to hide content from listing, indexing, search and
 graph tools without necessarily forbidding an intentional direct read. This

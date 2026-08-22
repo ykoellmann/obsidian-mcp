@@ -23,6 +23,28 @@ def test_component_aware_write_allowlist(tmp_path):
         policy.resolve_write("AI-old/note.md")
 
 
+def test_file_rule_is_exact_and_directory_rule_is_recursive(tmp_path):
+    exact = VaultAccessPolicy(tmp_path, write_paths=["AI/note.md"])
+    assert exact.resolve_write("AI/note.md").relative == "AI/note.md"
+    with pytest.raises(WritePermissionError):
+        exact.resolve_write("AI/note.md/child.md")
+
+    recursive = VaultAccessPolicy(tmp_path, write_paths=["AI/note.md/"])
+    assert recursive.resolve_write("AI/note.md/child.md").relative == "AI/note.md/child.md"
+
+
+def test_deny_rules_cannot_be_bypassed_by_case_alias(tmp_path):
+    policy = VaultAccessPolicy(
+        tmp_path,
+        deny_read_paths=["private/"],
+        deny_write_paths=["protected.md"],
+    )
+    with pytest.raises(ReadPermissionError):
+        policy.resolve_read("Private/secret.md")
+    with pytest.raises(ProtectedPathError):
+        policy.resolve_write("PROTECTED.MD")
+
+
 def test_deny_read_is_not_bypassable_by_direct_name(tmp_path):
     (tmp_path / "private").mkdir()
     (tmp_path / "private" / "secret.md").write_text("secret")
@@ -38,7 +60,7 @@ def test_tree_paths_filters_denied_descendants(tmp_path):
     (tmp_path / "private").mkdir()
     (tmp_path / "public" / "note.md").write_text("public")
     (tmp_path / "private" / "secret.md").write_text("secret")
-    storage = VaultStorage(VaultAccessPolicy(tmp_path, deny_read_paths=["private"]))
+    storage = VaultStorage(VaultAccessPolicy(tmp_path, deny_read_paths=["private/"]))
 
     assert [path.relative for path in storage.tree_paths("")] == ["public", "public/note.md"]
 
@@ -56,6 +78,12 @@ def test_write_authorization_happens_before_parent_or_temp_creation(tmp_path):
         storage.write_text_atomic("denied/new.md", "must not be written")
     assert not (tmp_path / "denied").exists()
     assert not list(tmp_path.rglob(".obsidian-mcp-tmp-*"))
+
+
+def test_exists_returns_false_when_parent_is_a_file(tmp_path):
+    (tmp_path / "note.md").write_text("not a directory")
+    storage = VaultStorage(VaultAccessPolicy(tmp_path))
+    assert storage.exists("note.md/child.base") is False
 
 
 def test_symlinked_parent_and_target_are_rejected(tmp_path):
@@ -94,8 +122,8 @@ def test_directory_move_preauthorizes_denied_descendants_before_mutation(tmp_pat
     (tmp_path / "source" / "nested" / "secret.md").write_text("secret")
     policy = VaultAccessPolicy(
         tmp_path,
-        write_paths=["source", "destination"],
-        deny_write_paths=["source/nested"],
+        write_paths=["source/", "destination/"],
+        deny_write_paths=["source/nested/"],
     )
     storage = VaultStorage(policy)
 
@@ -111,8 +139,8 @@ def test_directory_move_preauthorizes_mapped_destination_descendants(tmp_path):
     (tmp_path / "source" / "nested" / "secret.md").write_text("secret")
     policy = VaultAccessPolicy(
         tmp_path,
-        write_paths=["source", "destination"],
-        deny_write_paths=["destination/nested"],
+        write_paths=["source/", "destination/"],
+        deny_write_paths=["destination/nested/"],
     )
     storage = VaultStorage(policy)
 
@@ -127,8 +155,8 @@ def test_directory_mutation_rejects_structural_protected_descendant(tmp_path):
     (tmp_path / "source").mkdir()
     policy = VaultAccessPolicy(
         tmp_path,
-        write_paths=["source", "destination"],
-        deny_write_paths=["destination/future-private"],
+        write_paths=["source/", "destination/"],
+        deny_write_paths=["destination/future-private/"],
     )
     storage = VaultStorage(policy)
 
@@ -143,8 +171,8 @@ def test_directory_mutation_rejects_structural_source_descendant(tmp_path):
     (tmp_path / "source").mkdir()
     policy = VaultAccessPolicy(
         tmp_path,
-        write_paths=["source", "destination"],
-        deny_write_paths=["source/future-private"],
+        write_paths=["source/", "destination/"],
+        deny_write_paths=["source/future-private/"],
     )
     storage = VaultStorage(policy)
 

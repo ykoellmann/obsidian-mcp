@@ -43,8 +43,8 @@ from obsidian_mcp.tools.write import (
 
 
 def _configure_scoped_policy(monkeypatch, lock_path=None):
-    monkeypatch.setenv("WRITE_PATHS", "allowed")
-    monkeypatch.setenv("DENY_READ_PATHS", "denied,.trash")
+    monkeypatch.setenv("WRITE_PATHS", "allowed/")
+    monkeypatch.setenv("DENY_READ_PATHS", "denied/,.trash/")
     monkeypatch.setenv("API_KEY", "matrix-key")
     if lock_path is not None:
         monkeypatch.setenv("LOCK_PATH", str(lock_path))

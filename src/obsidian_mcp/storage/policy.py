@@ -71,9 +71,10 @@ def _normalise_rules(values: Iterable[str], *, name: str) -> tuple[str, ...]:
     for raw in values:
         if not isinstance(raw, str):
             raise VaultPathError(f"{name} entries must be strings")
-        # A trailing slash is only a human-readable directory hint.  Matching
-        # itself is component based and therefore does not need the slash.
+        recursive = raw.endswith(("/", "\\"))
         item = _normalise_relative(raw.rstrip("/\\"), allow_empty=False)
+        if recursive:
+            item += "/"
         if item not in result:
             result.append(item)
     return tuple(result)
@@ -136,12 +137,25 @@ class VaultAccessPolicy:
         return VaultPath(relative=relative, absolute=absolute)
 
     @staticmethod
-    def _matches(path: str, rule: str) -> bool:
-        return path == rule or path.startswith(rule + "/")
+    def rule_path(rule: str) -> str:
+        """Return the canonical path portion of a configured rule."""
+        return rule.rstrip("/")
+
+    @staticmethod
+    def _matches(path: str, rule: str, *, casefold: bool = False) -> bool:
+        """Match exact file rules and slash-suffixed recursive directory rules."""
+        recursive = rule.endswith("/")
+        candidate = path.casefold() if casefold else path
+        scope = rule.rstrip("/")
+        scope = scope.casefold() if casefold else scope
+        return candidate == scope or (recursive and candidate.startswith(scope + "/"))
 
     def _denied(self, path: str, rules: tuple[str, ...]) -> str | None:
         # The longest matching rule gives a useful deterministic reason in logs.
-        matches = [rule for rule in rules if self._matches(path, rule)]
+        # Case-fold deny rules even on a case-sensitive host. This can only
+        # deny additional paths and prevents case aliases bypassing policy on
+        # the common case-insensitive macOS/Windows filesystems.
+        matches = [rule for rule in rules if self._matches(path, rule, casefold=True)]
         return max(matches, key=len) if matches else None
 
     def resolve_read(self, path: str, *, allow_empty: bool = False) -> VaultPath:

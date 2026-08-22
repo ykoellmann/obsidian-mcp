@@ -9,7 +9,9 @@ services:
       - TRANSPORT=http
       - HOST=${HOST:-0.0.0.0}
       - PORT=${PORT:-8000}
-      - READ_ONLY=${READ_ONLY:-false}
+      # Network deployments default to read-only. Opt into writes explicitly,
+      # preferably together with a narrow slash-suffixed WRITE_PATHS scope.
+      - READ_ONLY=${READ_ONLY:-true}
       - WRITE_PATHS=${WRITE_PATHS:-}
       - DENY_READ_PATHS=${DENY_READ_PATHS:-.obsidian/,.trash/}
       - DENY_WRITE_PATHS=${DENY_WRITE_PATHS:-.obsidian/,.trash/,_AI_INSTRUCTIONS.md}
@@ -36,7 +38,7 @@ services:
       - OAUTH_GITHUB_ALLOWED_LOGINS=${OAUTH_GITHUB_ALLOWED_LOGINS:-}
       # Only needed if OAUTH_GITHUB_* above is set: persists OAuth logins
       # across container restarts (mount fastmcp-data below to use it).
-      - FASTMCP_HOME=${FASTMCP_HOME:-}
+      - FASTMCP_HOME=${FASTMCP_HOME:-/data/fastmcp}
     volumes:
       - ${HOST_VAULT_PATH}:/vault
       # Keep application state and locks outside the synced vault.

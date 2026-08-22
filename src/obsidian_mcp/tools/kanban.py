@@ -74,7 +74,11 @@ def create_kanban_board(
         lines += [f"## {col}", ""]
     content = "\n".join(lines)
 
-    storage.write_text_atomic(path, content)
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
+    try:
+        storage.write_text_atomic(path, content)
+    finally:
+        lock.release()
     if index is not None:
         index.update(path)
 

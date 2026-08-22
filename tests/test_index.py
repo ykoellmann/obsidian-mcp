@@ -69,11 +69,21 @@ def test_exclude_paths(tmp_path):
     assert "private/secret.md" not in idx.get_backlinks("other")
 
 
+def test_exclude_path_matches_nested_component(tmp_path):
+    nested = tmp_path / "Notes" / "private"
+    nested.mkdir(parents=True)
+    (nested / "secret.md").write_text("secret")
+    (tmp_path / "public.md").write_text("public")
+    idx = VaultIndex(tmp_path, exclude_paths=["private"])
+    idx.build()
+    assert idx.get_all_notes() == {"public.md"}
+
+
 def test_index_does_not_discover_denied_subtree(tmp_path):
     (tmp_path / "private").mkdir()
     (tmp_path / "private" / "secret.md").write_text("secret")
     (tmp_path / "public.md").write_text("public")
-    policy = VaultAccessPolicy(tmp_path, deny_read_paths=["private"])
+    policy = VaultAccessPolicy(tmp_path, deny_read_paths=["private/"])
     idx = VaultIndex(tmp_path, policy=policy)
     idx.build()
 
@@ -84,7 +94,7 @@ def test_index_purges_readable_note_renamed_into_denied_subtree(tmp_path):
     (tmp_path / "private").mkdir()
     note = tmp_path / "public.md"
     note.write_text("public")
-    policy = VaultAccessPolicy(tmp_path, deny_read_paths=["private"])
+    policy = VaultAccessPolicy(tmp_path, deny_read_paths=["private/"])
     idx = VaultIndex(tmp_path, policy=policy)
     idx.build()
     assert idx.get_all_notes() == {"public.md"}

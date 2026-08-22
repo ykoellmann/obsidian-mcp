@@ -65,13 +65,20 @@ Copy `.env.example` to `.env` and set your vault path:
 ```env
 VAULT_PATH=/path/to/your/obsidian/vault
 # Optional:
-# READ_ONLY=true            # prevent all writes
+# READ_ONLY=true            # safe default for network Compose deployments
 # WRITE_PATHS=Notes/,Inbox/ # restrict writes to specific folders
 # DENY_READ_PATHS=.obsidian/,.trash/ # security boundary for all reads
 # DENY_WRITE_PATHS=.obsidian/,.trash/,_AI_INSTRUCTIONS.md
 # ALLOW_PERMANENT_DELETE=false
 # TRANSPORT=stdio           # stdio (default), http (recommended for network use), or sse (legacy)
 ```
+
+Slash-suffixed policy entries such as `Notes/` cover that directory and its
+descendants. An entry without a trailing slash grants or denies only the exact
+path. For compatibility, native configuration still permits unrestricted
+writes when both `READ_ONLY=false` and `WRITE_PATHS` is empty; choose that
+combination explicitly, not as a network default. Use a case-sensitive
+filesystem for authoritative path scopes.
 
 Full list of variables — including `API_KEY`, `PUBLIC_BASE_URL`, and the
 `OAUTH_GITHUB_*` variables for the optional second auth variant — is
@@ -185,6 +192,11 @@ profile. Then run:
 ```bash
 docker compose -f docker-compose.home-server.yml up -d
 ```
+
+Folder/note trash and restore are intentionally unavailable in this nested-bind
+profile: moving from a writable overlay into the read-only parent vault's
+`.trash` would cross mounts. Keep `ENABLE_DELETE=false` (hard-coded here) and
+do not enable folder restore in this topology.
 
 The static Compose checks are covered by the test suite. A real deployment
 test (Docker mount precedence, host UID/GID permissions, and the Cloudflare

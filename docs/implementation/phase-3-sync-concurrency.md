@@ -126,15 +126,19 @@ For an existing file:
 4. Compare it with `expected_revision`.
 5. Produce the new content from that exact version.
 6. Write and flush a temporary file beside the destination.
-7. Re-hash or restat the destination immediately before replacement.
+7. Re-hash the destination immediately before replacement; metadata is only an
+   optimization and never substitutes for content validation.
 8. If it changed, retain neither the staged file nor a misleading success result;
    return a conflict.
 9. Atomically replace the destination.
 10. Hash the committed file and return its new revision.
 
-Step 7 cannot eliminate the final race with a non-cooperating writer, but it
-reduces the vulnerable window to the replacement itself. Filesystem snapshots
-and Sync history remain necessary recovery layers.
+Step 7 cannot eliminate the final race with a non-cooperating writer. The
+completion guarantee is therefore conflict detection and recovery evidence,
+not proof that no external writer raced the final replacement. Use a
+platform-specific compare-and-swap/no-clobber primitive where available, detect
+post-write divergence, and retain filesystem snapshots and Sync history as
+recovery layers.
 
 ## Idempotent append
 
@@ -145,7 +149,8 @@ append-like tools:
 append_to_note(path, content, operation_id="uuid")
 ```
 
-Maintain a small SQLite operation ledger under `/data`, not inside the vault:
+Maintain a small SQLite operation ledger at the configured external
+operation-ledger path, never inside the vault:
 
 ```text
 operation_id
@@ -162,7 +167,8 @@ Rules:
 - the same principal, operation ID and request digest returns the stored result;
 - reuse with different content is rejected;
 - records expire after a configurable retention period;
-- record the completed operation only after the file replacement succeeds;
+- durably reserve a pending operation before replacement, record the expected
+  post-state, and reconcile a crash after replacement before allowing a retry;
 - do not store note content in the ledger.
 
 For append-heavy memory, prefer one event per uniquely named file over repeatedly
@@ -177,7 +183,8 @@ When a revision conflict occurs:
 - leave the current vault file untouched;
 - return a conflict to the client;
 - optionally save the proposed content outside the vault under
-  `/data/conflicts/<operation-id>`;
+  the configured conflict directory under an opaque identifier derived from
+  principal and operation ID (never join caller input directly as a path);
 - expose an operator command to inspect or discard staged conflict content;
 - never put secrets or denied source content into a conflict record.
 
@@ -216,8 +223,9 @@ Add periodic reconciliation even when watchdog/inotify is active:
 INDEX_RECONCILE_INTERVAL=300
 ```
 
-Reconciliation compares canonical paths, size and mtime, then hashes likely
-changes. It repairs missed events and removes deleted entries.
+Reconciliation hashes every in-scope file on a bounded periodic schedule;
+size and mtime may prioritize work but cannot be the sole trigger. It repairs
+missed events and removes deleted entries even when metadata was preserved.
 
 Expose health information without sensitive paths:
 
@@ -372,8 +380,9 @@ Run a fake or test Sync writer beside MCP against bind mounts:
 
 ## Completion criteria
 
-- Existing-file mutations cannot silently overwrite a stale version when
-  preconditions are enabled.
+- Existing-file mutations validate stale versions and use the strongest
+  available no-clobber primitive; unavoidable final races with non-cooperating
+  writers are detected after the write and surfaced with recovery evidence.
 - Retried appends do not duplicate content.
 - Watcher startup and reconciliation tolerate concurrent sync activity.
 - Conflict handling never overwrites the remote/local winner automatically.

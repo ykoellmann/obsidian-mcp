@@ -115,15 +115,21 @@ class VaultWatcher:
                     current: dict[str, float] = {}
                     for path in self._storage.list_files():
                         if path.relative.lower().endswith(".md"):
-                            current[path.relative] = self._storage.stat(path.relative).st_mtime
+                            try:
+                                current[path.relative] = self._storage.stat(path.relative).st_mtime
+                            except (FileNotFoundError, NotADirectoryError):
+                                # A concurrent deletion/replacement is itself
+                                # a change; do not abort the rest of the scan.
+                                continue
 
                     for rel, mtime in current.items():
                         if self._policy.can_read(rel) and mtimes.get(rel) != mtime:
                             on_change(rel)
 
                     for rel in set(mtimes) - set(current):
-                        if self._policy.can_read(rel):
-                            on_change(rel)
+                        # Always invalidate previously visible entries. The
+                        # index applies current read policy before re-adding.
+                        on_change(rel)
 
                     mtimes.clear()
                     mtimes.update(current)

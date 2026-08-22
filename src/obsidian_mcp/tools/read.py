@@ -285,8 +285,5 @@ def _fuzzy_score(line_lower: str, query_lower: str) -> int:
 
 def _is_excluded(rel_path: str, exclude_paths: list[str]) -> bool:
     normalized = rel_path.replace("\\", "/").strip("/")
-    return any(
-        normalized == rule.rstrip("/")
-        or normalized.startswith(rule.rstrip("/") + "/")
-        for rule in exclude_paths
-    )
+    parts = normalized.split("/") if normalized else []
+    return any(rule.rstrip("/") in parts for rule in exclude_paths)

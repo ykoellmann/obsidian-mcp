@@ -89,6 +89,11 @@ def list_templates() -> list[str]:
     """List all template files in the Templates/ folder."""
     cfg = get_config()
     storage = VaultStorage.from_config(cfg)
-    return sorted(
-        p.relative for p in storage.list_files("Templates") if p.relative.lower().endswith(".md")
-    )
+    try:
+        return sorted(
+            p.relative
+            for p in storage.list_files("Templates")
+            if p.relative.lower().endswith(".md")
+        )
+    except (FileNotFoundError, NotADirectoryError):
+        return []

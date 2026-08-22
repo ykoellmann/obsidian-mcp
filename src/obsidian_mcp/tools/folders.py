@@ -35,6 +35,7 @@ def delete_folder(path: str, trash: bool = True) -> dict:
         raise FileNotFoundError(f"Folder not found: {path!r}")
     if not stat.S_ISDIR(storage.stat(target.relative, read=False).st_mode):
         raise ValueError(f"Not a folder: {path!r}")
+    storage.authorize_tree(target.relative, permanent=not trash)
     cfg = get_config()
     lock = acquire_lock(target.relative, lock_path=cfg.lock_path)
     try:
@@ -142,9 +143,11 @@ def rename_folder(
             files_to_rewrite.append((rel, raw))
 
     cfg = get_config()
-    locks = [acquire_lock(rel, lock_path=cfg.lock_path) for rel, _ in files_to_rewrite]
-    locks.append(acquire_lock(from_path, lock_path=cfg.lock_path))
+    locks = []
     try:
+        for rel, _ in files_to_rewrite:
+            locks.append(acquire_lock(rel, lock_path=cfg.lock_path))
+        locks.append(acquire_lock(from_path, lock_path=cfg.lock_path))
         for rel, raw in files_to_rewrite:
             rewritten = link_re.sub(
                 lambda m: f"[[{to_prefix}/{m.group(2)}{m.group(3)}]]", raw

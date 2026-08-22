@@ -7,8 +7,8 @@ MCP tool, resource, and attachment HTTP filesystem operations through
 
 Verification completed:
 
-- `PYTHONPATH=src .venv/bin/pytest -q` — 450 tests passing.
-- `PYTHONPATH=src .venv/bin/ruff check src tests` — clean.
+- `PYTHONPATH=src .venv/bin/pytest -q` — 462 tests passing.
+- `PYTHONPATH=src .venv/bin/ruff check .` — clean.
 - `docker compose -f docker-compose.home-server.yml config --quiet` — valid
   with representative required variables (runtime mount/ownership testing is
   still target-host specific).
@@ -55,6 +55,8 @@ Verification completed:
   configuration, and no host port on the MCP service. Static Compose checks
   are automated. Cloudflare Access Managed OAuth remains edge authentication;
   the origin still requires `API_KEY` until a future trusted-proxy phase.
+  Trash/delete is hard-disabled because renaming from a nested writable bind
+  into the read-only parent mount's `.trash` would cross mount boundaries.
 
 Known limitations carried into later phases:
 

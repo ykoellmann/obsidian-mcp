@@ -20,7 +20,7 @@ services:
       HOST: 0.0.0.0
       PORT: 8000
       READ_ONLY: "false"
-      WRITE_PATHS: "${AI_MEMORY_PATH:-AI-Memory},${AI_OUTPUT_PATH:-AI-Output}"
+      WRITE_PATHS: "${AI_MEMORY_PATH:-AI-Memory}/,${AI_OUTPUT_PATH:-AI-Output}/"
       DENY_READ_PATHS: ".obsidian/,.trash/"
       DENY_WRITE_PATHS: ".obsidian/,.trash/,_AI_INSTRUCTIONS.md"
       ALLOW_PERMANENT_DELETE: "false"
@@ -35,7 +35,9 @@ services:
       ENABLE_MOVE: "${ENABLE_MOVE:-false}"
       ENABLE_FOLDER_RENAME: "${ENABLE_FOLDER_RENAME:-false}"
       ENABLE_BULK_REPLACE: "${ENABLE_BULK_REPLACE:-false}"
-      ENABLE_DELETE: "${ENABLE_DELETE:-false}"
+      # Trash requires a cross-mount rename into the read-only parent vault.
+      # It is deliberately unavailable in this nested-bind profile.
+      ENABLE_DELETE: "false"
     volumes:
       - "${HOST_VAULT_PATH:?set HOST_VAULT_PATH in .env}:/vault:ro"
       - "${HOST_VAULT_PATH:?}/${AI_MEMORY_PATH:-AI-Memory}:/vault/${AI_MEMORY_PATH:-AI-Memory}:rw"

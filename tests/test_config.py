@@ -86,8 +86,8 @@ def test_network_transport_requires_api_key_or_oauth(tmp_path, monkeypatch):
 def test_security_path_defaults_and_lock_outside_vault(tmp_path, monkeypatch):
     _base_env(monkeypatch, tmp_path)
     cfg = Config()
-    assert cfg.deny_read_paths == [".obsidian", ".trash"]
-    assert cfg.deny_write_paths == [".obsidian", ".trash", "_AI_INSTRUCTIONS.md"]
+    assert cfg.deny_read_paths == [".obsidian/", ".trash/"]
+    assert cfg.deny_write_paths == [".obsidian/", ".trash/", "_AI_INSTRUCTIONS.md"]
     assert cfg.allow_permanent_delete is False
     assert tmp_path not in cfg.lock_path.parents
     assert cfg.enable_move is False
@@ -113,8 +113,8 @@ def test_security_path_lists_normalize_separators(tmp_path, monkeypatch):
     monkeypatch.setenv("WRITE_PATHS", "AI\\Memory/")
     monkeypatch.setenv("DENY_READ_PATHS", "private/")
     cfg = Config()
-    assert cfg.write_paths == ["AI/Memory"]
-    assert cfg.deny_read_paths == ["private"]
+    assert cfg.write_paths == ["AI/Memory/"]
+    assert cfg.deny_read_paths == ["private/"]
     with pytest.raises((AttributeError, TypeError)):
         cfg.write_paths.append("other")
     with pytest.raises(AttributeError):

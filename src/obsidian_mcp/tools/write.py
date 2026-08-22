@@ -513,8 +513,10 @@ def find_replace_in_vault(
             "skipped_write_protected": skipped_write_protected,
         }
 
-    locks = [acquire_lock(rel, lock_path=cfg.lock_path) for rel, _, _ in candidates]
+    locks = []
     try:
+        for rel, _, _ in candidates:
+            locks.append(acquire_lock(rel, lock_path=cfg.lock_path))
         replaced_in: list[str] = []
         total = 0
         for rel, raw, count in candidates:

@@ -232,7 +232,7 @@ class VaultStorage:
         try:
             self.stat(path, read=read)
             return True
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             return False
 
     def _tree_paths(self, target: VaultPath) -> list[str]:
@@ -288,7 +288,10 @@ class VaultStorage:
             source_is_dir = stat.S_ISDIR(_ensure_not_symlink(source_parent, source_leaf).st_mode)
         if source_is_dir:
             source_prefix = source.relative.rstrip("/") + "/"
-            if any(rule.startswith(source_prefix) for rule in self.policy.deny_write_paths):
+            if any(
+                self.policy.rule_path(rule).startswith(source_prefix)
+                for rule in self.policy.deny_write_paths
+            ):
                 raise ProtectedPathError(
                     f"Directory mutation crosses a protected descendant of {source.relative!r}"
                 )
@@ -298,7 +301,10 @@ class VaultStorage:
             dest = self.resolve_write(destination)
             if source_is_dir:
                 dest_prefix = dest.relative.rstrip("/") + "/"
-                if any(rule.startswith(dest_prefix) for rule in self.policy.deny_write_paths):
+                if any(
+                    self.policy.rule_path(rule).startswith(dest_prefix)
+                    for rule in self.policy.deny_write_paths
+                ):
                     raise ProtectedPathError(
                         f"Directory mutation crosses a protected destination descendant of {dest.relative!r}"
                     )
@@ -542,7 +548,10 @@ class VaultStorage:
         destination = self.resolve_write(to_path)
         if info.is_dir:
             dest_prefix = destination.relative.rstrip("/") + "/"
-            if any(rule.startswith(dest_prefix) for rule in self.policy.deny_write_paths):
+            if any(
+                self.policy.rule_path(rule).startswith(dest_prefix)
+                for rule in self.policy.deny_write_paths
+            ):
                 raise ProtectedPathError(
                     f"Directory restore crosses a protected destination descendant of {destination.relative!r}"
                 )

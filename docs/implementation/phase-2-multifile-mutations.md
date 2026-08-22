@@ -73,9 +73,11 @@ class MutationPlan:
 Planning is read-only. It must produce the complete intended change set before
 the first directory, lock or temporary file is created.
 
-Each plan should have a stable digest derived from operation type, canonical
-paths and original revisions. Return it from dry runs so a caller can approve a
-specific plan.
+Each plan should have a stable digest derived from the complete deterministic
+mutation payload: operation type and parameters, canonical paths, original
+revisions, proposed-content hashes and every other semantic field. Different
+committed bytes or parameters must always produce a different digest. Return it
+from dry runs so a caller can approve one specific plan.
 
 ## Execution sequence
 
@@ -84,7 +86,10 @@ specific plan.
 - Resolve source and destination through Phase 1's path policy.
 - Resolve every candidate backlink or bulk-replacement file.
 - Reject ambiguous path/stem resolution before planning changes.
-- Exclude denied and internal paths from discovery.
+- Build a complete authorized inventory of candidate backlink and
+  bulk-replacement files. If policy hides any possible candidate, including a
+  file beneath `DENY_READ_PATHS`, reject rather than operate on an incomplete
+  set.
 
 ### 2. Build the complete plan
 
@@ -105,7 +110,8 @@ specific plan.
 
 ### 4. Validate preconditions
 
-- Re-read or restat every original path.
+- Re-read and SHA-256 hash every planned existing path; metadata may avoid
+  unnecessary work only when a content hash is still validated before commit.
 - Confirm its revision matches the planned revision.
 - Confirm destinations still do not exist unless overwrite was explicitly
   planned.
@@ -136,7 +142,8 @@ specific plan.
 There is no portable atomic transaction across multiple files. Minimize the
 partial-commit window and keep a recoverable journal:
 
-1. write a transaction journal under `/data/transactions/<id>.json`;
+1. write a transaction journal beneath the configured external transaction
+   directory;
 2. snapshot original file contents or create recovery copies outside the vault;
 3. replace backlink/bulk-edit files in stable order;
 4. move the source to its destination;
@@ -206,8 +213,11 @@ transaction layers to either engine.
 ## Folder operations
 
 - Reject the vault root and protected directories.
-- Plan all descendant notes and external backlink rewrites.
-- Authorize every descendant source, destination and external rewrite.
+- Plan every descendant filesystem entry, including notes, attachments,
+  Canvas/Bases/Excalidraw files, hidden entries and directories, plus external
+  backlink rewrites.
+- Authorize every descendant source, mapped destination and external rewrite;
+  explicitly reject unsupported or protected entry types.
 - Do not follow symlinked directories.
 - Preserve relative layout beneath the new folder.
 - Treat cross-filesystem moves as unsupported unless an explicit copy-and-delete
@@ -262,8 +272,9 @@ transaction layers to either engine.
 - Move source and destination inside `WRITE_PATHS` with a backlink outside it:
   reject before mutation.
 - Folder rename with one protected backlink: reject before mutation.
-- Bulk replace with allowed and denied matches: reject or omit denied candidates
-  according to an explicit mode; never mutate them silently.
+- Bulk replace with allowed and denied matches: reject the complete atomic
+  operation; any separate omit mode must be explicitly non-atomic and visible
+  to the client.
 - Source inside allowed path and destination outside: reject.
 - Root or `.obsidian` folder rename/delete: reject.
 

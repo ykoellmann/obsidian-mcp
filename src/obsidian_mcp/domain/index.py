@@ -238,7 +238,8 @@ class VaultIndex:
         else:
             rel = path.replace("\\", "/").strip("/")
             name = Path(rel).name
-        if any(rel == rule or rel.startswith(rule.rstrip("/") + "/") for rule in self._exclude_paths):
+        parts = rel.split("/") if rel else []
+        if any(rule.rstrip("/") in parts for rule in self._exclude_paths):
             return True
         # Excalidraw files are *.md so they'd otherwise get tag/wikilink-parsed
         # as regular notes — their body is an embedded JSON scene, not prose,
