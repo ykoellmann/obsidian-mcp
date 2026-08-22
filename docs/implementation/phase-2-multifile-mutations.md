@@ -153,6 +153,8 @@ specific plan.
 - Write every `PlannedWrite` payload into the configured external transaction
   staging directory; staging must not require its vault destination or parent
   directory to exist.
+- Record and verify each staged artifact's SHA-256 against the content hash
+  bound into the approved plan.
 - `fsync` staged files when durable mode is enabled.
 - Do not create planned vault directories or replace originals yet.
 - If staging fails, remove temporary files and leave originals untouched.
@@ -167,7 +169,9 @@ partial-commit window and keep a recoverable journal:
 2. snapshot original file contents or create recovery copies outside the vault;
 3. journal an intent and create each approved directory in parent-first order;
 4. for every `PlannedWrite` in stable path order, journal its replacement
-   intent, install its staged bytes with the planned revision precondition, and
+   intent, read and hash its staged artifact once, reject any mismatch with the
+   planned content hash, install those same verified in-memory bytes with the
+   planned revision precondition, and
    record the post-revision for recovery;
 5. delete only files whose content still matches `original_revision`;
 6. move the source to its destination;
