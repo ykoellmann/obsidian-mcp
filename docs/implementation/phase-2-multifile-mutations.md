@@ -150,9 +150,11 @@ specific plan.
 
 ### 7. Stage
 
-- Write replacement contents to temporary files beside their destinations.
+- Write every `PlannedWrite` payload into the configured external transaction
+  staging directory; staging must not require its vault destination or parent
+  directory to exist.
 - `fsync` staged files when durable mode is enabled.
-- Do not replace originals yet.
+- Do not create planned vault directories or replace originals yet.
 - If staging fails, remove temporary files and leave originals untouched.
 
 ### 8. Commit
@@ -164,7 +166,9 @@ partial-commit window and keep a recoverable journal:
    directory;
 2. snapshot original file contents or create recovery copies outside the vault;
 3. journal an intent and create each approved directory in parent-first order;
-4. replace backlink/bulk-edit files in stable order;
+4. for every `PlannedWrite` in stable path order, journal its replacement
+   intent, install its staged bytes with the planned revision precondition, and
+   record the post-revision for recovery;
 5. delete only files whose content still matches `original_revision`;
 6. move the source to its destination;
 7. mark the journal committed;

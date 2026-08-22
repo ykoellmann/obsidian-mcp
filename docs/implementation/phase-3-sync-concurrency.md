@@ -171,16 +171,24 @@ Rules:
 
 - the same principal, operation ID and request digest returns the stored result;
 - reuse with different content is rejected;
-- records expire after a configurable retention period;
+- never expire a `pending` row automatically; retain it until retry or operator
+  reconciliation proves whether the replacement occurred;
+- retain each `complete` row for at least the configured supported retry window;
+  clients must not expect idempotent replay after that advertised window;
 - use `BEGIN IMMEDIATE` plus the composite primary key to atomically reserve a
   unique pending operation before replacement; a concurrent retry must observe
   that reservation rather than execute the append again;
 - persist `initial_revision` and `expected_result_revision` in the pending row,
   then atomically transition it to `complete` with `result_revision` and
   `result_json` after replacement;
-- on retry, reconcile a pending row against its expected post-state: finalize
-  the result when the replacement is proven, retry only when the original state
-  is proven, and otherwise return outcome-unknown without appending again;
+- before processing any retry, resolve the target through the current
+  `VaultAccessPolicy`; changes to `READ_ONLY`, `WRITE_PATHS` or deny rules must
+  reject the request before staging, replacement or pending-row recovery can
+  mutate the vault;
+- after authorization, reconcile a pending row against its expected post-state:
+  finalize the result when the replacement is proven, retry only when the
+  original state is proven, and otherwise return outcome-unknown without
+  repeating the append;
 - do not store note content in the ledger.
 
 For append-heavy memory, prefer one event per uniquely named file over repeatedly
