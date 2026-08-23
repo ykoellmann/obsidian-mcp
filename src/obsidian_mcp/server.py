@@ -511,14 +511,20 @@ class _CurrentVaultIndex:
         return getattr(_indices[vault_name], name)
 
 
-def _resolve_identity(cfg) -> object:
-    """Find the Identity (config.Identity) matching the current request's
-    AccessToken — GitHub login if the token carries one (OAuth), else the
-    API key itself (client_id, see _APIKeyAuthProvider). Raises
-    PermissionError if there's no authenticated identity or no VAULTS_CONFIG
-    entry for it — never silently falls back to some default vault for an
-    identity nothing was configured for."""
-    access_token = get_access_token()
+def _identity_for_token(cfg, access_token: AccessToken | None) -> object:
+    """Find the Identity (config.Identity) matching a given AccessToken —
+    GitHub login if the token carries one (OAuth), else the API key itself
+    (client_id, see _APIKeyAuthProvider). Raises PermissionError if there's
+    no token or no VAULTS_CONFIG entry for it — never silently falls back
+    to some default vault for an identity nothing was configured for.
+
+    Split out from _resolve_identity() (which reads the token from FastMCP's
+    request context via get_access_token()) so callers that already have an
+    AccessToken in hand from doing their own manual verification — the
+    /attachments/* custom route, which bypasses FastMCP's normal auth
+    middleware entirely — can resolve an identity too, without needing
+    get_access_token() to work in a context it doesn't cover.
+    """
     if access_token is None:
         raise PermissionError("No authenticated identity available to resolve a vault for")
 
@@ -534,6 +540,13 @@ def _resolve_identity(cfg) -> object:
                 return identity
 
     raise PermissionError("This identity has no vault access configured in VAULTS_CONFIG")
+
+
+def _resolve_identity(cfg) -> object:
+    """_identity_for_token() using the current request's AccessToken from
+    FastMCP's own context (get_access_token()) — the normal case for
+    everything that goes through MCP tool-call/resource-read dispatch."""
+    return _identity_for_token(cfg, get_access_token())
 
 
 def _select_vault(identity, requested: str | None) -> str:
@@ -579,11 +592,14 @@ class VaultResolutionMiddleware(Middleware):
     such parameter to read (ReadResourceRequestParams carries a uri, not
     tool-style arguments) and always use the identity's default.
 
-    Not covered here: the /attachments/* and /health custom HTTP routes
-    don't go through MCP tool-call dispatch, so this middleware never runs
-    for them — they still resolve to Config.default_vault_name (the first
-    configured vault) regardless of which identity is calling. Flagged here
-    so it isn't a silent surprise.
+    Not covered here: /health doesn't go through MCP tool-call dispatch, so
+    this middleware never runs for it — it stays scoped to
+    Config.default_vault_name regardless of which identity is calling (it
+    exposes no vault content, just liveness, so this doesn't leak anything).
+    /attachments/* is also a custom route rather than tool-call dispatch,
+    but does its own equivalent vault resolution by hand — see
+    attachment_route below — since it's the one HTTP route that genuinely
+    needs it.
     """
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
@@ -1162,36 +1178,73 @@ def create_attachment_token_tool(path: str, method: str = "PUT", expires_in: int
     otherwise build it yourself as:
         curl -X PUT --data-binary @file.png \\
             "http://host:port/attachments/{path}?exp={expires_at}&sig={sig}"
-    The token only authorizes this exact path + method and stops working after expires_at."""
-    return create_attachment_token(path, method=method, expires_in=expires_in)
+    The token only authorizes this exact path + method + vault and stops
+    working after expires_at. In multi-vault mode, requires an api_key
+    identity — GitHub-OAuth identities have no static secret of their own
+    to sign with; use a plain Authorization: Bearer request against
+    /attachments/* instead (that path works for any identity type)."""
+    cfg = get_config()
+    vault_name = cfg.resolve_vault_name()
+    if cfg.multi_vault:
+        identity = _resolve_identity(cfg)
+        if identity.type != "api_key":
+            raise PermissionError(
+                "Scoped attachment tokens require an api_key identity — this request "
+                "authenticated as a github_login, which has no static secret to sign "
+                "with. Use a plain 'Authorization: Bearer <token>' request against "
+                "/attachments/* instead."
+            )
+        signing_key = identity.value
+    else:
+        signing_key = cfg.api_key
+        if not signing_key:
+            raise ValueError("API_KEY is not configured on this server; attachment tokens require it")
+    return create_attachment_token(
+        path, signing_key=signing_key, vault=vault_name, method=method, expires_in=expires_in
+    )
 
 
-async def _check_bearer_token(request: Request, cfg) -> bool:
+async def _check_bearer_token(request: Request, cfg) -> AccessToken | None:
+    """Returns the AccessToken for a valid Authorization: Bearer header, or
+    None if missing/invalid. Manual verification, not FastMCP's own auth
+    middleware — this is a @mcp.custom_route, which bypasses that pipeline
+    entirely, so get_access_token() won't see anything for this request."""
     token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
     if not token:
-        return False
+        return None
     if cfg.api_key and hmac.compare_digest(token, cfg.api_key):
-        return True
+        return AccessToken(token=token, client_id=cfg.api_key, scopes=[])
     if mcp.auth is not None:
-        return await mcp.auth.verify_token(token) is not None
-    return False
+        return await mcp.auth.verify_token(token)
+    return None
 
 
-def _check_scoped_token(request: Request, cfg, method: str, path: str) -> bool:
-    # cfg.api_key is always "" in multi-vault mode (VAULTS_CONFIG) — scoped
-    # attachment tokens are signed against one single global key, which
-    # multi-vault mode deliberately doesn't have. create_attachment_token_tool
-    # still works there in the sense that it won't error, but tokens it
-    # mints will never verify; _check_bearer_token's plain Authorization:
-    # Bearer <key> path above still works fine in multi-vault mode, since it
-    # goes through the full multi-key/OAuth verifier instead.
-    if not cfg.api_key:
-        return False
+def _check_scoped_token(request: Request, cfg, method: str, path: str) -> str | None:
+    """Returns the vault name a valid scoped token (?exp=&sig=[&vault=])
+    grants access to for this exact path+method, or None if missing/
+    invalid/expired. Tries every api_key identity's own value as the HMAC
+    signing key in multi-vault mode (there's no bearer header here to say
+    up front which identity minted it), or the single global API_KEY in
+    single-vault mode. A key matching the signature but not actually
+    allowed the requested vault is treated the same as no match."""
     exp = request.query_params.get("exp")
     sig = request.query_params.get("sig")
     if not exp or not sig:
-        return False
-    return verify_attachment_token(cfg.api_key, method, path, exp, sig)
+        return None
+    vault_param = request.query_params.get("vault", cfg.default_vault_name)
+
+    if cfg.multi_vault:
+        candidates = [(identity.value, identity) for identity in cfg.identities if identity.type == "api_key"]
+    else:
+        candidates = [(cfg.api_key, None)] if cfg.api_key else []
+
+    for signing_key, identity in candidates:
+        if not verify_attachment_token(signing_key, method, path, vault_param, exp, sig):
+            continue
+        if identity is not None and vault_param not in identity.vaults:
+            continue
+        return vault_param
+    return None
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -1237,32 +1290,58 @@ async def attachment_route(request: Request) -> Response:
             -H "Authorization: Bearer <API_KEY>" http://host:port/attachments/path/to/file.png
         curl -o file.png \\
             -H "Authorization: Bearer <API_KEY>" http://host:port/attachments/path/to/file.png
+
+    Multi-vault mode: this route doesn't go through VaultResolutionMiddleware
+    (it's a plain Starlette route, not MCP tool-call dispatch), so vault
+    resolution is done by hand here — a bearer token resolves to its
+    identity's default vault (override with ?vault=<name>, same rule as the
+    vault= tool argument: must be one of that identity's allowed vaults); a
+    scoped token from create_attachment_token_tool carries its vault baked
+    into the signature already.
     """
     cfg = get_config()
     path = request.path_params["path"]
-    authorized = await _check_bearer_token(request, cfg) or _check_scoped_token(
-        request, cfg, request.method, path
-    )
-    if not authorized:
+    method = request.method
+
+    vault_name: str | None = None
+    access_token = await _check_bearer_token(request, cfg)
+    if access_token is not None:
+        if cfg.multi_vault:
+            identity = _identity_for_token(cfg, access_token)
+            requested = request.query_params.get("vault")
+            try:
+                vault_name = _select_vault(identity, requested)
+            except PermissionError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=403)
+        else:
+            vault_name = cfg.default_vault_name
+    else:
+        vault_name = _check_scoped_token(request, cfg, method, path)
+
+    if vault_name is None:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    if request.method == "GET":
-        try:
-            target = validate_path(cfg.vault_path, path)
-            data = target.read_bytes()
-        except FileNotFoundError:
-            return JSONResponse({"error": f"Attachment not found: {path!r}"}, status_code=404)
-        except PathTraversalError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
-        mime, _ = mimetypes.guess_type(path)
-        return Response(data, media_type=mime or "application/octet-stream")
-
-    data = await request.body()
+    context_token = set_current_vault(vault_name)
     try:
-        result = write_attachment_bytes(path, data)
-    except (ValueError, PathTraversalError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    return JSONResponse(result)
+        if method == "GET":
+            try:
+                target = validate_path(cfg.vault_path, path)
+                data = target.read_bytes()
+            except FileNotFoundError:
+                return JSONResponse({"error": f"Attachment not found: {path!r}"}, status_code=404)
+            except PathTraversalError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            mime, _ = mimetypes.guess_type(path)
+            return Response(data, media_type=mime or "application/octet-stream")
+
+        data = await request.body()
+        try:
+            result = write_attachment_bytes(path, data)
+        except (ValueError, PathTraversalError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse(result)
+    finally:
+        reset_current_vault(context_token)
 
 
 # ── Templates ─────────────────────────────────────────────────────────────────

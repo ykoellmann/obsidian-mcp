@@ -316,13 +316,21 @@ and pass `vault=` when the conversation clearly points at a non-default
 vault. There's no server-side memory of which vault was picked last; it's
 re-selected on every call, same as any other argument.
 
-> **Known limitations:** `/attachments/*` and `/health` don't go through
-> per-tool-call auth resolution, so they always operate on the first vault
-> listed in `vaults.json`, regardless of which identity is calling.
-> `create_attachment_token_tool`'s short-lived scoped tokens don't work in
-> multi-vault mode (they're signed against a single global key, which
-> multi-vault setups don't have) — use a plain `Authorization: Bearer`
-> request against `/attachments/*` instead.
+`/attachments/*` (the direct binary upload/download route) is fully
+multi-vault-aware: a plain `Authorization: Bearer` request resolves to that
+identity's default vault, or pass `?vault=<name>` in the URL to pick a
+different one of its allowed vaults (same rule as the `vault=` tool
+argument). `create_attachment_token_tool`'s short-lived scoped tokens
+(`?exp=&sig=`) work too, signed against the calling identity's own key and
+bound to a specific vault — but only for **api_key** identities, since a
+GitHub login has no static secret of its own to sign with; use a plain
+`Authorization: Bearer` request for those instead.
+
+> **Known limitation:** `/health` doesn't go through per-request auth/vault
+> resolution — it always reports on the first vault listed in
+> `vaults.json`, regardless of which identity would be calling. It exposes
+> no vault content either way (just process liveness), so this doesn't leak
+> anything.
 
 ## Vault Conventions (Customization)
 
