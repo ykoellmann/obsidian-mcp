@@ -353,6 +353,15 @@ def test_query_notes_frontmatter_filter_unknown_operator_raises(vault_factory):
         query_notes(idx, frontmatter_filter={"status": {"$bogus": "x"}})
 
 
+@pytest.mark.parametrize("operator", ["$in", "$nin"])
+@pytest.mark.parametrize("operand", [5, "active", {"active": True}])
+def test_query_notes_membership_filter_requires_list(vault_factory, operator, operand):
+    idx = vault_factory({"a.md": "---\nstatus: active\n---\n"})
+
+    with pytest.raises(ValueError, match="requires a list value"):
+        query_notes(idx, frontmatter_filter={"status": {operator: operand}})
+
+
 def test_query_notes_sort_by_title(vault_factory):
     idx = vault_factory({
         "z.md": "---\ntitle: Zebra\n---\n",

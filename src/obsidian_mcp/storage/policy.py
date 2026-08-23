@@ -80,7 +80,7 @@ def _normalise_relative(value: str, *, allow_empty: bool = True) -> str:
     return normalised
 
 
-def _normalise_rules(values: Iterable[str], *, name: str) -> tuple[str, ...]:
+def normalise_path_rules(values: Iterable[str], *, name: str) -> tuple[str, ...]:
     result: list[str] = []
     for raw in values:
         if not isinstance(raw, str):
@@ -113,10 +113,10 @@ class VaultAccessPolicy:
             raise VaultPathError(f"Vault root does not exist or is not a directory: {root}")
         self.root = root.resolve()
         self.read_only = bool(read_only)
-        self.read_paths = _normalise_rules(read_paths, name="READ_PATHS")
-        self.write_paths = _normalise_rules(write_paths, name="WRITE_PATHS")
-        self.deny_read_paths = _normalise_rules(deny_read_paths, name="DENY_READ_PATHS")
-        self.deny_write_paths = _normalise_rules(deny_write_paths, name="DENY_WRITE_PATHS")
+        self.read_paths = normalise_path_rules(read_paths, name="READ_PATHS")
+        self.write_paths = normalise_path_rules(write_paths, name="WRITE_PATHS")
+        self.deny_read_paths = normalise_path_rules(deny_read_paths, name="DENY_READ_PATHS")
+        self.deny_write_paths = normalise_path_rules(deny_write_paths, name="DENY_WRITE_PATHS")
         self.allow_permanent_delete = bool(allow_permanent_delete)
 
     @classmethod
@@ -250,4 +250,4 @@ class VaultAccessPolicy:
 def path_rules_from_env(raw: str, *, name: str) -> list[str]:
     """Parse a comma-separated path setting and validate it immediately."""
     values = [part.strip() for part in raw.split(",") if part.strip()]
-    return list(_normalise_rules(values, name=name))
+    return list(normalise_path_rules(values, name=name))

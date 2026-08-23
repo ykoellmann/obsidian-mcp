@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import mimetypes
 import stat
 import time
@@ -156,7 +157,11 @@ def _sign_attachment_token(signing_key: str, method: str, path: str, vault: str,
     # vault is part of the signed message (not just a side channel) so a
     # token minted for one vault can't be replayed against another by
     # tampering with an unsigned query param.
-    msg = f"{method}:{path}:{vault}:{expires_at}".encode()
+    msg = json.dumps(
+        [method, path, vault, expires_at],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
     return hmac.new(signing_key.encode(), msg, hashlib.sha256).hexdigest()
 
 

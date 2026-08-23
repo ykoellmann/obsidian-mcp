@@ -372,6 +372,33 @@ def test_load_vaults_file_rejects_unsafe_policy_rule(tmp_path):
         load_vaults_file(str(config_path))
 
 
+def test_load_vaults_file_preserves_comma_inside_policy_rule(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    config_path = tmp_path / "vaults.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "vaults": {
+                    "a": {"path": str(vault), "write_paths": ["AI, Memory/"]}
+                },
+                "identities": [
+                    {"type": "api_key", "value": "k", "vaults": ["a"]}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    vaults, _identities = load_vaults_file(str(config_path))
+    policy = VaultAccessPolicy(vault, write_paths=vaults["a"].write_paths)
+
+    assert vaults["a"].write_paths == ("AI, Memory/",)
+    assert policy.can_write("AI, Memory/note.md")
+    assert not policy.can_write("AI/note.md")
+    assert not policy.can_write("Memory/note.md")
+
+
 def test_config_multi_vault_unknown_vault_in_context_raises(tmp_path, monkeypatch):
     _base_env(monkeypatch, tmp_path)
     config_path = _write_vaults_config(tmp_path, tmp_path / "a", tmp_path / "b")

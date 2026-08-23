@@ -181,6 +181,18 @@ def test_verify_attachment_token_rejects_wrong_vault(vault_factory):
     )
 
 
+def test_attachment_token_payload_has_no_path_vault_delimiter_collision():
+    expires_at = 1_800_000_000
+    first = _sign_attachment_token(
+        "secret", "GET", "report.pdf:team", "private", expires_at
+    )
+    second = _sign_attachment_token(
+        "secret", "GET", "report.pdf", "team:private", expires_at
+    )
+
+    assert first != second
+
+
 def test_verify_attachment_token_rejects_expired(vault_factory):
     vault_factory({})
     expired_at = int(time.time()) - 10

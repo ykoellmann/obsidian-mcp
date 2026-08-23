@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,12 +16,14 @@ def append_entry(
     tool: str,
     path: str | None,
     summary: str,
+    vault: str | None = None,
 ) -> None:
     entry = {
         "timestamp": datetime.now(UTC).isoformat(timespec="microseconds"),
         "tool": tool,
         "path": path,
         "summary": summary,
+        "vault": vault,
     }
     audit_path.parent.mkdir(parents=True, exist_ok=True)
     lock = acquire_lock(str(audit_path), lock_path=lock_path)
@@ -53,6 +56,8 @@ def read_entries(
     tool: str | None = None,
     since: str | None = None,
     limit: int = 50,
+    vault: str | None = None,
+    path_allowed: Callable[[str | None], bool] | None = None,
 ) -> list[dict]:
     """Most-recent-first. `since` is an ISO timestamp, inclusive; entries are
     compared as strings, which works because timestamps are always written
@@ -72,11 +77,15 @@ def read_entries(
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if vault is not None and entry.get("vault") != vault:
+                continue
             if path is not None and entry.get("path") != path:
                 continue
             if tool is not None and entry.get("tool") != tool:
                 continue
             if since is not None and entry.get("timestamp", "") < since:
+                continue
+            if path_allowed is not None and not path_allowed(entry.get("path")):
                 continue
             entries.append(entry)
 
