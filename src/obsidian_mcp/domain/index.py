@@ -175,10 +175,12 @@ class VaultIndex:
                 except Exception:
                     logger.exception("Failed to reconcile %s", rel)
                     failures.append(rel)
-            if failures:
-                raise RuntimeError(f"Failed to reconcile {len(failures)} Markdown note(s)")
             with self._lock:
-                self._last_reconcile_error = None
+                self._last_reconcile_error = (
+                    f"Failed to reconcile {len(failures)} Markdown note(s)"
+                    if failures
+                    else None
+                )
         except Exception as exc:
             with self._lock:
                 self._last_reconcile_error = str(exc)

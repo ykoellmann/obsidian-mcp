@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import time
+import os
+import threading
 
 import pytest
 from fastmcp import Client
@@ -9,9 +10,9 @@ from fastmcp.tools.base import ToolResult
 import obsidian_mcp.config as config_module
 from obsidian_mcp import server
 from obsidian_mcp.domain.index import VaultIndex
-from obsidian_mcp.domain.models import RevisionConflictError
+from obsidian_mcp.domain.models import PreconditionRequiredError, RevisionConflictError
 from obsidian_mcp.storage.filesystem import VaultStorage
-from obsidian_mcp.storage.policy import VaultAccessPolicy
+from obsidian_mcp.storage.policy import ReadPermissionError, VaultAccessPolicy
 from obsidian_mcp.storage.watcher import VaultWatcher
 from obsidian_mcp.tools.read import read_note
 from obsidian_mcp.tools.write import append_to_note, write_note
@@ -57,7 +58,7 @@ def test_strict_full_overwrite_requires_revision_but_create_does_not(tmp_path, m
     (tmp_path / "existing.md").write_text("old")
     _configured_storage(tmp_path, monkeypatch, strict=True)
 
-    with pytest.raises(PermissionError):
+    with pytest.raises(PreconditionRequiredError):
         write_note("existing.md", "new")
     created = write_note("created.md", "new")
     assert created["revision"].startswith("sha256:")
@@ -101,27 +102,82 @@ def test_reconcile_hashes_only_markdown_and_repairs_missed_change(tmp_path, monk
     assert status["last_reconcile_error"] is None
 
 
+def test_per_note_reconcile_failure_is_telemetry_not_unreadiness(tmp_path, monkeypatch):
+    (tmp_path / "good.md").write_text("good")
+    (tmp_path / "bad.md").write_text("bad")
+    index = VaultIndex(tmp_path)
+    index.build()
+    original = index._storage.read_text_with_revision
+
+    def fail_one(path):
+        if path == "bad.md":
+            raise OSError("temporarily unavailable")
+        return original(path)
+
+    monkeypatch.setattr(index._storage, "read_text_with_revision", fail_one)
+    index.reconcile()
+
+    assert index.is_ready() is True
+    assert index.reconcile_status()["last_reconcile_error"] == (
+        "Failed to reconcile 1 Markdown note(s)"
+    )
+
+
 def test_watcher_debounces_repeated_events(tmp_path):
     watcher = VaultWatcher(tmp_path, debounce_ms=30)
     changes: list[str] = []
     callback = None
+    delivered = threading.Event()
 
     def fake_watchdog(on_change):
         nonlocal callback
         callback = on_change
         return True
 
+    def record(path: str) -> None:
+        changes.append(path)
+        delivered.set()
+
     watcher._try_watchdog = fake_watchdog
     try:
-        watcher.start(changes.append)
+        watcher.start(record)
         assert callback is not None
         callback("note.md")
         callback("note.md")
         callback("note.md")
-        time.sleep(0.08)
-        assert changes == ["note.md"]
+        assert delivered.wait(5)
     finally:
         watcher.stop()
+    assert changes == ["note.md"]
+
+
+def test_revision_reads_reject_fifo_without_blocking(tmp_path):
+    fifo = tmp_path / "pipe.md"
+    os.mkfifo(fifo)
+    storage = VaultStorage(VaultAccessPolicy(tmp_path))
+
+    with pytest.raises(IsADirectoryError, match="not a regular file"):
+        storage.read_text_with_revision("pipe.md")
+    with pytest.raises(IsADirectoryError, match="not a regular file"):
+        storage.revision("pipe.md")
+
+
+def test_write_note_explicitly_rejects_write_only_path(tmp_path, monkeypatch):
+    (tmp_path / "drop").mkdir()
+    monkeypatch.setenv("VAULT_PATH", str(tmp_path))
+    monkeypatch.setenv("LOCK_PATH", str(tmp_path.parent / f"{tmp_path.name}-locks"))
+    monkeypatch.setenv("WRITE_PATHS", "drop/")
+    monkeypatch.setenv("DENY_READ_PATHS", "drop/")
+    config_module._config = None
+
+    with pytest.raises(ReadPermissionError, match="write_note requires read access"):
+        write_note("drop/note.md", "content")
+    assert not (tmp_path / "drop" / "note.md").exists()
+
+    # The central policy still permits a deliberately write-only primitive;
+    # only read-dependent note workflows reject the overlap.
+    VaultStorage.from_config().write_text_atomic("drop/raw.txt", "content", create_only=True)
+    assert (tmp_path / "drop" / "raw.txt").read_text() == "content"
 
 
 def test_server_conflict_boundary_marks_tool_result_as_error():

@@ -10,6 +10,7 @@ services:
   obsidian-mcp:
     build:
       context: .
+    # The locally built image supplies the /health HEALTHCHECK.
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:

@@ -90,6 +90,13 @@ only a discovery filter—not an access-control boundary. For example,
 `private/` hides that root directory and its descendants, while it does not
 hide `Projects/private/`.
 
+Revision-aware note mutation tools must read the target to determine existence,
+preserve frontmatter, calculate diffs, or derive an incremental edit. They
+therefore reject paths covered by `DENY_READ_PATHS` even if `WRITE_PATHS` also
+contains the path. Avoid overlapping those scopes for note workflows. The
+storage policy can still support intentionally write-only capabilities that do
+not inspect existing content, but `write_note_tool` is not one of them.
+
 New files and directories use the normal `0666`/`0777` creation modes filtered
 by the MCP process umask. Atomic overwrites preserve the existing file's
 permission bits. In a shared sync deployment, run the MCP and sync daemon with

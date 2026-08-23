@@ -28,6 +28,10 @@ def create_from_template(
     Custom variables in the `variables` dict override built-ins.
     Supports date format specs: {{date:YYYY-MM}} → formatted date string.
     Preserves {{unknown_var}} as-is if not provided.
+
+    expected_revision: pin replacement to a prior read of output_path; strict
+    mode requires it when output_path already exists.
+    create_only: require output_path to be absent and never overwrite it.
     """
     cfg = get_config()
     storage = VaultStorage.from_config(cfg)

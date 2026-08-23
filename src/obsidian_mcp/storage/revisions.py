@@ -31,7 +31,12 @@ def prepare_full_write(
     expected_revision: str | None = None,
     create_only: bool = False,
 ) -> tuple[str | None, bool]:
-    """Resolve strict replacement and race-safe creation semantics."""
+    """Resolve strict replacement and race-safe creation semantics.
+
+    ``expected_revision`` pins replacement to a prior read. In strict mode it
+    is required when the destination exists. ``create_only`` instead requires
+    the destination to be absent and never overwrites it.
+    """
     try:
         current = storage.revision(path, read=False)
     except FileNotFoundError:

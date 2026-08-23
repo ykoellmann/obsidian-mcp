@@ -159,6 +159,8 @@ def test_max_attachment_bytes_defaults_to_25_mib(tmp_path, monkeypatch):
     [
         ("INDEX_RECONCILE_INTERVAL", "0"),
         ("INDEX_RECONCILE_INTERVAL", "invalid"),
+        ("INDEX_RECONCILE_INTERVAL", "nan"),
+        ("INDEX_RECONCILE_INTERVAL", "inf"),
         ("WATCHER_DEBOUNCE_MS", "-1"),
         ("WATCHER_DEBOUNCE_MS", "invalid"),
     ],
@@ -166,7 +168,7 @@ def test_max_attachment_bytes_defaults_to_25_mib(tmp_path, monkeypatch):
 def test_sync_timing_configuration_is_validated(tmp_path, monkeypatch, name, value):
     _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv(name, value)
-    with pytest.raises(ConfigError, match="INDEX_RECONCILE_INTERVAL"):
+    with pytest.raises(ConfigError, match=name):
         Config()
 
 

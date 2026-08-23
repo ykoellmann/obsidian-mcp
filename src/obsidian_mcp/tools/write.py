@@ -15,11 +15,9 @@ from ..domain.models import (
 )
 from ..storage.filesystem import VaultStorage
 from ..storage.locking import acquire_lock
-from ..storage.policy import WritePermissionError as PolicyWritePermissionError
+from ..storage.policy import ReadPermissionError, WritePermissionError
 from ..storage.revisions import read_text_for_update, revision_result
 from .read import _is_excluded
-
-WritePermissionError = PolicyWritePermissionError
 
 
 def _storage() -> VaultStorage:
@@ -73,6 +71,11 @@ def write_note(
     storage = _storage()
     target = storage.resolve_write(path)
     path = target.relative
+    if not storage.policy.can_read(path):
+        raise ReadPermissionError(
+            "write_note requires read access to determine whether the target exists, "
+            "preserve frontmatter, and calculate its diff"
+        )
 
     lock = acquire_lock(path, lock_path=get_config().lock_path)
     try:

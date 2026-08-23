@@ -81,7 +81,14 @@ def _dir_flags() -> int:
 
 
 def _file_flags() -> int:
-    return os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    # O_NONBLOCK prevents opening a FIFO from hanging before we can reject it
+    # with fstat. It has no effect on ordinary regular-file reads.
+    return (
+        os.O_RDONLY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
 
 
 @contextlib.contextmanager
@@ -165,10 +172,11 @@ def _revision_at(parent_fd: int, leaf: str) -> FileRevision | None:
     except FileNotFoundError:
         return None
     try:
+        initial = os.fstat(fd)
+        if not stat.S_ISREG(initial.st_mode):
+            raise IsADirectoryError(f"Target is not a regular file: {leaf!r}")
         content = _read_all(fd)
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            raise IsADirectoryError(f"Target is not a regular file: {leaf!r}")
         return FileRevision.from_bytes(content, mtime_ns=info.st_mtime_ns)
     finally:
         os.close(fd)
@@ -371,10 +379,13 @@ class VaultStorage:
         with _opened_parent(self.policy.root, target.relative) as (parent_fd, leaf):
             fd = os.open(leaf, _file_flags(), dir_fd=parent_fd)
             try:
+                initial = os.fstat(fd)
+                if not stat.S_ISREG(initial.st_mode):
+                    raise IsADirectoryError(
+                        f"Target is not a regular file: {target.relative!r}"
+                    )
                 content = _read_all(fd)
                 info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode):
-                    raise IsADirectoryError(f"Target is not a regular file: {target.relative!r}")
                 return (
                     content.decode("utf-8", errors="replace"),
                     FileRevision.from_bytes(content, mtime_ns=info.st_mtime_ns),
@@ -391,10 +402,13 @@ class VaultStorage:
         with _opened_parent(self.policy.root, target.relative) as (parent_fd, leaf):
             fd = os.open(leaf, _file_flags(), dir_fd=parent_fd)
             try:
+                initial = os.fstat(fd)
+                if not stat.S_ISREG(initial.st_mode):
+                    raise IsADirectoryError(
+                        f"Target is not a regular file: {target.relative!r}"
+                    )
                 content = _read_all(fd)
                 info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode):
-                    raise IsADirectoryError(f"Target is not a regular file: {target.relative!r}")
                 return content, FileRevision.from_bytes(content, mtime_ns=info.st_mtime_ns)
             finally:
                 os.close(fd)

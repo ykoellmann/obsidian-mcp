@@ -120,9 +120,12 @@ The unauthenticated health response contains no vault paths or content and adds:
 - `last_reconcile_duration_seconds`;
 - `last_reconcile_error`.
 
-Initial build or startup reconciliation failure leaves the index unready and
-returns HTTP 503. A later periodic reconciliation failure is reported in health
-but does not discard an already usable index or change readiness by itself.
+A failed initial build or a vault-wide startup scan failure leaves the index
+unready and returns HTTP 503. A failure confined to one Markdown note is
+reported in reconciliation telemetry after the other notes have been swept; it
+does not make the usable index permanently unavailable. Later periodic failures
+likewise do not discard an already usable index or change readiness by
+themselves.
 
 ## Deliberately excluded
 

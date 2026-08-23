@@ -1091,10 +1091,10 @@ async def health_route(request: Request) -> Response:
     """Unauthenticated liveness/readiness check for Docker HEALTHCHECK,
     uptime monitors, etc. Returns no vault content, so no auth is required.
 
-    Returns {status: "starting"|"ok", index_ready}.
-    503 while the server hasn't finished VaultIndex._cfg/_index setup yet
-    (main() hasn't run), 200 once ready — index_ready itself may still be
-    False right after startup while the initial index build is in progress.
+    Returns {status: "starting"|"ok", index_ready, reconciliation telemetry}.
+    Returns 503 until the initial index build and vault-wide reconciliation
+    finish, then 200 while the built index remains usable. A later per-note
+    reconciliation error is exposed as telemetry without discarding readiness.
     """
     if _cfg is None or _index is None:
         return JSONResponse({"status": "starting"}, status_code=503)

@@ -1,6 +1,8 @@
 services:
   obsidian-mcp:
     image: ghcr.io/ykoellmann/obsidian-mcp:latest
+    # Inherits the image's /health HEALTHCHECK (including its startup grace
+    # period); duplicating it here would create two sources of truth.
     # To build locally instead: comment out 'image' and uncomment 'build'
     # build: .
     restart: unless-stopped

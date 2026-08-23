@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -143,24 +144,20 @@ class Config:
             in ("1", "true", "yes"),
         )
         try:
-            set_value(
-                self,
-                "index_reconcile_interval",
-                float(os.environ.get("INDEX_RECONCILE_INTERVAL", "900")),
-            )
-            set_value(
-                self,
-                "watcher_debounce_ms",
-                int(os.environ.get("WATCHER_DEBOUNCE_MS", "100")),
-            )
+            reconcile_interval = float(os.environ.get("INDEX_RECONCILE_INTERVAL", "900"))
         except ValueError as exc:
-            raise ConfigError(
-                "INDEX_RECONCILE_INTERVAL must be positive and WATCHER_DEBOUNCE_MS non-negative"
-            ) from exc
-        if self.index_reconcile_interval <= 0 or self.watcher_debounce_ms < 0:
-            raise ConfigError(
-                "INDEX_RECONCILE_INTERVAL must be positive and WATCHER_DEBOUNCE_MS non-negative"
-            )
+            raise ConfigError("INDEX_RECONCILE_INTERVAL must be a finite positive number") from exc
+        if not math.isfinite(reconcile_interval) or reconcile_interval <= 0:
+            raise ConfigError("INDEX_RECONCILE_INTERVAL must be a finite positive number")
+        set_value(self, "index_reconcile_interval", reconcile_interval)
+
+        try:
+            debounce_ms = int(os.environ.get("WATCHER_DEBOUNCE_MS", "100"))
+        except ValueError as exc:
+            raise ConfigError("WATCHER_DEBOUNCE_MS must be a non-negative integer") from exc
+        if debounce_ms < 0:
+            raise ConfigError("WATCHER_DEBOUNCE_MS must be a non-negative integer")
+        set_value(self, "watcher_debounce_ms", debounce_ms)
 
         # Optional plugin-format tool groups — opt-in, disabled by default.
         for attribute, environment in (
