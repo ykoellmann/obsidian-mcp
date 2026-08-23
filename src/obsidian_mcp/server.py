@@ -1173,16 +1173,20 @@ def create_attachment_token_tool(path: str, method: str = "PUT", expires_in: int
     server's master API_KEY. method: 'PUT' (upload) or 'GET' (download).
     expires_in: seconds until the token expires (default 300, max 3600).
 
-    Returns {path, method, expires_at, sig, url?}. If the server has
-    PUBLIC_BASE_URL configured, `url` is the ready-to-use request URL —
-    otherwise build it yourself as:
+    Returns {path, method, vault, expires_at, sig, url?}. If the server has
+    PUBLIC_BASE_URL configured, `url` is the ready-to-use request URL — use
+    it as-is, it already has everything this token needs (including
+    ?vault= when relevant) baked in. Otherwise build it yourself as:
         curl -X PUT --data-binary @file.png \\
-            "http://host:port/attachments/{path}?exp={expires_at}&sig={sig}"
-    The token only authorizes this exact path + method + vault and stops
-    working after expires_at. In multi-vault mode, requires an api_key
-    identity — GitHub-OAuth identities have no static secret of their own
-    to sign with; use a plain Authorization: Bearer request against
-    /attachments/* instead (that path works for any identity type)."""
+            "http://host:port/attachments/{path}?exp={expires_at}&sig={sig}&vault={vault}"
+    (omit &vault=... only if the returned `vault` equals the server's
+    single/default vault — see list_vaults_tool). The token only authorizes
+    this exact path + method + vault and stops working after expires_at. In
+    multi-vault mode, requires an api_key identity — GitHub-OAuth identities
+    have no static secret of their own to sign with; use a plain
+    Authorization: Bearer request against /attachments/* instead (that path
+    works for any identity type, but needs ?vault=<name> added by hand if
+    targeting a non-default vault, since nothing was pre-signed for it)."""
     cfg = get_config()
     vault_name = cfg.resolve_vault_name()
     if cfg.multi_vault:
