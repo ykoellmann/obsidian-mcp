@@ -273,3 +273,33 @@ def test_config_multi_vault_missing_file_raises(tmp_path, monkeypatch):
 
     with pytest.raises(ConfigError, match="not found"):
         Config()
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_load_vaults_file_rejects_overlapping_roots(tmp_path, nested):
+    vault_a = tmp_path / "a"
+    vault_a.mkdir()
+    vault_b = vault_a / "nested" if nested else vault_a
+    if nested:
+        vault_b.mkdir()
+    cfg_file = tmp_path / "vaults.json"
+    cfg_file.write_text(json.dumps({
+        "vaults": {
+            "a": {"path": str(vault_a)},
+            "b": {"path": str(vault_b)},
+        },
+        "identities": [{"type": "api_key", "value": "k", "vaults": ["a"]}],
+    }), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="Vault paths must not overlap"):
+        load_vaults_file(str(cfg_file))
+
+
+def test_config_multi_vault_rejects_stdio(tmp_path, monkeypatch):
+    _base_env(monkeypatch, tmp_path)
+    config_path = _write_vaults_config(tmp_path, tmp_path / "a", tmp_path / "b")
+    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
+    monkeypatch.setenv("TRANSPORT", "stdio")
+
+    with pytest.raises(ConfigError, match="TRANSPORT=stdio cannot identify"):
+        Config()

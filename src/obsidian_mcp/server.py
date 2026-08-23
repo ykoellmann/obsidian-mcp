@@ -368,6 +368,12 @@ Templates use `{{date}}`, `{{title}}`, `{{week}}` etc.
 def _load_instructions() -> str:
     try:
         cfg = get_config()
+        # FastMCP instructions are fixed at server initialization and are
+        # sent to every client. In multi-vault mode there is no request
+        # identity yet, so loading the first vault's private instructions
+        # here would disclose them to identities restricted to other vaults.
+        if cfg.multi_vault:
+            return _DEFAULT_INSTRUCTIONS
         instructions_file = cfg.vault_path / "_AI_INSTRUCTIONS.md"
         if instructions_file.exists():
             return instructions_file.read_text(encoding="utf-8")
@@ -608,6 +614,11 @@ class VaultResolutionMiddleware(Middleware):
             return await call_next(context)
 
         identity = _resolve_identity(cfg)
+        if getattr(context.message, "name", None) == "list_vaults_tool":
+            # This identity-only discovery call does not touch vault content.
+            # In particular, it must work for identities intentionally
+            # configured with several vaults and no default.
+            return await call_next(context)
         requested = None
         arguments = getattr(context.message, "arguments", None)
         if arguments:
