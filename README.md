@@ -305,13 +305,16 @@ identity a request authenticates as, every tool call is transparently
 scoped to that identity's vault(s) — there is no way to reach a vault an
 identity isn't listed for.
 
-**Currently (Phase 1):** each identity resolves to exactly one vault, the
-first one in its `"vaults"` list (or `"default"` if you set it explicitly
-when listing more than one — useful for forward-compatibility, but a second
-entry has no effect yet). Support for switching between several vaults
-allowed to the same identity within one session is planned but not built
-yet. `mount your vault twice under two identities` is the workaround today
-if one person genuinely needs both.
+An identity with more than one entry in `"vaults"` can switch between them:
+every tool accepts an optional `vault=<name>` argument for that one call
+(defaults to `"default"` if omitted — set it explicitly whenever an
+identity has several vaults, or every call without `vault=` fails asking
+for one). `list_vaults_tool()` returns `[{name, description, is_default}]`
+for whichever identity is calling, so an MCP client can discover what it's
+allowed to pass — the built-in instructions tell Claude to call it first
+and pass `vault=` when the conversation clearly points at a non-default
+vault. There's no server-side memory of which vault was picked last; it's
+re-selected on every call, same as any other argument.
 
 > **Known limitations:** `/attachments/*` and `/health` don't go through
 > per-tool-call auth resolution, so they always operate on the first vault

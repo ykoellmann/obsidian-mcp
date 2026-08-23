@@ -15,6 +15,8 @@ from obsidian_mcp.server import (
     _APIKeyAuthProvider,
     _identities_from_env,
     _resolve_identity,
+    _select_vault,
+    list_vaults_tool,
 )
 
 
@@ -199,3 +201,144 @@ async def test_middleware_rejects_unmatched_identity(tmp_path, monkeypatch):
     middleware = VaultResolutionMiddleware()
     with pytest.raises(PermissionError):
         await middleware.on_call_tool(MiddlewareContext(message=object()), call_next)
+
+
+# ── _select_vault (Phase 2: explicit vault= switching) ──────────────────────
+
+class _FakeIdentity:
+    def __init__(self, vaults, default=None):
+        self.vaults = vaults
+        self.default = default
+
+
+def test_select_vault_uses_default_when_none_requested():
+    identity = _FakeIdentity(vaults=["private", "monari"], default="private")
+    assert _select_vault(identity, None) == "private"
+
+
+def test_select_vault_uses_requested_when_allowed():
+    identity = _FakeIdentity(vaults=["private", "monari"], default="private")
+    assert _select_vault(identity, "monari") == "monari"
+
+
+def test_select_vault_rejects_disallowed_vault():
+    identity = _FakeIdentity(vaults=["private"], default="private")
+    with pytest.raises(PermissionError, match="does not have access"):
+        _select_vault(identity, "monari")
+
+
+def test_select_vault_requires_explicit_when_no_default():
+    identity = _FakeIdentity(vaults=["private", "monari"], default=None)
+    with pytest.raises(PermissionError, match="no default is configured"):
+        _select_vault(identity, None)
+
+
+# ── VaultResolutionMiddleware: explicit vault= override ─────────────────────
+
+class _FakeMessage:
+    def __init__(self, arguments):
+        self.arguments = arguments
+
+
+@pytest.mark.asyncio
+async def test_middleware_honors_explicit_vault_argument(tmp_path, monkeypatch):
+    cfg = _cfg_with_vaults(
+        tmp_path, monkeypatch,
+        extra_identities=[
+            {"type": "api_key", "value": "sk-both", "vaults": ["private", "monari"], "default": "private"},
+        ],
+    )
+    import obsidian_mcp.config as cfg_mod
+    cfg_mod._config = cfg
+    monkeypatch.setattr(
+        server_mod, "get_access_token",
+        lambda: AccessToken(token="sk-both", client_id="sk-both", scopes=[]),
+    )
+
+    seen_vault = {}
+
+    async def call_next(context):
+        seen_vault["name"] = cfg.resolve_vault_name()
+        return "ok"
+
+    middleware = VaultResolutionMiddleware()
+    context = MiddlewareContext(message=_FakeMessage(arguments={"vault": "monari"}))
+    result = await middleware.on_call_tool(context, call_next)
+
+    assert result == "ok"
+    assert seen_vault["name"] == "monari"
+
+
+@pytest.mark.asyncio
+async def test_middleware_falls_back_to_default_without_vault_argument(tmp_path, monkeypatch):
+    cfg = _cfg_with_vaults(
+        tmp_path, monkeypatch,
+        extra_identities=[
+            {"type": "api_key", "value": "sk-both", "vaults": ["private", "monari"], "default": "private"},
+        ],
+    )
+    import obsidian_mcp.config as cfg_mod
+    cfg_mod._config = cfg
+    monkeypatch.setattr(
+        server_mod, "get_access_token",
+        lambda: AccessToken(token="sk-both", client_id="sk-both", scopes=[]),
+    )
+
+    seen_vault = {}
+
+    async def call_next(context):
+        seen_vault["name"] = cfg.resolve_vault_name()
+        return "ok"
+
+    middleware = VaultResolutionMiddleware()
+    context = MiddlewareContext(message=_FakeMessage(arguments={"path": "note.md"}))
+    await middleware.on_call_tool(context, call_next)
+
+    assert seen_vault["name"] == "private"
+
+
+@pytest.mark.asyncio
+async def test_middleware_rejects_vault_argument_outside_allowed_set(tmp_path, monkeypatch):
+    cfg = _cfg_with_vaults(tmp_path, monkeypatch)
+    import obsidian_mcp.config as cfg_mod
+    cfg_mod._config = cfg
+    monkeypatch.setattr(
+        server_mod, "get_access_token",
+        lambda: AccessToken(token="sk-private", client_id="sk-private", scopes=[]),
+    )
+
+    async def call_next(context):
+        return "should not be reached"
+
+    middleware = VaultResolutionMiddleware()
+    context = MiddlewareContext(message=_FakeMessage(arguments={"vault": "monari"}))
+    with pytest.raises(PermissionError, match="does not have access"):
+        await middleware.on_call_tool(context, call_next)
+
+
+# ── list_vaults_tool ─────────────────────────────────────────────────────
+
+def test_list_vaults_tool_single_vault_mode(vault_factory):
+    vault_factory({})
+    result = list_vaults_tool()
+    assert len(result) == 1
+    assert result[0]["is_default"] is True
+
+
+def test_list_vaults_tool_multi_vault_mode(tmp_path, monkeypatch):
+    cfg = _cfg_with_vaults(
+        tmp_path, monkeypatch,
+        extra_identities=[
+            {"type": "api_key", "value": "sk-both", "vaults": ["private", "monari"], "default": "private"},
+        ],
+    )
+    import obsidian_mcp.config as cfg_mod
+    cfg_mod._config = cfg
+    monkeypatch.setattr(
+        server_mod, "get_access_token",
+        lambda: AccessToken(token="sk-both", client_id="sk-both", scopes=[]),
+    )
+
+    result = list_vaults_tool()
+    names = {v["name"]: v["is_default"] for v in result}
+    assert names == {"private": True, "monari": False}
