@@ -69,6 +69,7 @@ Copy `.env.example` to `.env` and set your vault path:
 VAULT_PATH=/path/to/your/obsidian/vault
 # Optional:
 # READ_ONLY=true            # safe default for network Compose deployments
+# READ_PATHS=Notes/,Inbox/  # restrict all reads to specific rooted scopes
 # WRITE_PATHS=Notes/,Inbox/ # restrict writes to specific folders
 # DENY_READ_PATHS=.obsidian/,.trash/ # security boundary for all reads
 # DENY_WRITE_PATHS=.obsidian/,.trash/,_AI_INSTRUCTIONS.md
@@ -85,6 +86,20 @@ writes when both `READ_ONLY=false` and `WRITE_PATHS` is empty; choose that
 combination explicitly, not as a network default. Use a case-sensitive
 filesystem for authoritative path scopes.
 
+> **Docker upgrade note:** this Compose configuration now defaults
+> `READ_ONLY=true`, while a native `Config` invocation retains its historical
+> `false` default. Existing Docker deployments that intentionally write must
+> explicitly set `READ_ONLY=false`; pair it with a narrow `WRITE_PATHS` value.
+> For a nested scope such as `deep/nested/`, create `deep/` beforehand. MCP may
+> create the configured `nested/` scope and descendants, but never ancestors
+> above the configured write boundary.
+
+`READ_PATHS` is an optional allowlist using the same rooted exact/recursive
+syntax. When set, direct reads, listings, search, index construction, and
+resources are limited to those scopes; `DENY_READ_PATHS` still takes
+precedence. Ancestor directories may be traversed only to reach an allowed
+scope and do not expose sibling content.
+
 `EXCLUDE_PATHS` uses those same rooted exact/recursive matching rules, but is
 only a discovery filter—not an access-control boundary. For example,
 `private/` hides that root directory and its descendants, while it does not
@@ -96,6 +111,11 @@ therefore reject paths covered by `DENY_READ_PATHS` even if `WRITE_PATHS` also
 contains the path. Avoid overlapping those scopes for note workflows. The
 storage policy can still support intentionally write-only capabilities that do
 not inspect existing content, but `write_note_tool` is not one of them.
+
+The best-effort JSONL audit log is application state, not vault content. It
+defaults beneath `LOCK_PATH` for native runs and to `/data/audit.jsonl` in
+Docker. `AUDIT_LOG_PATH` must remain outside `VAULT_PATH`; the final log file
+is opened without following symlinks.
 
 New files and directories use the normal `0666`/`0777` creation modes filtered
 by the MCP process umask. Atomic overwrites preserve the existing file's

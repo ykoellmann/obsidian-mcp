@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
+from obsidian_mcp.storage.audit import append_entry, read_entries
 from obsidian_mcp.tools.audit import get_audit_log, get_note_history, log_write
 
 
@@ -14,6 +17,29 @@ def test_log_write_then_get_audit_log(vault_factory):
     assert entries[0]["path"] == "a.md"
     assert entries[0]["summary"] == "wrote note"
     assert "timestamp" in entries[0]
+
+
+def test_audit_log_is_stored_outside_vault(tmp_path, vault_factory):
+    vault_factory({})
+    log_write("write_note_tool", "a.md", "wrote note")
+
+    assert not (tmp_path / ".mcp-audit.jsonl").exists()
+
+
+def test_audit_log_rejects_symlink_target(tmp_path):
+    data = tmp_path / "data"
+    locks = tmp_path / "locks"
+    data.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("unchanged")
+    audit_path = data / "audit.jsonl"
+    audit_path.symlink_to(victim)
+
+    with pytest.raises(OSError):
+        append_entry(audit_path, locks, "write_note_tool", "a.md", "wrote note")
+    with pytest.raises(OSError):
+        read_entries(audit_path)
+    assert victim.read_text() == "unchanged"
 
 
 def test_get_audit_log_filters_by_path(vault_factory):

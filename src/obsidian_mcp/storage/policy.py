@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import posixpath
+import stat
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -101,6 +102,7 @@ class VaultAccessPolicy:
         vault_root: str | Path,
         *,
         read_only: bool = False,
+        read_paths: Iterable[str] = (),
         write_paths: Iterable[str] = (),
         deny_read_paths: Iterable[str] = (),
         deny_write_paths: Iterable[str] = (),
@@ -111,6 +113,7 @@ class VaultAccessPolicy:
             raise VaultPathError(f"Vault root does not exist or is not a directory: {root}")
         self.root = root.resolve()
         self.read_only = bool(read_only)
+        self.read_paths = _normalise_rules(read_paths, name="READ_PATHS")
         self.write_paths = _normalise_rules(write_paths, name="WRITE_PATHS")
         self.deny_read_paths = _normalise_rules(deny_read_paths, name="DENY_READ_PATHS")
         self.deny_write_paths = _normalise_rules(deny_write_paths, name="DENY_WRITE_PATHS")
@@ -121,6 +124,7 @@ class VaultAccessPolicy:
         return cls(
             config.vault_path,
             read_only=config.read_only,
+            read_paths=getattr(config, "read_paths", ()),
             write_paths=config.write_paths,
             deny_read_paths=config.deny_read_paths,
             deny_write_paths=config.deny_write_paths,
@@ -171,6 +175,10 @@ class VaultAccessPolicy:
         relative = _normalise_relative(path, allow_empty=False)
         if relative != path:
             raise VaultPathError(f"Non-canonical discovered path: {path!r}")
+        if self.read_paths and not self._read_scope_allows(
+            relative, allow_ancestor=stat.S_ISDIR(info.st_mode)
+        ):
+            raise ReadPermissionError(f"Read access denied for path {relative!r}")
         if self._denied(relative, self.deny_read_paths):
             raise ReadPermissionError(f"Read access denied for path {relative!r}")
         return VaultPath(
@@ -187,8 +195,21 @@ class VaultAccessPolicy:
         matches = [rule for rule in rules if self._matches(path, rule, casefold=True)]
         return max(matches, key=len) if matches else None
 
+    def _read_scope_allows(self, path: str, *, allow_ancestor: bool = False) -> bool:
+        for rule in self.read_paths:
+            if self._matches(path, rule):
+                return True
+            scope = self.rule_path(rule)
+            if allow_ancestor and (not path or scope.startswith(path + "/")):
+                return True
+        return False
+
     def resolve_read(self, path: str, *, allow_empty: bool = False) -> VaultPath:
         result = self.canonicalize(path, allow_empty=allow_empty)
+        if self.read_paths and not self._read_scope_allows(
+            result.relative, allow_ancestor=allow_empty
+        ):
+            raise ReadPermissionError(f"Read access denied for path {result.relative!r}")
         if self._denied(result.relative, self.deny_read_paths):
             raise ReadPermissionError(f"Read access denied for path {result.relative!r}")
         return result

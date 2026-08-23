@@ -63,6 +63,52 @@ def test_deny_read_is_not_bypassable_by_direct_name(tmp_path):
     assert storage.list_dir("") == []
 
 
+def test_read_allowlist_limits_direct_reads_and_discovery(tmp_path):
+    (tmp_path / "deep" / "allowed").mkdir(parents=True)
+    (tmp_path / "deep" / "allowed" / "note.md").write_text("allowed")
+    (tmp_path / "deep" / "sibling.md").write_text("hidden")
+    (tmp_path / "outside.md").write_text("hidden")
+    storage = VaultStorage(
+        VaultAccessPolicy(tmp_path, read_paths=["deep/allowed/"])
+    )
+
+    assert storage.read_text("deep/allowed/note.md") == "allowed"
+    with pytest.raises(ReadPermissionError):
+        storage.read_text("outside.md")
+    with pytest.raises(ReadPermissionError):
+        storage.read_text("deep/sibling.md")
+    assert [entry.relative for entry in storage.list_dir("")] == ["deep"]
+    assert [path.relative for path in storage.list_files()] == [
+        "deep/allowed/note.md"
+    ]
+
+
+def test_read_allowlist_ancestor_is_traversable_only_as_a_directory(tmp_path):
+    (tmp_path / "deep").write_text("not a directory")
+    policy = VaultAccessPolicy(tmp_path, read_paths=["deep/allowed/"])
+    storage = VaultStorage(policy)
+
+    with pytest.raises(ReadPermissionError):
+        storage.read_text("deep")
+    assert storage.list_dir("") == []
+
+
+def test_read_denylist_overrides_allowlist(tmp_path):
+    (tmp_path / "allowed" / "private").mkdir(parents=True)
+    (tmp_path / "allowed" / "private" / "secret.md").write_text("secret")
+    storage = VaultStorage(
+        VaultAccessPolicy(
+            tmp_path,
+            read_paths=["allowed/"],
+            deny_read_paths=["allowed/private/"],
+        )
+    )
+
+    with pytest.raises(ReadPermissionError):
+        storage.read_text("allowed/private/secret.md")
+    assert storage.list_files() == []
+
+
 def test_tree_paths_filters_denied_descendants(tmp_path):
     (tmp_path / "public").mkdir()
     (tmp_path / "private").mkdir()
@@ -125,6 +171,39 @@ def test_write_authorization_happens_before_parent_or_temp_creation(tmp_path):
         storage.write_text_atomic("denied/new.md", "must not be written")
     assert not (tmp_path / "denied").exists()
     assert not list(tmp_path.rglob(".obsidian-mcp-tmp-*"))
+
+
+def test_nested_write_scope_does_not_create_ancestors_above_scope(tmp_path):
+    storage = VaultStorage(
+        VaultAccessPolicy(tmp_path, write_paths=["deep/nested/"], read_only=False)
+    )
+
+    with pytest.raises(WritePermissionError, match="parent above"):
+        storage.write_text_atomic("deep/nested/note.md", "content")
+    assert not (tmp_path / "deep").exists()
+
+    (tmp_path / "deep").mkdir()
+    storage.write_text_atomic("deep/nested/note.md", "content")
+    assert (tmp_path / "deep" / "nested" / "note.md").read_text() == "content"
+
+
+def test_root_level_write_scope_can_create_its_directory(tmp_path):
+    storage = VaultStorage(
+        VaultAccessPolicy(tmp_path, write_paths=["AI/"], read_only=False)
+    )
+
+    storage.write_text_atomic("AI/note.md", "content")
+    assert (tmp_path / "AI" / "note.md").read_text() == "content"
+
+
+def test_exact_file_write_scope_requires_existing_parent(tmp_path):
+    storage = VaultStorage(
+        VaultAccessPolicy(tmp_path, write_paths=["deep/note.md"], read_only=False)
+    )
+
+    with pytest.raises(WritePermissionError, match="parent above"):
+        storage.write_text_atomic("deep/note.md", "content")
+    assert not (tmp_path / "deep").exists()
 
 
 def test_exists_returns_false_when_parent_is_a_file(tmp_path):

@@ -91,6 +91,8 @@ def test_security_path_defaults_and_lock_outside_vault(tmp_path, monkeypatch):
     assert cfg.deny_write_paths == (".obsidian/", ".trash/", "_AI_INSTRUCTIONS.md")
     assert cfg.allow_permanent_delete is False
     assert tmp_path not in cfg.lock_path.parents
+    assert cfg.audit_log_path == cfg.lock_path / "audit.jsonl"
+    assert tmp_path not in cfg.audit_log_path.parents
     assert cfg.enable_move is False
     assert cfg.enable_folder_rename is False
     assert cfg.enable_bulk_replace is False
@@ -115,9 +117,11 @@ def test_native_default_lock_path_is_external_and_usable(tmp_path, monkeypatch):
 def test_security_path_lists_normalize_separators(tmp_path, monkeypatch):
     _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv("WRITE_PATHS", "AI\\Memory/")
+    monkeypatch.setenv("READ_PATHS", "AI\\Memory/")
     monkeypatch.setenv("DENY_READ_PATHS", "private/")
     cfg = Config()
     assert cfg.write_paths == ("AI/Memory/",)
+    assert cfg.read_paths == ("AI/Memory/",)
     assert cfg.deny_read_paths == ("private/",)
     with pytest.raises(AttributeError):
         cfg.write_paths.append("other")
@@ -172,9 +176,20 @@ def test_sync_timing_configuration_is_validated(tmp_path, monkeypatch, name, val
         Config()
 
 
-@pytest.mark.parametrize("setting", ["WRITE_PATHS", "DENY_READ_PATHS", "DENY_WRITE_PATHS", "EXCLUDE_PATHS"])
+@pytest.mark.parametrize(
+    "setting",
+    ["READ_PATHS", "WRITE_PATHS", "DENY_READ_PATHS", "DENY_WRITE_PATHS", "EXCLUDE_PATHS"],
+)
 def test_security_path_lists_reject_escape(tmp_path, monkeypatch, setting):
     _base_env(monkeypatch, tmp_path)
     monkeypatch.setenv(setting, "../outside")
     with pytest.raises(ConfigError):
+        Config()
+
+
+def test_audit_log_path_must_be_outside_vault(tmp_path, monkeypatch):
+    _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
+
+    with pytest.raises(ConfigError, match="AUDIT_LOG_PATH"):
         Config()
