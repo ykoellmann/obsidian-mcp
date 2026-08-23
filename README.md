@@ -37,6 +37,7 @@ The intended setup is to host obsidian-mcp on a server or NAS where your vault i
 - **Bases** *(opt-in via `ENABLE_BASES`)* — read, create, and patch Obsidian Bases (`.base`) files — YAML-defined table/cards/list views over existing frontmatter properties
 - **Attachments** — list, read (text or base64), and add binary files
 - **Two auth variants** — a static API key (Claude Code, Desktop, curl) and, optionally, GitHub OAuth (claude.ai Web/Mobile Custom Connector) — usable independently or at the same time
+- **Multi-vault** *(opt-in via `VAULTS_CONFIG`)* — serve several fully isolated vaults from one deployment, each identity (API key or GitHub login) mapped to only the vault(s) it may access
 - **Templates** — render Obsidian templates with built-in (`{{date}}`, `{{title}}`, …) and custom variables
 - **MCP Resources** — expose vault notes, stats, and tags as MCP resources for direct context injection
 - **MCP Prompts** — `weekly_review`, `daily_note` starting points for common workflows
@@ -264,6 +265,72 @@ etc.) automatically and redirects you to GitHub to log in on first connect.
 > path (see `docker-compose.yml`) to avoid that.
 
 Keep the vault synced on the server with Syncthing, git+cron, rclone, or Obsidian Sync — obsidian-mcp picks up changes automatically via its file watcher.
+
+## Multi-Vault Setup
+
+By default obsidian-mcp serves one vault (`VAULT_PATH`). If you need several
+completely separate vaults from one deployment — e.g. a private vault and a
+work vault, each only reachable by its own identity — set `VAULTS_CONFIG` to
+the path of a JSON file instead, and every `VAULT_PATH`/`WRITE_PATHS`/
+`EXCLUDE_PATHS`/`API_KEY`/`OAUTH_GITHUB_ALLOWED_LOGINS` setting is ignored in
+favor of it. See [`vaults.json.example`](vaults.json.example):
+
+```json
+{
+  "vaults": {
+    "private": {"path": "/vaults/private", "exclude_paths": ["private", ".obsidian"]},
+    "monari":  {"path": "/vaults/monari",  "write_paths": ["02-Areas/monari/"]}
+  },
+  "identities": [
+    {"type": "api_key",      "value": "sk-...",              "vaults": ["private"]},
+    {"type": "github_login", "value": "your-github-username", "vaults": ["private", "monari"], "default": "private"}
+  ]
+}
+```
+
+```env
+VAULT_PATH=              # unused — vaults.json defines paths instead
+VAULTS_CONFIG=/data/vaults.json
+TRANSPORT=http
+```
+
+Each `identities` entry is either an **API key** (`Authorization: Bearer
+<value>`, same as [Option A](#option-a-api-key-claude-code-claude-desktop-curl-mcp-remote)
+above) or a **GitHub login** (same allowlist mechanism as
+[Option B](#option-b-github-oauth-claudeai-webmobile-custom-connector) — set
+`OAUTH_GITHUB_CLIENT_ID`/`SECRET`/`PUBLIC_BASE_URL` as usual, just skip
+`OAUTH_GITHUB_ALLOWED_LOGINS` since `vaults.json` replaces it). Both kinds
+can be mixed and used at the same time, exactly like today. Whichever
+identity a request authenticates as, every tool call is transparently
+scoped to that identity's vault(s) — there is no way to reach a vault an
+identity isn't listed for.
+
+An identity with more than one entry in `"vaults"` can switch between them:
+every tool accepts an optional `vault=<name>` argument for that one call
+(defaults to `"default"` if omitted — set it explicitly whenever an
+identity has several vaults, or every call without `vault=` fails asking
+for one). `list_vaults_tool()` returns `[{name, description, is_default}]`
+for whichever identity is calling, so an MCP client can discover what it's
+allowed to pass — the built-in instructions tell Claude to call it first
+and pass `vault=` when the conversation clearly points at a non-default
+vault. There's no server-side memory of which vault was picked last; it's
+re-selected on every call, same as any other argument.
+
+`/attachments/*` (the direct binary upload/download route) is fully
+multi-vault-aware: a plain `Authorization: Bearer` request resolves to that
+identity's default vault, or pass `?vault=<name>` in the URL to pick a
+different one of its allowed vaults (same rule as the `vault=` tool
+argument). `create_attachment_token_tool`'s short-lived scoped tokens
+(`?exp=&sig=`) work too, signed against the calling identity's own key and
+bound to a specific vault — but only for **api_key** identities, since a
+GitHub login has no static secret of its own to sign with; use a plain
+`Authorization: Bearer` request for those instead.
+
+> **Known limitation:** `/health` doesn't go through per-request auth/vault
+> resolution — it always reports on the first vault listed in
+> `vaults.json`, regardless of which identity would be calling. It exposes
+> no vault content either way (just process liveness), so this doesn't leak
+> anything.
 
 ## Vault Conventions (Customization)
 

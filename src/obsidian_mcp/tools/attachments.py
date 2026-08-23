@@ -109,41 +109,60 @@ def add_attachment(path: str, content_base64: str) -> dict:
     return write_attachment_bytes(path, data)
 
 
-def _sign_attachment_token(api_key: str, method: str, path: str, expires_at: int) -> str:
-    msg = f"{method}:{path}:{expires_at}".encode()
-    return hmac.new(api_key.encode(), msg, hashlib.sha256).hexdigest()
+def _sign_attachment_token(signing_key: str, method: str, path: str, vault: str, expires_at: int) -> str:
+    # vault is part of the signed message (not just a side channel) so a
+    # token minted for one vault can't be replayed against another by
+    # tampering with an unsigned query param.
+    msg = f"{method}:{path}:{vault}:{expires_at}".encode()
+    return hmac.new(signing_key.encode(), msg, hashlib.sha256).hexdigest()
 
 
-def create_attachment_token(path: str, method: str = "PUT", expires_in: int = 300) -> dict:
+def create_attachment_token(
+    path: str,
+    signing_key: str,
+    vault: str,
+    method: str = "PUT",
+    expires_in: int = 300,
+) -> dict:
     """Create a short-lived, single-file, single-method signed token for the
     server's GET/PUT /attachments/{path} HTTP route.
 
     Lets a client fetch or upload a file's raw bytes directly over HTTP
     without ever being handed the server's long-lived master API_KEY — the
-    token is scoped to this exact path and method, and expires on its own.
-    If PUBLIC_BASE_URL is configured, the ready-to-use request URL is
-    included so the caller never has to guess host/port/scheme itself.
+    token is scoped to this exact path, method, and vault, and expires on
+    its own. If PUBLIC_BASE_URL is configured, the ready-to-use request URL
+    is included so the caller never has to guess host/port/scheme itself.
+
+    signing_key/vault are resolved by the caller (server.py), not here —
+    which key is valid to sign with depends on the calling identity
+    (single global API_KEY in single-vault mode, that identity's own key in
+    multi-vault mode), which this module deliberately stays unaware of.
     """
     cfg = get_config()
-    if not cfg.api_key:
-        raise ValueError("API_KEY is not configured on this server; attachment tokens require it")
-
     method = method.upper()
     if method not in ("GET", "PUT"):
         raise ValueError("method must be 'GET' or 'PUT'")
 
     expires_in = max(1, min(int(expires_in), _MAX_TOKEN_TTL))
     expires_at = int(time.time()) + expires_in
-    sig = _sign_attachment_token(cfg.api_key, method, path, expires_at)
-    result = {"path": path, "method": method, "expires_at": expires_at, "sig": sig}
+    sig = _sign_attachment_token(signing_key, method, path, vault, expires_at)
+    result = {"path": path, "method": method, "vault": vault, "expires_at": expires_at, "sig": sig}
     if cfg.public_base_url:
         quoted_path = quote(path, safe="/")
-        query = urlencode({"exp": expires_at, "sig": sig})
+        query_params = {"exp": expires_at, "sig": sig}
+        if vault != cfg.default_vault_name:
+            # Keep single-vault-mode URLs exactly as before — only add
+            # ?vault= when it actually says something the server can't
+            # already assume.
+            query_params["vault"] = vault
+        query = urlencode(query_params)
         result["url"] = f"{cfg.public_base_url}/attachments/{quoted_path}?{query}"
     return result
 
 
-def verify_attachment_token(api_key: str, method: str, path: str, expires_at: str | int, sig: str) -> bool:
+def verify_attachment_token(
+    signing_key: str, method: str, path: str, vault: str, expires_at: str | int, sig: str
+) -> bool:
     """Verify a token minted by create_attachment_token. Constant-time, expiry-checked."""
     try:
         expires_at_int = int(expires_at)
@@ -151,5 +170,5 @@ def verify_attachment_token(api_key: str, method: str, path: str, expires_at: st
         return False
     if time.time() > expires_at_int:
         return False
-    expected = _sign_attachment_token(api_key, method, path, expires_at_int)
+    expected = _sign_attachment_token(signing_key, method, path, vault, expires_at_int)
     return hmac.compare_digest(sig, expected)
