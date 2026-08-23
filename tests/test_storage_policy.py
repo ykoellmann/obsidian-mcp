@@ -13,6 +13,7 @@ from obsidian_mcp.storage.policy import (
     VaultAccessPolicy,
     VaultPathError,
     WritePermissionError,
+    matches_path_rule,
 )
 
 
@@ -31,6 +32,13 @@ def test_file_rule_is_exact_and_directory_rule_is_recursive(tmp_path):
 
     recursive = VaultAccessPolicy(tmp_path, write_paths=["AI/note.md/"])
     assert recursive.resolve_write("AI/note.md/child.md").relative == "AI/note.md/child.md"
+
+
+def test_path_rules_are_rooted_and_support_multiple_components():
+    assert matches_path_rule("Archive/Old", "Archive/Old")
+    assert not matches_path_rule("Archive/Old/note.md", "Archive/Old")
+    assert matches_path_rule("Archive/Old/note.md", "Archive/Old/")
+    assert not matches_path_rule("Projects/Archive/Old/note.md", "Archive/Old/")
 
 
 def test_deny_rules_cannot_be_bypassed_by_case_alias(tmp_path):
@@ -63,6 +71,28 @@ def test_tree_paths_filters_denied_descendants(tmp_path):
     storage = VaultStorage(VaultAccessPolicy(tmp_path, deny_read_paths=["private/"]))
 
     assert [path.relative for path in storage.tree_paths("")] == ["public", "public/note.md"]
+
+
+def test_list_files_authorizes_once_and_carries_scandir_stat(tmp_path, monkeypatch):
+    (tmp_path / "deep" / "folder").mkdir(parents=True)
+    note = tmp_path / "deep" / "folder" / "note.md"
+    note.write_text("note")
+    policy = VaultAccessPolicy(tmp_path)
+    storage = VaultStorage(policy)
+    real_resolve_read = policy.resolve_read
+    calls = []
+
+    def counted_resolve_read(path, *, allow_empty=False):
+        calls.append(path)
+        return real_resolve_read(path, allow_empty=allow_empty)
+
+    monkeypatch.setattr(policy, "resolve_read", counted_resolve_read)
+    discovered = storage.list_files()
+
+    assert calls == [""]
+    assert [path.relative for path in discovered] == ["deep/folder/note.md"]
+    assert discovered[0].stat_result is not None
+    assert discovered[0].stat_result.st_ino == note.stat().st_ino
 
 
 def test_read_only_applies_to_binary_gateway(tmp_path):
@@ -194,7 +224,7 @@ def test_directory_trash_and_delete_reject_symlink_descendant_before_mutation(tm
     with pytest.raises(VaultPathError):
         storage.trash("source")
     with pytest.raises(VaultPathError):
-        storage.delete("source", permanent=True)
+        storage.delete("source")
 
     assert (tmp_path / "source" / "linked.md").is_symlink()
     assert (outside / "secret.md").read_text() == "secret"

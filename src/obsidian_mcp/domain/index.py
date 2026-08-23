@@ -4,10 +4,11 @@ import logging
 import stat
 import threading
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 
 from ..storage.filesystem import VaultStorage
-from ..storage.policy import VaultAccessPolicy
+from ..storage.policy import VaultAccessPolicy, matches_path_rule
 from .parser import parse_note
 
 logger = logging.getLogger(__name__)
@@ -21,11 +22,11 @@ class VaultIndex:
     def __init__(
         self,
         vault_root: Path,
-        exclude_paths: list[str] | None = None,
+        exclude_paths: Iterable[str] | None = None,
         policy: VaultAccessPolicy | None = None,
     ) -> None:
         self._vault_root = vault_root
-        self._exclude_paths = exclude_paths or []
+        self._exclude_paths = tuple(exclude_paths or ())
         self._policy = policy or VaultAccessPolicy(vault_root)
         self._storage = VaultStorage(self._policy)
         self._lock = threading.Lock()
@@ -238,8 +239,7 @@ class VaultIndex:
         else:
             rel = path.replace("\\", "/").strip("/")
             name = Path(rel).name
-        parts = rel.split("/") if rel else []
-        if any(rule.rstrip("/") in parts for rule in self._exclude_paths):
+        if any(matches_path_rule(rel, rule) for rule in self._exclude_paths):
             return True
         # Excalidraw files are *.md so they'd otherwise get tag/wikilink-parsed
         # as regular notes — their body is an embedded JSON scene, not prose,

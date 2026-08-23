@@ -32,7 +32,12 @@ _HIGH_RISK_TOOLS = {
     "move": {"move_note_tool"},
     "folder_rename": {"rename_folder_tool"},
     "bulk_replace": {"find_replace_in_vault_tool"},
-    "delete": {"delete_note_tool", "delete_folder_tool"},
+    "delete": {
+        "delete_note_tool",
+        "delete_folder_tool",
+        "restore_note_tool",
+        "restore_folder_tool",
+    },
 }
 
 

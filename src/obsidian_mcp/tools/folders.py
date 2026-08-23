@@ -35,14 +35,13 @@ def delete_folder(path: str, trash: bool = True) -> dict:
         raise FileNotFoundError(f"Folder not found: {path!r}")
     if not stat.S_ISDIR(storage.stat(target.relative, read=False).st_mode):
         raise ValueError(f"Not a folder: {path!r}")
-    storage.authorize_tree(target.relative, permanent=not trash)
     cfg = get_config()
     lock = acquire_lock(target.relative, lock_path=cfg.lock_path)
     try:
         if trash:
             storage.trash(target.relative)
         else:
-            storage.delete(target.relative, permanent=True)
+            storage.delete(target.relative)
     finally:
         lock.release()
     return {"path": target.relative, "status": "deleted", "trash": trash}

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from difflib import SequenceMatcher
 from pathlib import Path
 
 from ..config import get_config
 from ..domain.parser import parse_note
 from ..storage.filesystem import VaultStorage
+from ..storage.policy import matches_path_rule
 from .query import matches_frontmatter_filter
 
 
@@ -31,7 +33,7 @@ def list_notes(folder: str = "", include_meta: bool = False) -> list:
                     "tags": note.tags,
                     "status": note.frontmatter.get("status"),
                     "created": str(note.frontmatter.get("created", "")),
-                    "mtime": storage.stat(rel).st_mtime,
+                    "mtime": resolved.stat_result.st_mtime,
                 })
             except Exception:
                 results.append({"path": rel, "title": p.stem, "tags": [], "status": None, "created": "", "mtime": 0.0})
@@ -215,7 +217,7 @@ def render_note(path: str, depth: int = 1) -> str:
 def _find_note_by_stem(
     root: Path,
     stem: str,
-    exclude_paths: list[str],
+    exclude_paths: Iterable[str],
     *,
     storage: VaultStorage | None = None,
 ) -> str | None:
@@ -322,7 +324,6 @@ def _fuzzy_score(line_lower: str, query_lower: str, threshold: float = 0.8) -> i
     return matched_words if matched_words == len(query_words) and query_words else 0
 
 
-def _is_excluded(rel_path: str, exclude_paths: list[str]) -> bool:
+def _is_excluded(rel_path: str, exclude_paths: Iterable[str]) -> bool:
     normalized = rel_path.replace("\\", "/").strip("/")
-    parts = normalized.split("/") if normalized else []
-    return any(rule.rstrip("/") in parts for rule in exclude_paths)
+    return any(matches_path_rule(normalized, rule) for rule in exclude_paths)

@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from obsidian_mcp.config import get_config  # noqa: E402
 from obsidian_mcp.domain.index import VaultIndex  # noqa: E402
-from obsidian_mcp.storage.filesystem import write_file_atomic  # noqa: E402
+from obsidian_mcp.storage.filesystem import VaultStorage  # noqa: E402
 from obsidian_mcp.tools.lint import lint_schema  # noqa: E402
 
 
@@ -68,7 +68,9 @@ def main() -> int:
     inbox = os.environ.get("HEALTH_CHECK_INBOX", "Inbox").strip("/")
     today = date.today().isoformat()
     note_path = f"{inbox}/health-check-{today}.md" if inbox else f"health-check-{today}.md"
-    write_file_atomic(cfg.vault_path, note_path, _report_note(violations, today))
+    VaultStorage.from_config(cfg).write_text_atomic(
+        note_path, _report_note(violations, today)
+    )
     print(f"health-check: {len(violations)} violation(s) found — wrote {note_path}")
     return 0
 

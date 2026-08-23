@@ -18,7 +18,7 @@ services:
       - ALLOW_PERMANENT_DELETE=${ALLOW_PERMANENT_DELETE:-false}
       - MAX_ATTACHMENT_BYTES=${MAX_ATTACHMENT_BYTES:-26214400}
       - LOCK_PATH=${LOCK_PATH:-/data/locks}
-      - EXCLUDE_PATHS=${EXCLUDE_PATHS:-private,.obsidian}
+      - EXCLUDE_PATHS=${EXCLUDE_PATHS:-private/,.obsidian/,.trash/}
       # Optional plugin-format tool groups — each disabled by default (opt-in).
       # See .env.example for details.
       - ENABLE_CANVAS=${ENABLE_CANVAS:-false}

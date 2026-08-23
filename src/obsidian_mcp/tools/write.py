@@ -191,7 +191,7 @@ def delete_note(path: str, trash: bool = True, index: VaultIndex | None = None) 
         if trash:
             _storage().trash(path)
         else:
-            _storage().delete(path, permanent=True)
+            _storage().delete(path)
     finally:
         lock.release()
 

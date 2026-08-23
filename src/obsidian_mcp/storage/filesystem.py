@@ -50,31 +50,6 @@ class TrashEntry:
     mtime: float
 
 
-def _configured_policy(vault_root: str | Path) -> VaultAccessPolicy:
-    """Use configured authorization for the live vault; fail closed there."""
-    root = Path(vault_root).resolve()
-    try:
-        from ..config import ConfigError, get_config
-    except (ImportError, ModuleNotFoundError):
-        return VaultAccessPolicy(root)
-
-    try:
-        config = get_config()
-    except ConfigError:
-        # A configured-looking root must not silently become unrestricted.
-        raw_vault = os.environ.get("VAULT_PATH")
-        if raw_vault and Path(raw_vault).resolve() == root:
-            raise
-        return VaultAccessPolicy(root)
-    if config.vault_path == root:
-        return VaultAccessPolicy.from_config(config)
-    if root.is_relative_to(config.vault_path):
-        raise VaultPathError(
-            "An explicit vault root inside the configured vault cannot bypass its access policy"
-        )
-    return VaultAccessPolicy(root)
-
-
 def _require_secure_platform() -> None:
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "supports_dir_fd"):
         raise SecureStorageError("This platform lacks descriptor-relative no-follow filesystem APIs")
@@ -111,7 +86,7 @@ def _opened_parent(root: Path, relative: str, *, create: bool = False) -> Iterat
             except FileNotFoundError:
                 if not create:
                     raise
-                os.mkdir(component, 0o770, dir_fd=current)
+                os.mkdir(component, 0o777, dir_fd=current)
                 child = os.open(component, _dir_flags(), dir_fd=current)
             fds.append(child)
             current = child
@@ -282,6 +257,18 @@ class VaultStorage:
         any rename or directory creation occurs.
         """
         source = self.resolve_delete(path, permanent=permanent)
+        destination_path = self.resolve_write(destination) if destination is not None else None
+        return self._authorize_resolved_tree(
+            source, destination=destination_path, permanent=permanent
+        )
+
+    def _authorize_resolved_tree(
+        self,
+        source: VaultPath,
+        *,
+        destination: VaultPath | None = None,
+        permanent: bool = False,
+    ) -> list[str]:
         source_paths = self._tree_paths(source)
         source_is_dir = False
         with _opened_parent(self.policy.root, source.relative) as (source_parent, source_leaf):
@@ -298,7 +285,7 @@ class VaultStorage:
         for rel in source_paths:
             self.policy.resolve_delete(rel, permanent=permanent)
         if destination is not None:
-            dest = self.resolve_write(destination)
+            dest = destination
             if source_is_dir:
                 dest_prefix = dest.relative.rstrip("/") + "/"
                 if any(
@@ -345,17 +332,27 @@ class VaultStorage:
     def _write_atomic(self, target: VaultPath, data: bytes) -> None:
         tmp_name = f".obsidian-mcp-tmp-{uuid.uuid4().hex}"
         with _opened_parent(self.policy.root, target.relative, create=True) as (parent_fd, leaf):
+            try:
+                existing = _ensure_not_symlink(parent_fd, leaf)
+            except FileNotFoundError:
+                existing_mode = None
+            else:
+                if not stat.S_ISREG(existing.st_mode):
+                    raise IsADirectoryError(f"Target is not a regular file: {target.relative!r}")
+                existing_mode = stat.S_IMODE(existing.st_mode) & 0o777
             # O_EXCL + dirfd ensures the temporary file is created in the
             # already-authorized parent and cannot be redirected by a symlink.
             tmp_fd = os.open(
                 tmp_name,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
-                0o600,
+                0o666,
                 dir_fd=parent_fd,
             )
             committed = False
             try:
                 _write_all(tmp_fd, data)
+                if existing_mode is not None:
+                    os.fchmod(tmp_fd, existing_mode)
                 os.fsync(tmp_fd)
                 os.close(tmp_fd)
                 tmp_fd = -1
@@ -380,7 +377,7 @@ class VaultStorage:
         target = self.resolve_write(path)
         with _opened_parent(self.policy.root, target.relative, create=True) as (parent_fd, leaf):
             try:
-                os.mkdir(leaf, 0o770, dir_fd=parent_fd)
+                os.mkdir(leaf, 0o777, dir_fd=parent_fd)
             except FileExistsError:
                 info = _ensure_not_symlink(parent_fd, leaf)
                 if not stat.S_ISDIR(info.st_mode):
@@ -399,7 +396,7 @@ class VaultStorage:
                         info = item.stat(follow_symlinks=False)
                         if stat.S_ISLNK(info.st_mode):
                             continue
-                    except (VaultPathError, OSError):
+                    except (VaultPathError, ReadPermissionError, OSError):
                         continue
                     entries.append(
                         VaultEntry(
@@ -423,15 +420,17 @@ class VaultStorage:
                         rel = f"{prefix}/{item.name}" if prefix else item.name
                         full_rel = f"{target.relative}/{rel}" if target.relative else rel
                         try:
-                            authorized = self.resolve_read(full_rel)
                             info = item.stat(follow_symlinks=False)
-                        except (VaultPathError, OSError):
+                            if stat.S_ISLNK(info.st_mode):
+                                continue
+                            authorized = self.policy.authorize_discovered_read(
+                                full_rel, info
+                            )
+                        except (VaultPathError, ReadPermissionError, OSError):
                             # A denied directory is not descended into.  This
                             # keeps discovery from even enumerating protected
                             # subtrees, while a concurrent/symlink swap fails
                             # closed for this listing.
-                            continue
-                        if stat.S_ISLNK(info.st_mode):
                             continue
                         if stat.S_ISDIR(info.st_mode):
                             try:
@@ -467,23 +466,20 @@ class VaultStorage:
             raise VaultPathError("Source and destination must differ")
         if destination.relative.startswith(source.relative + "/"):
             raise VaultPathError("Destination cannot be inside the source tree")
-        self.authorize_tree(source.relative, destination=destination.relative)
+        self._authorize_resolved_tree(source, destination=destination)
         self._rename_relative(source, destination)
         return source, destination
 
-    def delete(self, path: str, *, permanent: bool = False) -> VaultPath:
-        target = self.resolve_delete(path, permanent=permanent)
-        self.authorize_tree(target.relative, permanent=permanent)
+    def delete(self, path: str) -> VaultPath:
+        target = self.resolve_delete(path, permanent=True)
+        self._authorize_resolved_tree(target, permanent=True)
         with _opened_parent(self.policy.root, target.relative) as (parent_fd, leaf):
-            if permanent:
-                _remove_tree_fd(parent_fd, leaf)
-            else:
-                raise IsADirectoryError(f"Use trash() for a folder: {path!r}")
+            _remove_tree_fd(parent_fd, leaf)
         return target
 
     def trash(self, path: str) -> tuple[VaultPath, Path]:
         source = self.resolve_delete(path)
-        self.authorize_tree(source.relative)
+        self._authorize_resolved_tree(source)
         with _opened_dir(self.policy.root, "") as root_fd:
             try:
                 trash_fd = os.open(".trash", _dir_flags(), dir_fd=root_fd)
@@ -491,8 +487,6 @@ class VaultStorage:
                 os.mkdir(".trash", 0o700, dir_fd=root_fd)
                 trash_fd = os.open(".trash", _dir_flags(), dir_fd=root_fd)
             try:
-                if stat.S_ISLNK(_stat_at(root_fd, ".trash").st_mode):
-                    raise ProtectedPathError("The vault trash directory cannot be a symlink")
                 with _opened_parent(self.policy.root, source.relative) as (src_parent, src_leaf):
                     _ensure_not_symlink(src_parent, src_leaf)
                     destination_name = source.relative.rsplit("/", 1)[-1]
@@ -572,32 +566,12 @@ class VaultStorage:
             _opened_dir(self.policy.root, ".trash") as trash_fd,
             _opened_parent(self.policy.root, destination.relative, create=True) as (dst_parent, dst_leaf),
         ):
-                try:
-                    _stat_at(dst_parent, dst_leaf)
-                except FileNotFoundError:
-                    pass
-                else:
-                    raise FileExistsError(f"Target already exists: {to_path!r}")
-                _ensure_not_symlink(trash_fd, info.name)
-                os.rename(info.name, dst_leaf, src_dir_fd=trash_fd, dst_dir_fd=dst_parent)
+            try:
+                _stat_at(dst_parent, dst_leaf)
+            except FileNotFoundError:
+                pass
+            else:
+                raise FileExistsError(f"Target already exists: {to_path!r}")
+            _ensure_not_symlink(trash_fd, info.name)
+            os.rename(info.name, dst_leaf, src_dir_fd=trash_fd, dst_dir_fd=dst_parent)
         return destination
-
-
-def validate_path(vault_root: str | Path, relative_path: str) -> Path:
-    return _configured_policy(vault_root).canonicalize(relative_path).absolute
-
-
-def read_file(vault_root: str | Path, relative_path: str) -> str:
-    return VaultStorage(_configured_policy(vault_root)).read_text(relative_path)
-
-
-def write_file_atomic(vault_root: str | Path, relative_path: str, content: str) -> None:
-    VaultStorage(_configured_policy(vault_root)).write_text_atomic(relative_path, content)
-
-
-def read_file_bytes(vault_root: str | Path, relative_path: str) -> bytes:
-    return VaultStorage(_configured_policy(vault_root)).read_bytes(relative_path)
-
-
-def write_file_atomic_bytes(vault_root: str | Path, relative_path: str, content: bytes) -> None:
-    VaultStorage(_configured_policy(vault_root)).write_bytes_atomic(relative_path, content)

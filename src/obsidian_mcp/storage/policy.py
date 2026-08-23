@@ -8,6 +8,7 @@ constructing a different (or symlinked) path for the actual operation.
 
 from __future__ import annotations
 
+import os
 import posixpath
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -44,6 +45,18 @@ class VaultPath:
 
     relative: str
     absolute: Path
+    stat_result: os.stat_result | None = None
+
+
+def matches_path_rule(path: str, rule: str, *, casefold: bool = False) -> bool:
+    """Match one canonical path against an exact or recursive rooted rule."""
+    recursive = rule.endswith("/")
+    candidate = path.casefold() if casefold else path
+    scope = rule.rstrip("/")
+    scope = scope.casefold() if casefold else scope
+    return candidate == scope or (
+        recursive and candidate.startswith(scope + "/")
+    )
 
 
 def _normalise_relative(value: str, *, allow_empty: bool = True) -> str:
@@ -144,11 +157,27 @@ class VaultAccessPolicy:
     @staticmethod
     def _matches(path: str, rule: str, *, casefold: bool = False) -> bool:
         """Match exact file rules and slash-suffixed recursive directory rules."""
-        recursive = rule.endswith("/")
-        candidate = path.casefold() if casefold else path
-        scope = rule.rstrip("/")
-        scope = scope.casefold() if casefold else scope
-        return candidate == scope or (recursive and candidate.startswith(scope + "/"))
+        return matches_path_rule(path, rule, casefold=casefold)
+
+    def authorize_discovered_read(
+        self, path: str, info: os.stat_result
+    ) -> VaultPath:
+        """Authorize a no-follow descriptor discovery without rewalking it.
+
+        Callers must obtain ``path`` and ``info`` from the descriptor-relative
+        scanner. Unlike ``resolve_read``, this method deliberately performs no
+        second path lookup that could race or duplicate O(depth) syscalls.
+        """
+        relative = _normalise_relative(path, allow_empty=False)
+        if relative != path:
+            raise VaultPathError(f"Non-canonical discovered path: {path!r}")
+        if self._denied(relative, self.deny_read_paths):
+            raise ReadPermissionError(f"Read access denied for path {relative!r}")
+        return VaultPath(
+            relative=relative,
+            absolute=self.root / relative,
+            stat_result=info,
+        )
 
     def _denied(self, path: str, rules: tuple[str, ...]) -> str | None:
         # The longest matching rule gives a useful deterministic reason in logs.

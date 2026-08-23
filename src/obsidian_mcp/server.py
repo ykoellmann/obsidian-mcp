@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import threading
+from dataclasses import dataclass
 
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, AuthProvider, MultiAuth, TokenVerifier
@@ -468,53 +469,41 @@ _watcher = None
 mcp = FastMCP(name="obsidian-mcp", instructions=_load_instructions(), auth=_build_auth())
 
 
-def _feature_flags_from_env() -> tuple[bool, ...]:
-    """Read the ENABLE_* flags directly from os.environ (not get_config()), so
-    this module can still be imported without VAULT_PATH set (e.g. during
-    testing or linting) — same reasoning as _build_auth() above."""
-    def _flag(name: str) -> bool:
-        return os.environ.get(name, "false").lower() in ("1", "true", "yes")
-
-    return (
-        _flag("ENABLE_CANVAS"),
-        _flag("ENABLE_EXCALIDRAW"),
-        _flag("ENABLE_KANBAN"),
-        _flag("ENABLE_BASES"),
-        _flag("ENABLE_MOVE"),
-        _flag("ENABLE_FOLDER_RENAME"),
-        _flag("ENABLE_BULK_REPLACE"),
-        _flag("ENABLE_DELETE"),
-    )
-
-
 # Gates which optional plugin-format and high-impact mutation tool groups get
 # registered below, so disabled tools never appear in the client's tool list.
 # Deliberately not the real Config object (that needs VAULT_PATH,
-# see _build_auth() above) — just the four flags, read straight from the
+# see _build_auth() above) — just the feature flags, read straight from the
 # environment.
+@dataclass(frozen=True)
 class _FeatureFlags:
-    def __init__(
-        self,
-        enable_canvas,
-        enable_excalidraw,
-        enable_kanban,
-        enable_bases,
-        enable_move,
-        enable_folder_rename,
-        enable_bulk_replace,
-        enable_delete,
-    ):
-        self.enable_canvas = enable_canvas
-        self.enable_excalidraw = enable_excalidraw
-        self.enable_kanban = enable_kanban
-        self.enable_bases = enable_bases
-        self.enable_move = enable_move
-        self.enable_folder_rename = enable_folder_rename
-        self.enable_bulk_replace = enable_bulk_replace
-        self.enable_delete = enable_delete
+    enable_canvas: bool
+    enable_excalidraw: bool
+    enable_kanban: bool
+    enable_bases: bool
+    enable_move: bool
+    enable_folder_rename: bool
+    enable_bulk_replace: bool
+    enable_delete: bool
+
+    @classmethod
+    def from_env(cls) -> _FeatureFlags:
+        """Read named flags without constructing the full vault config."""
+        def enabled(name: str) -> bool:
+            return os.environ.get(name, "false").lower() in ("1", "true", "yes")
+
+        return cls(
+            enable_canvas=enabled("ENABLE_CANVAS"),
+            enable_excalidraw=enabled("ENABLE_EXCALIDRAW"),
+            enable_kanban=enabled("ENABLE_KANBAN"),
+            enable_bases=enabled("ENABLE_BASES"),
+            enable_move=enabled("ENABLE_MOVE"),
+            enable_folder_rename=enabled("ENABLE_FOLDER_RENAME"),
+            enable_bulk_replace=enabled("ENABLE_BULK_REPLACE"),
+            enable_delete=enabled("ENABLE_DELETE"),
+        )
 
 
-_feature_flags = _FeatureFlags(*_feature_flags_from_env())
+_feature_flags = _FeatureFlags.from_env()
 
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
@@ -674,7 +663,6 @@ if _feature_flags.enable_delete:
     mcp.tool()(delete_note_tool)
 
 
-@mcp.tool()
 def restore_note_tool(trashed_name: str, to_path: str) -> dict:
     """Restore a note previously moved to .trash/ (see list_trash_tool for names).
     to_path: where to put it back — the original folder can't be recovered
@@ -683,6 +671,10 @@ def restore_note_tool(trashed_name: str, to_path: str) -> dict:
     result = restore_note(trashed_name, to_path, index=_index)
     log_write("restore_note_tool", to_path, f"restored from .trash/{trashed_name}")
     return result
+
+
+if _feature_flags.enable_delete:
+    mcp.tool()(restore_note_tool)
 
 
 def find_replace_in_vault_tool(
@@ -1406,7 +1398,6 @@ def list_trash_tool() -> dict:
     return list_trash()
 
 
-@mcp.tool()
 def restore_folder_tool(trashed_name: str, to_path: str) -> dict:
     """Restore a folder previously moved to .trash/ (see list_trash_tool for names).
     to_path: where to put it back — the original parent path can't be
@@ -1415,6 +1406,10 @@ def restore_folder_tool(trashed_name: str, to_path: str) -> dict:
     result = restore_folder(trashed_name, to_path, index=_index)
     log_write("restore_folder_tool", to_path, f"restored from .trash/{trashed_name}")
     return result
+
+
+if _feature_flags.enable_delete:
+    mcp.tool()(restore_folder_tool)
 
 
 # ── MCP Resources ─────────────────────────────────────────────────────────────

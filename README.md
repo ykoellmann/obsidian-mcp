@@ -83,6 +83,17 @@ writes when both `READ_ONLY=false` and `WRITE_PATHS` is empty; choose that
 combination explicitly, not as a network default. Use a case-sensitive
 filesystem for authoritative path scopes.
 
+`EXCLUDE_PATHS` uses those same rooted exact/recursive matching rules, but is
+only a discovery filter—not an access-control boundary. For example,
+`private/` hides that root directory and its descendants, while it does not
+hide `Projects/private/`.
+
+New files and directories use the normal `0666`/`0777` creation modes filtered
+by the MCP process umask. Atomic overwrites preserve the existing file's
+permission bits. In a shared sync deployment, run the MCP and sync daemon with
+compatible UID/GID and umask settings so both can continue reading and updating
+new notes; the home-server profile exposes these as `PUID` and `PGID`.
+
 Full list of variables — including `API_KEY`, `PUBLIC_BASE_URL`, and the
 `OAUTH_GITHUB_*` variables for the optional second auth variant — is
 documented with inline comments in `.env.example`; see [Remote Setup](#remote-setup-recommended)
@@ -351,8 +362,8 @@ The server loads this file at startup and sends it to the AI as system instructi
 | Category | Tools |
 |---|---|
 | **Read** | `list_notes`, `read_note`, `search_notes`, `render_note`, `get_note_outline` |
-| **Write** | `write_note`, `patch_note`, `delete_note`, `restore_note`, `append_to_note`, `patch_frontmatter`, `manage_tags`, `move_note`, `find_replace_in_vault` |
-| **Folders** | `list_folder`, `create_folder`, `delete_folder`, `restore_folder`, `rename_folder`, `list_trash` |
+| **Write** | `write_note`, `patch_note`, `delete_note`*, `restore_note`*, `append_to_note`, `patch_frontmatter`, `manage_tags`, `move_note`, `find_replace_in_vault` |
+| **Folders** | `list_folder`, `create_folder`, `delete_folder`*, `restore_folder`*, `rename_folder`, `list_trash` |
 | **Query** | `query_notes`, `get_backlinks`, `get_broken_links`, `get_orphans`, `get_link_graph`, `get_vault_stats`, `get_tasks`, `resolve_alias` |
 | **Tags** | `get_notes_by_tag`, `get_tag_tree`, `list_all_tags` |
 | **Periodic** | `get_daily_note`, `get_periodic_note` |
@@ -362,6 +373,8 @@ The server loads this file at startup and sends it to the AI as system instructi
 | **Bases** | `list_bases`, `read_base`, `write_base`, `patch_base` |
 | **Attachments** | `list_attachments`, `read_attachment`, `add_attachment` |
 | **Templates** | `list_templates`, `create_from_template` |
+
+\* Delete and restore tools are registered only when `ENABLE_DELETE=true`.
 
 Canvas, Excalidraw, Kanban, and Bases are each opt-in (see [Optional plugin-format tools](#optional-plugin-format-tools-canvas--excalidraw--kanban--bases) above) — their tools only appear once the matching `ENABLE_*` flag is set.
 

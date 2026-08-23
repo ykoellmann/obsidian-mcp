@@ -1,6 +1,7 @@
 """Tests for GitHub OAuth config validation (obsidian_mcp/config.py)."""
 from __future__ import annotations
 
+import copy
 import tempfile
 from pathlib import Path
 
@@ -57,7 +58,7 @@ def test_oauth_only_is_valid_without_api_key(tmp_path, monkeypatch):
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://example.com/")
 
     cfg = Config()
-    assert cfg.oauth_github_allowed_logins == ["octocat", "some-other-user"]
+    assert cfg.oauth_github_allowed_logins == ("octocat", "some-other-user")
     assert cfg.public_base_url == "https://example.com"
 
 
@@ -86,8 +87,8 @@ def test_network_transport_requires_api_key_or_oauth(tmp_path, monkeypatch):
 def test_security_path_defaults_and_lock_outside_vault(tmp_path, monkeypatch):
     _base_env(monkeypatch, tmp_path)
     cfg = Config()
-    assert cfg.deny_read_paths == [".obsidian/", ".trash/"]
-    assert cfg.deny_write_paths == [".obsidian/", ".trash/", "_AI_INSTRUCTIONS.md"]
+    assert cfg.deny_read_paths == (".obsidian/", ".trash/")
+    assert cfg.deny_write_paths == (".obsidian/", ".trash/", "_AI_INSTRUCTIONS.md")
     assert cfg.allow_permanent_delete is False
     assert tmp_path not in cfg.lock_path.parents
     assert cfg.enable_move is False
@@ -113,18 +114,28 @@ def test_security_path_lists_normalize_separators(tmp_path, monkeypatch):
     monkeypatch.setenv("WRITE_PATHS", "AI\\Memory/")
     monkeypatch.setenv("DENY_READ_PATHS", "private/")
     cfg = Config()
-    assert cfg.write_paths == ["AI/Memory/"]
-    assert cfg.deny_read_paths == ["private/"]
-    with pytest.raises((AttributeError, TypeError)):
+    assert cfg.write_paths == ("AI/Memory/",)
+    assert cfg.deny_read_paths == ("private/",)
+    with pytest.raises(AttributeError):
         cfg.write_paths.append("other")
     with pytest.raises(AttributeError):
         cfg.read_only = True
-    original = list(cfg.write_paths)
-    with pytest.raises(TypeError):
-        cfg.write_paths += ["other"]
-    with pytest.raises(TypeError):
+    with pytest.raises(AttributeError):
+        cfg.write_paths += ("other",)
+    with pytest.raises(AttributeError):
         cfg.write_paths *= 2
-    assert cfg.write_paths == original
+    assert cfg.write_paths == ("AI/Memory/",)
+
+
+def test_config_supports_copy_without_losing_immutability(tmp_path, monkeypatch):
+    _base_env(monkeypatch, tmp_path)
+    cfg = Config()
+
+    copied = copy.copy(cfg)
+
+    assert copied == cfg
+    with pytest.raises(AttributeError):
+        copied.read_only = True
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "not-an-int"])

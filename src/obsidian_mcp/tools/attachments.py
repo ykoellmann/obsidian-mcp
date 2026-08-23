@@ -11,7 +11,7 @@ from urllib.parse import quote, urlencode
 
 from ..config import get_config
 from ..storage.filesystem import VaultStorage
-from ..storage.policy import InvalidFileTypeError
+from ..storage.policy import InvalidFileTypeError, matches_path_rule
 
 _TEXT_SUFFIXES = {".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".css", ".js", ".ts"}
 _MAX_TOKEN_TTL = 3600
@@ -55,10 +55,10 @@ def list_attachments(folder: str = "") -> list[dict]:
             continue
         try:
             rel = validate_attachment_path(rel)
-            info = storage.stat(rel)
+            info = resolved.stat_result
         except InvalidFileTypeError:
             continue
-        if any(rel == rule or rel.startswith(rule.rstrip("/") + "/") for rule in cfg.exclude_paths):
+        if any(matches_path_rule(rel, rule) for rule in cfg.exclude_paths):
             continue
         mime, _ = mimetypes.guess_type(rel)
         results.append({
