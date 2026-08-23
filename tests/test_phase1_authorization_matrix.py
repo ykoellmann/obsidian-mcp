@@ -68,7 +68,12 @@ def _configure_scoped_policy(monkeypatch, lock_path=None):
         ("rename_folder", lambda: rename_folder("outside-folder", "allowed/moved-folder")),
         ("restore_folder", lambda: restore_folder("missing-folder", "outside-folder")),
         ("add_attachment", lambda: add_attachment("outside.pdf", base64.b64encode(b"x").decode())),
-        ("create_attachment_token", lambda: create_attachment_token("outside.pdf", method="PUT")),
+        (
+            "create_attachment_token",
+            lambda: create_attachment_token(
+                "outside.pdf", signing_key="test-key", vault="default", method="PUT"
+            ),
+        ),
         ("write_canvas", lambda: write_canvas("outside.canvas")),
         ("write_excalidraw", lambda: write_excalidraw("outside.excalidraw.md")),
         ("write_base", lambda: write_base("outside.base")),
