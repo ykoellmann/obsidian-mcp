@@ -11,7 +11,7 @@ import obsidian_mcp.config as config_module
 from obsidian_mcp import server
 from obsidian_mcp.domain.index import VaultIndex
 from obsidian_mcp.domain.models import PreconditionRequiredError, RevisionConflictError
-from obsidian_mcp.storage.filesystem import VaultStorage
+from obsidian_mcp.storage.filesystem import SecureStorageError, VaultStorage
 from obsidian_mcp.storage.policy import ReadPermissionError, VaultAccessPolicy
 from obsidian_mcp.storage.watcher import VaultWatcher
 from obsidian_mcp.tools.read import read_note
@@ -220,3 +220,21 @@ def test_create_only_probe_cleans_up(tmp_path):
     storage = VaultStorage(VaultAccessPolicy(tmp_path))
     storage.probe_create_only_support()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_create_only_probe_creates_terminal_recursive_write_scope(tmp_path):
+    (tmp_path / "deep").mkdir()
+    storage = VaultStorage(VaultAccessPolicy(tmp_path, write_paths=["deep/nested/"]))
+
+    storage.probe_create_only_support()
+
+    assert (tmp_path / "deep" / "nested").is_dir()
+    assert list((tmp_path / "deep" / "nested").iterdir()) == []
+
+
+def test_create_only_probe_rejects_missing_parent_above_write_scope(tmp_path):
+    storage = VaultStorage(VaultAccessPolicy(tmp_path, write_paths=["deep/note.md"]))
+
+    with pytest.raises(SecureStorageError, match="writable parent"):
+        storage.probe_create_only_support()
+    assert not (tmp_path / "deep").exists()

@@ -565,28 +565,28 @@ class VaultStorage:
         """Verify the mounted vault supports the hard-link no-replace primitive."""
         if self.policy.read_only:
             return
-        probe_dirs = {""}
+        probe_targets = {f".obsidian-mcp-link-probe-{uuid.uuid4().hex}"}
         if self.policy.write_paths:
-            probe_dirs = {
-                rule.rstrip("/")
-                if rule.endswith("/")
-                else rule.rsplit("/", 1)[0]
-                if "/" in rule
-                else ""
+            probe_targets = {
+                (
+                    f"{rule.rstrip('/')}/.obsidian-mcp-link-probe-{uuid.uuid4().hex}"
+                    if rule.endswith("/")
+                    else rule
+                )
                 for rule in self.policy.write_paths
             }
-        for probe_dir in sorted(probe_dirs):
-            self._probe_create_only_directory(probe_dir)
+        for probe_target in sorted(probe_targets):
+            self._probe_create_only_target(probe_target)
 
-    def _probe_create_only_directory(self, probe_dir: str) -> None:
+    def _probe_create_only_target(self, probe_target: str) -> None:
         probe_name = f".obsidian-mcp-link-probe-{uuid.uuid4().hex}"
+        target = self.resolve_write(probe_target)
         try:
-            context = _opened_dir(self.policy.root, probe_dir)
-            with context as directory_fd:
+            with self._opened_write_parent(target) as (directory_fd, _target_leaf):
                 self._run_create_only_probe(directory_fd, probe_name)
-        except FileNotFoundError as exc:
+        except WritePermissionError as exc:
             raise SecureStorageError(
-                f"Configured writable directory does not exist: {probe_dir!r}"
+                f"Configured writable parent cannot be opened: {probe_target!r}"
             ) from exc
 
     @staticmethod
