@@ -12,10 +12,18 @@ from dataclasses import dataclass
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, AuthProvider, MultiAuth, TokenVerifier
 from fastmcp.server.auth.providers.github import GitHubProvider
+from fastmcp.server.dependencies import get_access_token
+from fastmcp.server.middleware import Middleware, MiddlewareContext
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from .config import ConfigError, get_config
+from .config import (
+    ConfigError,
+    get_config,
+    load_vaults_file,
+    reset_current_vault,
+    set_current_vault,
+)
 from .domain.index import VaultIndex
 from .storage.filesystem import VaultStorage
 from .storage.policy import (
@@ -103,6 +111,20 @@ logger = logging.getLogger(__name__)
 _DEFAULT_INSTRUCTIONS = r"""\
 You are connected to **obsidian-mcp**, an MCP server for an Obsidian vault.
 
+## Multiple Vaults
+Call `list_vaults_tool()` first, before anything else. If it returns more
+than one vault, this identity has access to several completely separate
+ones — figure out from what the user is asking which one they mean (a
+vault's `description` is there to help with that), and pass `vault=<name>`
+on every other tool call where it matters. Leaving `vault` out uses
+whichever entry has `is_default: true` — fine when the user's request
+doesn't point at a specific one, wrong if they clearly mean the
+non-default vault. There's no server-side memory of which vault you picked
+last time; pass `vault=` again on each subsequent call in the same
+conversation, the same way you already repeat `path=` on each call. If
+`list_vaults_tool()` returns exactly one vault, ignore all of this — there's
+nothing to choose between.
+
 ## Vault Conventions
 Call `get_vault_conventions_tool()` first. If the vault has an `_AI_INSTRUCTIONS.md`,
 it defines the folder structure, tag schema, and naming rules for this specific vault.
@@ -176,6 +198,11 @@ renames, and `ENABLE_BULK_REPLACE` registers bulk replacement.
 - `get_notes_by_tag_tool(tag)`, `get_tag_tree_tool()`, `list_all_tags_tool(sort_by)`
 - `get_daily_note_tool(date)` / `get_periodic_note_tool(period, date)` — periodic notes; date: today|yesterday|YYYY-MM-DD
 - `resolve_alias_tool(name)` — alias or stem → canonical vault path
+
+### Multi-Vault
+- `list_vaults_tool()` — vault(s) the current identity may access:
+  [{name, description, is_default}]. Every other tool accepts an optional
+  `vault=<name>` argument to operate on a non-default one for that call.
 
 ### Attachments
 - `list_attachments_tool(folder)`, `read_attachment_tool(path)`, `add_attachment_tool(path, content_base64)`
@@ -379,15 +406,21 @@ def _load_instructions() -> str:
 
 
 class _APIKeyAuthProvider(TokenVerifier):
-    """Simple static API-key auth. Clients must send: Authorization: Bearer <key>."""
+    """Static API-key auth, one or more keys. Clients must send:
+    Authorization: Bearer <key>. client_id on the returned AccessToken is
+    the matched key itself — in multi-vault mode that's what
+    VaultResolutionMiddleware looks up in the identities table (single-key
+    mode has no such lookup, so the exact client_id value doesn't matter
+    there beyond being stable)."""
 
-    def __init__(self, api_key: str) -> None:
+    def __init__(self, api_keys: list[str]) -> None:
         super().__init__()
-        self._key = api_key
+        self._keys = api_keys
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        if hmac.compare_digest(token, self._key):
-            return AccessToken(token=token, client_id="api-key", scopes=[])
+        for key in self._keys:
+            if hmac.compare_digest(token, key):
+                return AccessToken(token=token, client_id=key, scopes=[])
         logger.warning("Rejected request with invalid API key")
         return None
 
@@ -416,22 +449,45 @@ class _RestrictedGitHubVerifier(TokenVerifier):
         return result
 
 
-def _build_auth() -> AuthProvider | None:
-    # Reads os.environ directly (not get_config()) so this module can still be
-    # imported without VAULT_PATH set (e.g. during testing or linting).
-    # Config.__init__ performs the actual validation of these values later.
+def _identities_from_env() -> tuple[list[str], list[str]]:
+    """(api_keys, allowed_github_logins) — from VAULTS_CONFIG if set, else
+    the legacy single-vault env vars. Reads os.environ directly (not
+    get_config()) so this module can still be imported without VAULT_PATH
+    set (e.g. during testing or linting); a broken VAULTS_CONFIG here is
+    swallowed (falls back to empty — no auth configured) rather than
+    raised, since Config.__init__ is the actual place that validates it and
+    fails loudly at real startup. Don't let a parse error here silently
+    grant unauthenticated access, though — an empty result just means no
+    verifier gets built at all, so the server refuses to start over the
+    network per the has_api_keys/oauth_configured check in Config.__init__."""
+    vaults_config_path = os.environ.get("VAULTS_CONFIG", "")
+    if vaults_config_path:
+        try:
+            _vaults, identities = load_vaults_file(vaults_config_path)
+        except ConfigError:
+            return [], []
+        api_keys = [i.value for i in identities if i.type == "api_key"]
+        allowed_logins = [i.value for i in identities if i.type == "github_login"]
+        return api_keys, allowed_logins
+
     key = os.environ.get("API_KEY") or os.environ.get("OBSIDIAN_MCP_API_KEY")
-    api_key_verifier = _APIKeyAuthProvider(key) if key else None
+    api_keys = [key] if key else []
+    allowed_logins = [
+        login.strip().lower()
+        for login in os.environ.get("OAUTH_GITHUB_ALLOWED_LOGINS", "").split(",")
+        if login.strip()
+    ]
+    return api_keys, allowed_logins
+
+
+def _build_auth() -> AuthProvider | None:
+    api_keys, allowed_logins = _identities_from_env()
+    api_key_verifier = _APIKeyAuthProvider(api_keys) if api_keys else None
 
     client_id = os.environ.get("OAUTH_GITHUB_CLIENT_ID")
     client_secret = os.environ.get("OAUTH_GITHUB_CLIENT_SECRET")
     github_provider = None
     if client_id and client_secret:
-        allowed_logins = [
-            login.strip().lower()
-            for login in os.environ.get("OAUTH_GITHUB_ALLOWED_LOGINS", "").split(",")
-            if login.strip()
-        ]
         base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 
         # Client registrations + encrypted tokens persist under FastMCP's own
@@ -472,13 +528,153 @@ def _build_auth() -> AuthProvider | None:
     return None
 
 
-# Initialized in main() — None at import time so the module can be imported
-# without VAULT_PATH set (e.g. during testing or linting).
+class _CurrentVaultIndex:
+    """Every existing @mcp.tool()/@mcp.resource() call site passes/uses
+    `_index` as a single VaultIndex — this proxy lets that keep working
+    completely unchanged even though there's now one VaultIndex per
+    configured vault. Attribute access is forwarded to whichever vault's
+    index the current context resolves to (contextvars, set per tool call
+    by VaultResolutionMiddleware in multi-vault mode; the single configured
+    vault otherwise)."""
+
+    def __getattr__(self, name: str):
+        vault_name = get_config().resolve_vault_name()
+        return getattr(_indices[vault_name], name)
+
+
+def _identity_for_token(cfg, access_token: AccessToken | None) -> object:
+    """Find the Identity (config.Identity) matching a given AccessToken —
+    GitHub login if the token carries one (OAuth), else the API key itself
+    (client_id, see _APIKeyAuthProvider). Raises PermissionError if there's
+    no token or no VAULTS_CONFIG entry for it — never silently falls back
+    to some default vault for an identity nothing was configured for.
+
+    Split out from _resolve_identity() (which reads the token from FastMCP's
+    request context via get_access_token()) so callers that already have an
+    AccessToken in hand from doing their own manual verification — the
+    /attachments/* custom route, which bypasses FastMCP's normal auth
+    middleware entirely — can resolve an identity too, without needing
+    get_access_token() to work in a context it doesn't cover.
+    """
+    if access_token is None:
+        raise PermissionError("No authenticated identity available to resolve a vault for")
+
+    login = str((access_token.claims or {}).get("login", "")).lower()
+    candidates = [("github_login", login)] if login else []
+    candidates.append(("api_key", access_token.client_id))
+
+    for itype, value in candidates:
+        if not value:
+            continue
+        for identity in cfg.identities:
+            if identity.type == itype and identity.value == value:
+                return identity
+
+    raise PermissionError("This identity has no vault access configured in VAULTS_CONFIG")
+
+
+def _resolve_identity(cfg) -> object:
+    """_identity_for_token() using the current request's AccessToken from
+    FastMCP's own context (get_access_token()) — the normal case for
+    everything that goes through MCP tool-call/resource-read dispatch."""
+    return _identity_for_token(cfg, get_access_token())
+
+
+def _select_vault(identity, requested: str | None) -> str:
+    """Which vault an identity's call actually resolves to.
+
+    requested=None (no vault= argument given): the identity's configured
+    "default" — every identity has one automatically if it only has a
+    single allowed vault (see load_vaults_file); an identity with several
+    allowed vaults and no explicit "default" in VAULTS_CONFIG must pass
+    vault= explicitly, every single call, rather than have the server
+    silently guess which one it means.
+    requested=<name>: must be one of the identity's allowed vaults.
+    """
+    if requested is None:
+        if identity.default is None:
+            raise PermissionError(
+                f"This identity has access to multiple vaults ({identity.vaults}) and no "
+                "default is configured — pass vault=<name> explicitly on this call"
+            )
+        return identity.default
+    if requested not in identity.vaults:
+        raise PermissionError(f"This identity does not have access to vault {requested!r}")
+    return requested
+
+
+class VaultResolutionMiddleware(Middleware):
+    """In multi-vault mode, resolves which vault a tool call/resource read
+    operates on and sets the current-vault contextvar for its duration —
+    every tools/*.py function then transparently sees the right
+    get_config().vault_path/write_paths/exclude_paths/read_only and the
+    right VaultIndex (via _CurrentVaultIndex above), without any of them
+    needing to know multi-vault exists. A no-op pass-through in
+    single-vault mode (VAULTS_CONFIG unset).
+
+    Every @mcp.tool() has an optional `vault: str | None = None` parameter
+    (mechanical addition, not used by the tool bodies themselves — this
+    middleware is the only thing that reads it, from the raw call
+    arguments, before the tool function ever runs). Omit it to use the
+    calling identity's default vault; pass it to operate on a different one
+    of that identity's allowed vaults for just this one call. See
+    list_vaults_tool for discovering which vaults + which one is default
+    for the current identity. Resource reads (on_read_resource) have no
+    such parameter to read (ReadResourceRequestParams carries a uri, not
+    tool-style arguments) and always use the identity's default.
+
+    Not covered here: /health doesn't go through MCP tool-call dispatch, so
+    this middleware never runs for it — it stays scoped to
+    Config.default_vault_name regardless of which identity is calling (it
+    exposes no vault content, just liveness, so this doesn't leak anything).
+    /attachments/* is also a custom route rather than tool-call dispatch,
+    but does its own equivalent vault resolution by hand — see
+    attachment_route below — since it's the one HTTP route that genuinely
+    needs it.
+    """
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        cfg = get_config()
+        if not cfg.multi_vault:
+            return await call_next(context)
+
+        identity = _resolve_identity(cfg)
+        requested = None
+        arguments = getattr(context.message, "arguments", None)
+        if arguments:
+            requested = arguments.get("vault")
+        vault_name = _select_vault(identity, requested)
+
+        token = set_current_vault(vault_name)
+        try:
+            return await call_next(context)
+        finally:
+            reset_current_vault(token)
+
+    async def on_read_resource(self, context: MiddlewareContext, call_next):
+        cfg = get_config()
+        if not cfg.multi_vault:
+            return await call_next(context)
+
+        identity = _resolve_identity(cfg)
+        vault_name = _select_vault(identity, None)
+
+        token = set_current_vault(vault_name)
+        try:
+            return await call_next(context)
+        finally:
+            reset_current_vault(token)
+
+
+# Initialized in main() — empty at import time so the module can be imported
+# without VAULT_PATH/VAULTS_CONFIG set (e.g. during testing or linting).
 _cfg = None
-_index: VaultIndex | None = None
-_watcher = None
+_indices: dict[str, VaultIndex] = {}
+_watchers: dict[str, VaultWatcher] = {}
+_index = _CurrentVaultIndex()
 
 mcp = FastMCP(name="obsidian-mcp", instructions=_load_instructions(), auth=_build_auth())
+mcp.add_middleware(VaultResolutionMiddleware())
 
 
 # Gates which optional plugin-format and high-impact mutation tool groups get
@@ -536,14 +732,14 @@ def daily_note(date: str = "today") -> str:
 # ── Read ──────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def list_notes_tool(folder: str = "", include_meta: bool = False) -> list:
+def list_notes_tool(folder: str = "", include_meta: bool = False, vault: str | None = None) -> list:
     """List all Markdown notes in the vault (or a subfolder).
     Set include_meta=True to get title, tags, status, created per note."""
     return list_notes(folder, include_meta=include_meta)
 
 
 @mcp.tool()
-def read_note_tool(path: str) -> dict:
+def read_note_tool(path: str, vault: str | None = None) -> dict:
     """Read a note – returns content, frontmatter, tags, aliases, wikilinks,
     block_refs, callouts, and tasks."""
     return read_note(path)
@@ -558,6 +754,7 @@ def search_notes_tool(
     frontmatter_filter: dict | None = None,
     field: str | None = None,
     threshold: float = 0.8,
+    vault: str | None = None,
 ) -> list[dict]:
     """Full-text search with snippets and relevance ranking.
     mode: 'exact' (default) | 'regex' | 'fuzzy'. Returns [{path, score, snippets, tags}].
@@ -575,14 +772,14 @@ def search_notes_tool(
 
 
 @mcp.tool()
-def render_note_tool(path: str, depth: int = 1) -> str:
+def render_note_tool(path: str, depth: int = 1, vault: str | None = None) -> str:
     """Read a note with all ![[embed]] transclusions resolved inline.
     depth: 0=raw, 1=one level of embeds (default), 2=nested embeds."""
     return render_note(path, depth=depth)
 
 
 @mcp.tool()
-def get_note_outline_tool(path: str) -> dict:
+def get_note_outline_tool(path: str, vault: str | None = None) -> dict:
     """Return the structural map of a note without its body text.
     Returns {headings, block_refs, frontmatter_keys, tags, word_count, line_count}.
     Efficient for large notes where you only need structure."""
@@ -595,6 +792,7 @@ def find_similar_notes_tool(
     limit: int = 5,
     exclude_path: str | None = None,
     min_score: float = 0.1,
+    vault: str | None = None,
 ) -> list[dict]:
     """Find conceptually related notes even when the wording differs — for
     duplicate prevention before creating a new note ("does this topic
@@ -611,7 +809,7 @@ def find_similar_notes_tool(
 # ── Write ─────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def write_note_tool(path: str, content: str, dry_run: bool = False) -> dict:
+def write_note_tool(path: str, content: str, dry_run: bool = False, vault: str | None = None) -> dict:
     """Write (create or overwrite) a note. Respects READ_ONLY and WRITE_PATHS.
     If `content` has no frontmatter of its own and a note already exists at
     `path`, its existing frontmatter is preserved rather than dropped —
@@ -632,6 +830,7 @@ def patch_note_tool(
     new_content: str,
     mode: str = "replace",
     target_type: str = "heading",
+    vault: str | None = None,
 ) -> dict:
     """Edit a section or block reference inside a note.
     mode: 'replace' (default) | 'insert_before' | 'insert_after' | 'append'.
@@ -649,6 +848,7 @@ def patch_note_text_tool(
     mode: str = "exact",
     count: int = 1,
     dry_run: bool = False,
+    vault: str | None = None,
 ) -> dict:
     """Find and replace text anywhere in one note's body — no heading/block-ref
     anchor required, unlike patch_note_tool. Cheaper than write_note_tool for
@@ -663,7 +863,7 @@ def patch_note_text_tool(
     return result
 
 
-def delete_note_tool(path: str, trash: bool = True) -> dict:
+def delete_note_tool(path: str, trash: bool = True, vault: str | None = None) -> dict:
     """Delete a note from the vault.
     trash=True (default) moves it to .trash/ instead of permanent deletion."""
     result = delete_note(path, trash=trash, index=_index)
@@ -675,7 +875,7 @@ if _feature_flags.enable_delete:
     mcp.tool()(delete_note_tool)
 
 
-def restore_note_tool(trashed_name: str, to_path: str) -> dict:
+def restore_note_tool(trashed_name: str, to_path: str, vault: str | None = None) -> dict:
     """Restore a note previously moved to .trash/ (see list_trash_tool for names).
     to_path: where to put it back — the original folder can't be recovered
     from the trash entry alone, so you choose the destination.
@@ -695,6 +895,7 @@ def find_replace_in_vault_tool(
     mode: str = "exact",
     folder: str = "",
     dry_run: bool = True,
+    vault: str | None = None,
 ) -> dict:
     """Find and replace text across every note in the vault (or a subfolder).
     mode: 'exact' (default, literal substring) | 'regex'.
@@ -724,6 +925,7 @@ def append_to_note_tool(
     content: str,
     section: str | None = None,
     create: bool = True,
+    vault: str | None = None,
 ) -> dict:
     """Append content to a note without reading and rewriting the whole file.
     section: optional heading to append under. create=True creates the note if missing."""
@@ -738,6 +940,7 @@ def patch_frontmatter_tool(
     updates: dict,
     merge_arrays: bool = True,
     dry_run: bool = False,
+    vault: str | None = None,
 ) -> dict:
     """Update specific YAML frontmatter keys without touching the note body.
     merge_arrays=True merges list values (e.g. tags); False replaces them.
@@ -751,7 +954,7 @@ def patch_frontmatter_tool(
 
 
 @mcp.tool()
-def patch_frontmatter_batch_tool(updates: list[dict]) -> dict:
+def patch_frontmatter_batch_tool(updates: list[dict], vault: str | None = None) -> dict:
     """Patch frontmatter on multiple notes in one call.
     updates: list of {"path": str, "updates": dict, "merge_arrays": bool}
     (merge_arrays defaults to True per entry). One entry failing doesn't
@@ -767,6 +970,7 @@ def manage_tags_tool(
     path: str,
     add: list[str] | None = None,
     remove: list[str] | None = None,
+    vault: str | None = None,
 ) -> dict:
     """Add or remove tags on a note. Updates frontmatter tags array and strips
     inline #tag occurrences from the body. Returns {added, removed}."""
@@ -775,7 +979,7 @@ def manage_tags_tool(
     return result
 
 
-def move_note_tool(from_path: str, to_path: str) -> dict:
+def move_note_tool(from_path: str, to_path: str, vault: str | None = None) -> dict:
     """Rename or move a note. Automatically rewrites all wikilinks in the vault
     that reference the old path. Returns {from, to, updated_links_in}."""
     result = move_note(from_path, to_path, index=_index)
@@ -790,19 +994,19 @@ if _feature_flags.enable_move:
 # ── Query / Graph ─────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def get_backlinks_tool(path: str) -> list[str]:
+def get_backlinks_tool(path: str, vault: str | None = None) -> list[str]:
     """Return all notes that link to the given note (alias-aware)."""
     return get_backlinks(path, _index)
 
 
 @mcp.tool()
-def get_notes_by_tag_tool(tag: str) -> list[str]:
+def get_notes_by_tag_tool(tag: str, vault: str | None = None) -> list[str]:
     """Return all notes that have the given tag."""
     return get_notes_by_tag(tag, _index)
 
 
 @mcp.tool()
-def get_vault_conventions_tool() -> str:
+def get_vault_conventions_tool(vault: str | None = None) -> str:
     """Return the vault's AI instructions / conventions from _AI_INSTRUCTIONS.md."""
     return get_vault_conventions()
 
@@ -813,6 +1017,7 @@ def get_audit_log_tool(
     tool: str | None = None,
     since: str | None = None,
     limit: int = 50,
+    vault: str | None = None,
 ) -> list[dict]:
     """Query the append-only log of write-tool activity (who/what changed,
     not just the .trash/ state after the fact). Most recent first.
@@ -823,14 +1028,39 @@ def get_audit_log_tool(
 
 
 @mcp.tool()
-def get_note_history_tool(path: str, limit: int = 20) -> list[dict]:
+def get_note_history_tool(path: str, limit: int = 20, vault: str | None = None) -> list[dict]:
     """Audit-log entries for one specific note, most recent first —
     what changed and when, without needing to know which tool was used."""
     return get_note_history(path, limit=limit)
 
 
 @mcp.tool()
-def lint_schema_tool() -> dict:
+def list_vaults_tool() -> list[dict]:
+    """List the vault(s) the current identity (API key or GitHub login) may
+    access. Returns [{name, description, is_default}]. Call this at the
+    start of a session whenever more than one vault comes back — pass
+    vault=<name> on any other tool to operate on a non-default one for that
+    single call; omit it to use whichever entry has is_default=true. In
+    single-vault mode (no VAULTS_CONFIG) this always returns exactly one
+    entry with is_default=true — there's nothing to choose between."""
+    cfg = get_config()
+    if not cfg.multi_vault:
+        vault = cfg.vaults[cfg.default_vault_name]
+        return [{"name": vault.name, "description": vault.description, "is_default": True}]
+
+    identity = _resolve_identity(cfg)
+    return [
+        {
+            "name": name,
+            "description": cfg.vaults[name].description,
+            "is_default": name == identity.default,
+        }
+        for name in identity.vaults
+    ]
+
+
+@mcp.tool()
+def lint_schema_tool(vault: str | None = None) -> dict:
     """Validate every note's frontmatter against the enum fields declared in
     the vault's _AI_INSTRUCTIONS.md (under a "Frontmatter Schema" heading,
     e.g. `status: inbox | active | done | archived`). Returns
@@ -843,14 +1073,14 @@ def lint_schema_tool() -> dict:
 
 
 @mcp.tool()
-def get_broken_links_tool() -> list[dict]:
+def get_broken_links_tool(vault: str | None = None) -> list[dict]:
     """Find all wikilinks in the vault that point to non-existent notes.
     Returns [{source, link}]."""
     return get_broken_links(_index)
 
 
 @mcp.tool()
-def get_orphans_tool(exclude_folders: list[str] | None = None) -> list[str]:
+def get_orphans_tool(exclude_folders: list[str] | None = None, vault: str | None = None) -> list[str]:
     """Find notes that no other note links to.
     Excludes Journal and Templates by default."""
     return get_orphans(_index, exclude_folders=exclude_folders or ["Journal", "Templates"])
@@ -861,6 +1091,7 @@ def get_link_graph_tool(
     root: str,
     depth: int = 2,
     direction: str = "both",
+    vault: str | None = None,
 ) -> dict:
     """Return a traversable link graph starting from a note.
     direction: 'outgoing' | 'incoming' | 'both'.
@@ -869,20 +1100,20 @@ def get_link_graph_tool(
 
 
 @mcp.tool()
-def get_vault_stats_tool() -> dict:
+def get_vault_stats_tool(vault: str | None = None) -> dict:
     """Return vault statistics: note count, link count, orphans, broken links,
     most-linked notes."""
     return get_vault_stats(_index)
 
 
 @mcp.tool()
-def get_tag_tree_tool() -> dict:
+def get_tag_tree_tool(vault: str | None = None) -> dict:
     """Return all tags as a nested tree (e.g. konzept → python, ki → llm)."""
     return get_tag_tree(_index)
 
 
 @mcp.tool()
-def list_all_tags_tool(sort_by: str = "count") -> list[dict]:
+def list_all_tags_tool(sort_by: str = "count", vault: str | None = None) -> list[dict]:
     """Return all tags in the vault with note counts.
     sort_by: 'count' (descending, default) | 'name' (alphabetical).
     Returns [{tag, count}]."""
@@ -896,6 +1127,7 @@ def get_tasks_tool(
     tag: str | None = None,
     due_before: str | None = None,
     due_after: str | None = None,
+    vault: str | None = None,
 ) -> list[dict]:
     """Return tasks from across the vault.
     status: 'open' | 'done' | 'all'. Optionally filter by folder or tag.
@@ -908,7 +1140,7 @@ def get_tasks_tool(
 
 
 @mcp.tool()
-def get_daily_note_tool(date: str = "today") -> dict:
+def get_daily_note_tool(date: str = "today", vault: str | None = None) -> dict:
     """Read a daily note from Journal/.
     date: 'today' | 'yesterday' | 'YYYY-MM-DD'.
     Returns {path, exists, content, frontmatter, tasks}."""
@@ -916,7 +1148,7 @@ def get_daily_note_tool(date: str = "today") -> dict:
 
 
 @mcp.tool()
-def get_periodic_note_tool(period: str = "daily", date: str = "today") -> dict:
+def get_periodic_note_tool(period: str = "daily", date: str = "today", vault: str | None = None) -> dict:
     """Read or preview a periodic note.
     period: 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'yearly'.
     date: 'today' | 'yesterday' | 'YYYY-MM-DD'.
@@ -925,7 +1157,7 @@ def get_periodic_note_tool(period: str = "daily", date: str = "today") -> dict:
 
 
 @mcp.tool()
-def resolve_alias_tool(name: str) -> str | None:
+def resolve_alias_tool(name: str, vault: str | None = None) -> str | None:
     """Resolve a note alias or stem to its real vault path.
     Returns None if not found."""
     return resolve_alias(name, _index)
@@ -941,6 +1173,7 @@ def query_notes_tool(
     sort_desc: bool = False,
     limit: int = 50,
     folder: str = "",
+    vault: str | None = None,
 ) -> list[dict]:
     """Dataview-like query: filter notes by tags, status, frontmatter, or inline fields.
     tags: all must match (AND). sort_by: 'path'|'title'|'created'|'mtime'.
@@ -962,61 +1195,109 @@ def query_notes_tool(
 # ── Attachments ───────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def list_attachments_tool(folder: str = "") -> list[dict]:
+def list_attachments_tool(folder: str = "", vault: str | None = None) -> list[dict]:
     """List all non-Markdown files in the vault: images, PDFs, audio, etc.
     Returns [{path, size_bytes, mime_type, mtime}]."""
     return list_attachments(folder)
 
 
 @mcp.tool()
-def read_attachment_tool(path: str) -> dict:
+def read_attachment_tool(path: str, vault: str | None = None) -> dict:
     """Read an attachment file. Text files returned as UTF-8 string.
     Binary files (images, PDFs) returned as base64-encoded content with mime_type."""
     return read_attachment(path)
 
 
 @mcp.tool()
-def add_attachment_tool(path: str, content_base64: str) -> dict:
+def add_attachment_tool(path: str, content_base64: str, vault: str | None = None) -> dict:
     """Write a binary attachment (image, PDF, etc.) to the vault from base64-encoded content.
     Returns {path, status, size_bytes, mime_type}."""
     return add_attachment(path, content_base64)
 
 
 @mcp.tool()
-def create_attachment_token_tool(path: str, method: str = "PUT", expires_in: int = 300) -> dict:
+def create_attachment_token_tool(path: str, method: str = "PUT", expires_in: int = 300, vault: str | None = None) -> dict:
     """Create a short-lived, single-file upload/download token for the
     GET/PUT /attachments/{path} HTTP route, instead of handing out the
     server's master API_KEY. method: 'PUT' (upload) or 'GET' (download).
     expires_in: seconds until the token expires (default 300, max 3600).
 
-    Returns {path, method, expires_at, sig, url?}. If the server has
-    PUBLIC_BASE_URL configured, `url` is the ready-to-use request URL —
-    otherwise build it yourself as:
+    Returns {path, method, vault, expires_at, sig, url?}. If the server has
+    PUBLIC_BASE_URL configured, `url` is the ready-to-use request URL — use
+    it as-is, it already has everything this token needs (including
+    ?vault= when relevant) baked in. Otherwise build it yourself as:
         curl -X PUT --data-binary @file.png \\
-            "http://host:port/attachments/{path}?exp={expires_at}&sig={sig}"
-    The token only authorizes this exact path + method and stops working after expires_at."""
-    return create_attachment_token(path, method=method, expires_in=expires_in)
+            "http://host:port/attachments/{path}?exp={expires_at}&sig={sig}&vault={vault}"
+    (omit &vault=... only if the returned `vault` equals the server's
+    single/default vault — see list_vaults_tool). The token only authorizes
+    this exact path + method + vault and stops working after expires_at. In
+    multi-vault mode, requires an api_key identity — GitHub-OAuth identities
+    have no static secret of their own to sign with; use a plain
+    Authorization: Bearer request against /attachments/* instead (that path
+    works for any identity type, but needs ?vault=<name> added by hand if
+    targeting a non-default vault, since nothing was pre-signed for it)."""
+    cfg = get_config()
+    vault_name = cfg.resolve_vault_name()
+    if cfg.multi_vault:
+        identity = _resolve_identity(cfg)
+        if identity.type != "api_key":
+            raise PermissionError(
+                "Scoped attachment tokens require an api_key identity — this request "
+                "authenticated as a github_login, which has no static secret to sign "
+                "with. Use a plain 'Authorization: Bearer <token>' request against "
+                "/attachments/* instead."
+            )
+        signing_key = identity.value
+    else:
+        signing_key = cfg.api_key
+        if not signing_key:
+            raise ValueError("API_KEY is not configured on this server; attachment tokens require it")
+    return create_attachment_token(
+        path, signing_key=signing_key, vault=vault_name, method=method, expires_in=expires_in
+    )
 
 
-async def _check_bearer_token(request: Request, cfg) -> bool:
+async def _check_bearer_token(request: Request, cfg) -> AccessToken | None:
+    """Returns the AccessToken for a valid Authorization: Bearer header, or
+    None if missing/invalid. Manual verification, not FastMCP's own auth
+    middleware — this is a @mcp.custom_route, which bypasses that pipeline
+    entirely, so get_access_token() won't see anything for this request."""
     token = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
     if not token:
-        return False
+        return None
     if cfg.api_key and hmac.compare_digest(token, cfg.api_key):
-        return True
+        return AccessToken(token=token, client_id=cfg.api_key, scopes=[])
     if mcp.auth is not None:
-        return await mcp.auth.verify_token(token) is not None
-    return False
+        return await mcp.auth.verify_token(token)
+    return None
 
 
-def _check_scoped_token(request: Request, cfg, method: str, path: str) -> bool:
-    if not cfg.api_key:
-        return False
+def _check_scoped_token(request: Request, cfg, method: str, path: str) -> str | None:
+    """Returns the vault name a valid scoped token (?exp=&sig=[&vault=])
+    grants access to for this exact path+method, or None if missing/
+    invalid/expired. Tries every api_key identity's own value as the HMAC
+    signing key in multi-vault mode (there's no bearer header here to say
+    up front which identity minted it), or the single global API_KEY in
+    single-vault mode. A key matching the signature but not actually
+    allowed the requested vault is treated the same as no match."""
     exp = request.query_params.get("exp")
     sig = request.query_params.get("sig")
     if not exp or not sig:
-        return False
-    return verify_attachment_token(cfg.api_key, method, path, exp, sig)
+        return None
+    vault_param = request.query_params.get("vault", cfg.default_vault_name)
+
+    if cfg.multi_vault:
+        candidates = [(identity.value, identity) for identity in cfg.identities if identity.type == "api_key"]
+    else:
+        candidates = [(cfg.api_key, None)] if cfg.api_key else []
+
+    for signing_key, identity in candidates:
+        if not verify_attachment_token(signing_key, method, path, vault_param, exp, sig):
+            continue
+        if identity is not None and vault_param not in identity.vaults:
+            continue
+        return vault_param
+    return None
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -1024,17 +1305,20 @@ async def health_route(request: Request) -> Response:
     """Unauthenticated liveness/readiness check for Docker HEALTHCHECK,
     uptime monitors, etc. Returns no vault content, so no auth is required.
 
-    Returns {status: "starting"|"ok", index_ready}.
-    503 while the server hasn't finished VaultIndex._cfg/_index setup yet
-    (main() hasn't run), 200 once ready — index_ready itself may still be
-    False right after startup while the initial index build is in progress.
+    Returns {status: "starting"|"ok", index_ready}. In multi-vault mode,
+    index_ready is for Config.default_vault_name (the first configured vault)
+    because this unauthenticated route exposes no per-identity vault details.
+    503 while the server hasn't finished setup yet (main() hasn't run or
+    hasn't populated _indices yet), 200 once ready — index_ready itself may
+    still be False right after startup while the initial index build is in
+    progress.
     """
-    if _cfg is None or _index is None:
+    if _cfg is None or not _indices:
         return JSONResponse({"status": "starting"}, status_code=503)
     return JSONResponse(
         {
             "status": "ok",
-            "index_ready": _index.is_ready(),
+            "index_ready": _indices[_cfg.default_vault_name].is_ready(),
         }
     )
 
@@ -1057,67 +1341,93 @@ async def attachment_route(request: Request) -> Response:
             -H "Authorization: Bearer <API_KEY>" http://host:port/attachments/path/to/file.png
         curl -o file.png \\
             -H "Authorization: Bearer <API_KEY>" http://host:port/attachments/path/to/file.png
+
+    Multi-vault mode: this route doesn't go through VaultResolutionMiddleware
+    (it's a plain Starlette route, not MCP tool-call dispatch), so vault
+    resolution is done by hand here — a bearer token resolves to its
+    identity's default vault (override with ?vault=<name>, same rule as the
+    vault= tool argument: must be one of that identity's allowed vaults); a
+    scoped token from create_attachment_token_tool carries its vault baked
+    into the signature already.
     """
     cfg = get_config()
     path = request.path_params["path"]
-    # Authenticate before policy checks so callers cannot probe protected path
-    # boundaries through a 401-versus-403 difference.
-    authorized = await _check_bearer_token(request, cfg) or _check_scoped_token(
-        request, cfg, request.method, path
-    )
-    if not authorized:
+    method = request.method
+
+    # Authenticate and choose a vault before any path-policy check so callers
+    # cannot probe protected path boundaries through response differences.
+    vault_name: str | None = None
+    access_token = await _check_bearer_token(request, cfg)
+    if access_token is not None:
+        if cfg.multi_vault:
+            try:
+                identity = _identity_for_token(cfg, access_token)
+                requested = request.query_params.get("vault")
+                vault_name = _select_vault(identity, requested)
+            except PermissionError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=403)
+        else:
+            vault_name = cfg.default_vault_name
+    else:
+        vault_name = _check_scoped_token(request, cfg, method, path)
+
+    if vault_name is None:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    storage = VaultStorage.from_config(cfg)
+    context_token = set_current_vault(vault_name)
     try:
-        path = validate_attachment_path(path, write=request.method == "PUT")
-    except InvalidFileTypeError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    except (VaultPathError, ReadPermissionError, WritePermissionError):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-
-    if request.method == "GET":
+        storage = VaultStorage.from_config(cfg)
         try:
-            data = storage.read_bytes(path)
-        except FileNotFoundError:
-            return JSONResponse({"error": "Attachment not found"}, status_code=404)
-        mime, _ = mimetypes.guess_type(path)
-        return Response(data, media_type=mime or "application/octet-stream")
+            path = validate_attachment_path(path, write=method == "PUT")
+        except InvalidFileTypeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except (VaultPathError, ReadPermissionError, WritePermissionError):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
 
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
+        if method == "GET":
+            try:
+                data = storage.read_bytes(path)
+            except FileNotFoundError:
+                return JSONResponse({"error": "Attachment not found"}, status_code=404)
+            mime, _ = mimetypes.guess_type(path)
+            return Response(data, media_type=mime or "application/octet-stream")
+
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except ValueError:
+                return JSONResponse({"error": "Invalid Content-Length"}, status_code=400)
+            if declared_length < 0:
+                return JSONResponse({"error": "Invalid Content-Length"}, status_code=400)
+            if declared_length > cfg.max_attachment_bytes:
+                return JSONResponse({"error": "Attachment too large"}, status_code=413)
+
+        chunks: list[bytes] = []
+        received = 0
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > cfg.max_attachment_bytes:
+                return JSONResponse({"error": "Attachment too large"}, status_code=413)
+            chunks.append(chunk)
+        data = b"".join(chunks)
         try:
-            declared_length = int(content_length)
-        except ValueError:
-            return JSONResponse({"error": "Invalid Content-Length"}, status_code=400)
-        if declared_length < 0:
-            return JSONResponse({"error": "Invalid Content-Length"}, status_code=400)
-        if declared_length > cfg.max_attachment_bytes:
-            return JSONResponse({"error": "Attachment too large"}, status_code=413)
-
-    chunks: list[bytes] = []
-    received = 0
-    async for chunk in request.stream():
-        received += len(chunk)
-        if received > cfg.max_attachment_bytes:
-            return JSONResponse({"error": "Attachment too large"}, status_code=413)
-        chunks.append(chunk)
-    data = b"".join(chunks)
-    try:
-        result = write_attachment_bytes(path, data)
-    except AttachmentTooLargeError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=413)
-    except (ValueError, InvalidFileTypeError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    except (VaultPathError, WritePermissionError):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    return JSONResponse(result)
+            result = write_attachment_bytes(path, data)
+        except AttachmentTooLargeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=413)
+        except (ValueError, InvalidFileTypeError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except (VaultPathError, WritePermissionError):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        return JSONResponse(result)
+    finally:
+        reset_current_vault(context_token)
 
 
 # ── Templates ─────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def list_templates_tool() -> list[str]:
+def list_templates_tool(vault: str | None = None) -> list[str]:
     """List all template files in the Templates/ folder."""
     return list_templates()
 
@@ -1127,6 +1437,7 @@ def create_from_template_tool(
     template_path: str,
     output_path: str,
     variables: dict | None = None,
+    vault: str | None = None,
 ) -> dict:
     """Render a template and write it as a new note.
     Built-in variables: {{date}}, {{time}}, {{title}}, {{week}}, {{month}}, {{year}}, {{weekday}}.
@@ -1141,12 +1452,12 @@ def create_from_template_tool(
 if _feature_flags.enable_canvas:
 
     @mcp.tool()
-    def list_canvases_tool() -> list[str]:
+    def list_canvases_tool(vault: str | None = None) -> list[str]:
         """List all Obsidian Canvas (.canvas) files in the vault."""
         return list_canvases()
 
     @mcp.tool()
-    def read_canvas_tool(path: str) -> dict:
+    def read_canvas_tool(path: str, vault: str | None = None) -> dict:
         """Read an Obsidian Canvas file.
         Returns {path, nodes: [{id, type, text, file, x, y}], edges: [{from, to, label}]}."""
         return read_canvas(path)
@@ -1156,6 +1467,7 @@ if _feature_flags.enable_canvas:
         path: str,
         nodes: list[dict] | None = None,
         edges: list[dict] | None = None,
+        vault: str | None = None,
     ) -> dict:
         """Create or fully overwrite an Obsidian Canvas file.
         Node fields: type ('text'|'file'|'group'|'link'), x, y, width, height.
@@ -1172,6 +1484,7 @@ if _feature_flags.enable_canvas:
         delete_node_ids: list[str] | None = None,
         add_edges: list[dict] | None = None,
         delete_edge_ids: list[str] | None = None,
+        vault: str | None = None,
     ) -> dict:
         """Atomically update an existing canvas without rewriting the whole file.
         update_nodes: each dict must include 'id'. delete_node_ids also removes
@@ -1191,12 +1504,12 @@ if _feature_flags.enable_canvas:
 if _feature_flags.enable_excalidraw:
 
     @mcp.tool()
-    def list_excalidraw_tool() -> list[str]:
+    def list_excalidraw_tool(vault: str | None = None) -> list[str]:
         """List all Obsidian Excalidraw (*.excalidraw.md) files in the vault."""
         return list_excalidraw()
 
     @mcp.tool()
-    def read_excalidraw_tool(path: str) -> dict:
+    def read_excalidraw_tool(path: str, vault: str | None = None) -> dict:
         """Read an Obsidian Excalidraw file.
         Returns {path, elements, app_state, files}."""
         return read_excalidraw(path)
@@ -1206,6 +1519,7 @@ if _feature_flags.enable_excalidraw:
         path: str,
         elements: list[dict] | None = None,
         app_state: dict | None = None,
+        vault: str | None = None,
     ) -> dict:
         """Create or fully overwrite an Excalidraw file.
         Element fields: type ('rectangle'|'ellipse'|'text'|'arrow'|'freedraw'|...), x, y,
@@ -1219,6 +1533,7 @@ if _feature_flags.enable_excalidraw:
         add_elements: list[dict] | None = None,
         update_elements: list[dict] | None = None,
         delete_element_ids: list[str] | None = None,
+        vault: str | None = None,
     ) -> dict:
         """Atomically update an existing Excalidraw file without rewriting the whole file.
         update_elements: each dict must include 'id'.
@@ -1237,13 +1552,13 @@ if _feature_flags.enable_excalidraw:
 if _feature_flags.enable_kanban:
 
     @mcp.tool()
-    def read_kanban_tool(path: str) -> dict:
+    def read_kanban_tool(path: str, vault: str | None = None) -> dict:
         """Read an Obsidian Kanban board (requires kanban-plugin in frontmatter).
         Returns {path, plugin, columns: [{name, cards: [{text, done}]}], total_cards}."""
         return read_kanban(path)
 
     @mcp.tool()
-    def create_kanban_board_tool(path: str, columns: list[str]) -> dict:
+    def create_kanban_board_tool(path: str, columns: list[str], vault: str | None = None) -> dict:
         """Create a new Kanban board with the given column names.
         Returns {path, status, columns}."""
         return create_kanban_board(path, columns, index=_index)
@@ -1254,6 +1569,7 @@ if _feature_flags.enable_kanban:
         column: str,
         text: str,
         done: bool = False,
+        vault: str | None = None,
     ) -> dict:
         """Add a card to a Kanban column. Card is inserted at the top of the column.
         Returns {path, status, column, card, done}."""
@@ -1266,6 +1582,7 @@ if _feature_flags.enable_kanban:
         from_column: str,
         to_column: str,
         done: bool | None = None,
+        vault: str | None = None,
     ) -> dict:
         """Move a card from one column to another. done=true/false updates the tick state.
         Returns {path, status, card, from, to}."""
@@ -1276,6 +1593,7 @@ if _feature_flags.enable_kanban:
         path: str,
         card_text: str,
         column: str | None = None,
+        vault: str | None = None,
     ) -> dict:
         """Delete a card from the Kanban board. column limits the search to one column.
         Returns {path, status, card}."""
@@ -1287,12 +1605,12 @@ if _feature_flags.enable_kanban:
 if _feature_flags.enable_bases:
 
     @mcp.tool()
-    def list_bases_tool() -> list[str]:
+    def list_bases_tool(vault: str | None = None) -> list[str]:
         """List all Obsidian Bases (.base) files in the vault."""
         return list_bases()
 
     @mcp.tool()
-    def read_base_tool(path: str) -> dict:
+    def read_base_tool(path: str, vault: str | None = None) -> dict:
         """Read an Obsidian Bases file.
         Returns {path, filters, formulas, properties, views}."""
         return read_base(path)
@@ -1304,6 +1622,7 @@ if _feature_flags.enable_bases:
         formulas: dict | None = None,
         properties: dict | None = None,
         views: list[dict] | None = None,
+        vault: str | None = None,
     ) -> dict:
         """Create or fully overwrite a .base file.
         filters: boolean tree ({and:[...]}, {or:[...]}, {not:...}) or a single
@@ -1326,6 +1645,7 @@ if _feature_flags.enable_bases:
         add_views: list[dict] | None = None,
         update_views: list[dict] | None = None,
         delete_view_names: list[str] | None = None,
+        vault: str | None = None,
     ) -> dict:
         """Atomically update an existing .base file without rewriting it wholesale.
         update_formulas/update_properties are merged by key. set_filters replaces
@@ -1348,7 +1668,7 @@ if _feature_flags.enable_bases:
 # ── Folders ───────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def list_folder_tool(path: str = "", recursive: bool = False, max_depth: int | None = None) -> dict:
+def list_folder_tool(path: str = "", recursive: bool = False, max_depth: int | None = None, vault: str | None = None) -> dict:
     """List the contents of a vault folder (non-hidden items only).
     path='': root of the vault.
     recursive=False (default): immediate contents only — {path, folders, files}.
@@ -1358,7 +1678,7 @@ def list_folder_tool(path: str = "", recursive: bool = False, max_depth: int | N
 
 
 @mcp.tool()
-def list_files_tool(folder: str = "", extension: str | None = None) -> list[str]:
+def list_files_tool(folder: str = "", extension: str | None = None, vault: str | None = None) -> list[str]:
     """List every file in the vault (or a subfolder), any type — not just
     notes/attachments/bases/canvases (e.g. .lock files, stray non-Markdown
     files). extension filters by suffix without the dot (e.g. "lock",
@@ -1367,7 +1687,7 @@ def list_files_tool(folder: str = "", extension: str | None = None) -> list[str]
 
 
 @mcp.tool()
-def create_folder_tool(path: str) -> dict:
+def create_folder_tool(path: str, vault: str | None = None) -> dict:
     """Create a folder (and any missing parents) in the vault.
     Returns {path, status}."""
     result = create_folder(path)
@@ -1375,7 +1695,7 @@ def create_folder_tool(path: str) -> dict:
     return result
 
 
-def delete_folder_tool(path: str, trash: bool = True) -> dict:
+def delete_folder_tool(path: str, trash: bool = True, vault: str | None = None) -> dict:
     """Delete a vault folder.
     trash=True (default) moves it to .trash/ instead of permanent deletion.
     Returns {path, status, trash}."""
@@ -1388,7 +1708,7 @@ if _feature_flags.enable_delete:
     mcp.tool()(delete_folder_tool)
 
 
-def rename_folder_tool(from_path: str, to_path: str) -> dict:
+def rename_folder_tool(from_path: str, to_path: str, vault: str | None = None) -> dict:
     """Rename or move a vault folder. Rewrites path-based wikilinks in all
     notes that reference notes inside the moved folder.
     Returns {from, to, notes_moved, updated_links_in}."""
@@ -1401,7 +1721,7 @@ if _feature_flags.enable_folder_rename:
     mcp.tool()(rename_folder_tool)
 
 
-def list_trash_tool() -> dict:
+def list_trash_tool(vault: str | None = None) -> dict:
     """List items sitting in .trash/ (from delete_note_tool/delete_folder_tool
     with trash=True). Names here are what restore_note_tool/restore_folder_tool
     expect as trashed_name.
@@ -1413,7 +1733,7 @@ if _feature_flags.enable_delete:
     mcp.tool()(list_trash_tool)
 
 
-def restore_folder_tool(trashed_name: str, to_path: str) -> dict:
+def restore_folder_tool(trashed_name: str, to_path: str, vault: str | None = None) -> dict:
     """Restore a folder previously moved to .trash/ (see list_trash_tool for names).
     to_path: where to put it back — the original parent path can't be
     recovered from the trash entry alone, so you choose the destination.
@@ -1453,13 +1773,22 @@ def vault_tags_resource() -> list:
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global _cfg, _index, _watcher
+    global _cfg
     _cfg = get_config()
-    policy = VaultAccessPolicy.from_config(_cfg)
-    _index = VaultIndex(_cfg.vault_path, exclude_paths=_cfg.exclude_paths, policy=policy)
-    _watcher = VaultWatcher(_cfg.vault_path, policy=policy)
-    threading.Thread(target=_index.build, daemon=True).start()
-    _watcher.start(on_change=_index.update)
+    for name, vault in _cfg.vaults.items():
+        context_token = set_current_vault(name)
+        try:
+            policy = VaultAccessPolicy.from_config(_cfg)
+        finally:
+            reset_current_vault(context_token)
+        index = VaultIndex(vault.path, exclude_paths=vault.exclude_paths, policy=policy)
+        watcher = VaultWatcher(vault.path, policy=policy)
+        _indices[name] = index
+        _watchers[name] = watcher
+        threading.Thread(target=index.build, daemon=True).start()
+        watcher.start(on_change=index.update)
+    if _cfg.multi_vault:
+        logger.info("Multi-vault mode: %d vault(s) configured (%s)", len(_cfg.vaults), ", ".join(_cfg.vaults))
     if _cfg.transport == "stdio":
         logger.info("Starting obsidian-mcp (transport=stdio)")
         mcp.run(transport=_cfg.transport)
