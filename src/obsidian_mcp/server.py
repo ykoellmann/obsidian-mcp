@@ -392,6 +392,11 @@ def _load_instructions() -> str:
         # Importing the module before the process environment is configured
         # is supported (tests, tooling, and FastMCP discovery).
         return _DEFAULT_INSTRUCTIONS
+    if cfg.multi_vault:
+        # FastMCP exposes server instructions before request middleware has
+        # authenticated an identity and selected one of its allowed vaults.
+        # Per-vault conventions remain available through the authorized tool.
+        return _DEFAULT_INSTRUCTIONS
     try:
         vault = VaultStorage.from_config(cfg).read_text("_AI_INSTRUCTIONS.md")
     except (FileNotFoundError, PermissionError, VaultPathError, OSError):
