@@ -110,6 +110,11 @@ If it doesn't exist, explore the vault with `list_folder_tool()` and `list_notes
 to understand the structure before writing anything.
 Always use `search_notes_tool` or `query_notes_tool` before creating notes to avoid duplicates.
 
+Obsidian uses the **filename** (without `.md`) as the note title in the UI, graph,
+and default wikilink text. Do **not** start a note with a level-1 heading that
+repeats the filename. Put the first heading at `##` or below only if the body
+needs structure; many notes need no heading at all.
+
 ## Tool Reference
 
 ### Reading & Search
@@ -361,11 +366,16 @@ def _load_instructions() -> str:
         # is supported (tests, tooling, and FastMCP discovery).
         return _DEFAULT_INSTRUCTIONS
     try:
-        return VaultStorage.from_config(cfg).read_text("_AI_INSTRUCTIONS.md")
+        vault = VaultStorage.from_config(cfg).read_text("_AI_INSTRUCTIONS.md")
     except (FileNotFoundError, PermissionError, VaultPathError, OSError):
         # Missing or unreadable optional instructions do not prevent startup;
         # descriptor/policy failures are not converted into unrestricted I/O.
         return _DEFAULT_INSTRUCTIONS
+    return (
+        _DEFAULT_INSTRUCTIONS
+        + "\n\n# Vault-specific instructions (_AI_INSTRUCTIONS.md)\n\n"
+        + vault
+    )
 
 
 class _APIKeyAuthProvider(TokenVerifier):
@@ -432,6 +442,8 @@ def _build_auth() -> AuthProvider | None:
             client_id=client_id,
             client_secret=client_secret,
             base_url=base_url,
+            # Otherwise every MCP request waits on GitHub /user and /user/repos.
+            cache_ttl_seconds=300,
         )
         # Relies on OAuthProxy's private _token_validator attribute — the only
         # hook that runs at token-exchange time, before an allowlist check
