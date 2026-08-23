@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 
-from .storage.policy import VaultPathError, path_rules_from_env
+from .storage.policy import VaultPathError, normalise_path_rules, path_rules_from_env
 
 
 class ConfigError(Exception):
@@ -26,7 +26,7 @@ class ConfigError(Exception):
 
 
 def _path_rules(value: object, *, name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
-    """Normalize JSON path rules with the same parser used for env vars."""
+    """Normalize JSON path rules without comma-delimited env parsing."""
     if value is None:
         values = list(default)
     elif isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
@@ -34,7 +34,7 @@ def _path_rules(value: object, *, name: str, default: tuple[str, ...] = ()) -> t
     else:
         raise ConfigError(f"{name} must be a list of strings")
     try:
-        return tuple(path_rules_from_env(",".join(values), name=name))
+        return normalise_path_rules(values, name=name)
     except VaultPathError as exc:
         raise ConfigError(str(exc)) from exc
 

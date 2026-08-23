@@ -8,12 +8,15 @@ import pytest
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.middleware import MiddlewareContext
 
+import obsidian_mcp.config as cfg_mod
 from obsidian_mcp import server as server_mod
 from obsidian_mcp.config import Config
 from obsidian_mcp.server import (
+    _DEFAULT_INSTRUCTIONS,
     VaultResolutionMiddleware,
     _APIKeyAuthProvider,
     _identities_from_env,
+    _load_instructions,
     _resolve_identity,
     _select_vault,
     list_vaults_tool,
@@ -67,6 +70,24 @@ def test_identities_from_env_bad_vaults_config_returns_empty(tmp_path, monkeypat
     monkeypatch.setenv("VAULTS_CONFIG", str(tmp_path / "nonexistent.json"))
 
     assert _identities_from_env() == ([], [])
+
+
+def test_shared_server_instructions_do_not_expose_default_vault_conventions(
+    tmp_path, monkeypatch
+):
+    config_path = _write_vaults_config(tmp_path)
+    (tmp_path / "a" / "_AI_INSTRUCTIONS.md").write_text(
+        "private default-vault instructions", encoding="utf-8"
+    )
+    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
+    monkeypatch.setenv("TRANSPORT", "sse")
+    monkeypatch.delenv("VAULT_PATH", raising=False)
+    monkeypatch.setattr(cfg_mod, "_config", None)
+
+    instructions = _load_instructions()
+
+    assert instructions == _DEFAULT_INSTRUCTIONS
+    assert "private default-vault instructions" not in instructions
 
 
 # ── _APIKeyAuthProvider (multi-key) ─────────────────────────────────────────

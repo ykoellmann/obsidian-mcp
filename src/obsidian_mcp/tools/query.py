@@ -272,11 +272,17 @@ def get_periodic_note(index: VaultIndex, period: str = "daily", date_str: str = 
             "content": content, "frontmatter": {}, "tasks": []}
 
 
+def _membership(actual, expected, *, negate: bool) -> bool:
+    if not isinstance(expected, (list, tuple, set, frozenset)):
+        raise ValueError("frontmatter_filter '$in'/'$nin' requires a list value")
+    return (actual not in expected) if negate else (actual in expected)
+
+
 _FM_OPERATORS = {
     "$ne": lambda actual, expected: actual != expected,
     "$eq": lambda actual, expected: actual == expected,
-    "$in": lambda actual, expected: actual in expected,
-    "$nin": lambda actual, expected: actual not in expected,
+    "$in": lambda actual, expected: _membership(actual, expected, negate=False),
+    "$nin": lambda actual, expected: _membership(actual, expected, negate=True),
     "$exists": lambda actual, expected: (actual is not None) == bool(expected),
 }
 

@@ -284,10 +284,15 @@ To run it weekly via cron against the running container:
 ```cron
 # crontab -e (on the Docker host)
 0 6 * * 1 docker exec obsidian-mcp-obsidian-mcp-1 \
-  env VAULT_PATH=/vault HEALTH_CHECK_INBOX=00-Inbox python scripts/health_check.py
+  env VAULT_PATH=/vault READ_ONLY=false WRITE_PATHS=00-Inbox/ \
+  HEALTH_CHECK_INBOX=00-Inbox python scripts/health_check.py
 ```
 
-Swap the container name for whatever `docker compose ps` shows, and `HEALTH_CHECK_INBOX` for your vault's actual inbox folder (default `Inbox`).
+Swap the container name for whatever `docker compose ps` shows, and set both
+`HEALTH_CHECK_INBOX` and `WRITE_PATHS` to your vault's actual inbox folder
+(default `Inbox`). The command must have write access because it creates a
+report when violations are found. With the home-server profile, choose an
+inbox inside one of its writable nested mounts (for example `AI-Output/`).
 
 ## Remote Setup (Recommended)
 
@@ -489,7 +494,7 @@ The server loads this file at startup and sends it to the AI as system instructi
 |---|---|
 | **Read** | `list_notes`, `read_note`, `search_notes`, `render_note`, `get_note_outline` |
 | **Write** | `write_note`, `patch_note`, `delete_note`*, `restore_note`*, `append_to_note`, `patch_frontmatter`, `manage_tags`, `move_note`, `find_replace_in_vault` |
-| **Folders** | `list_folder`, `create_folder`, `delete_folder`*, `restore_folder`*, `rename_folder`, `list_trash` |
+| **Folders** | `list_folder`, `create_folder`, `delete_folder`*, `restore_folder`*, `rename_folder`, `list_trash`* |
 | **Query** | `query_notes`, `get_backlinks`, `get_broken_links`, `get_orphans`, `get_link_graph`, `get_vault_stats`, `get_tasks`, `resolve_alias` |
 | **Tags** | `get_notes_by_tag`, `get_tag_tree`, `list_all_tags` |
 | **Periodic** | `get_daily_note`, `get_periodic_note` |
@@ -500,7 +505,7 @@ The server loads this file at startup and sends it to the AI as system instructi
 | **Attachments** | `list_attachments`, `read_attachment`, `add_attachment` |
 | **Templates** | `list_templates`, `create_from_template` |
 
-\* Delete and restore tools are registered only when `ENABLE_DELETE=true`.
+\* Delete, restore, and trash-listing tools are registered only when `ENABLE_DELETE=true`.
 
 Canvas, Excalidraw, Kanban, and Bases are each opt-in (see [Optional plugin-format tools](#optional-plugin-format-tools-canvas--excalidraw--kanban--bases) above) — their tools only appear once the matching `ENABLE_*` flag is set.
 
