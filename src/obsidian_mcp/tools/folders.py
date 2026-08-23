@@ -84,20 +84,81 @@ def restore_folder(trashed_name: str, to_path: str, index: VaultIndex | None = N
     return {"path": restored.relative, "status": "restored", "notes_restored": notes_restored}
 
 
-def list_folder(path: str = "") -> dict:
+def list_folder(
+    path: str = "", recursive: bool = False, max_depth: int | None = None
+) -> dict:
+    """List immediate folder contents or a recursively nested tree."""
     storage = _storage()
     target = storage.resolve_read(path, allow_empty=True)
+    if target.relative:
+        if not storage.exists(target.relative, read=True):
+            raise FileNotFoundError(f"Folder not found: {path!r}")
+        if not stat.S_ISDIR(storage.stat(target.relative).st_mode):
+            raise ValueError(f"Not a folder: {path!r}")
+    if recursive:
+        return {
+            "path": target.relative or "/",
+            "tree": _build_tree(
+                storage, target.relative, depth=1, max_depth=max_depth
+            ),
+        }
     folders: list[str] = []
     files: list[str] = []
-    try:
-        entries = storage.list_dir(target.relative)
-    except NotADirectoryError as exc:
-        raise ValueError(f"Not a folder: {path!r}") from exc
-    for entry in entries:
+    for entry in storage.list_dir(target.relative):
         if entry.name.startswith("."):
             continue
         (folders if entry.is_dir else files).append(entry.relative)
     return {"path": target.relative or "/", "folders": folders, "files": files}
+
+
+def _build_tree(
+    storage: VaultStorage,
+    path: str,
+    depth: int,
+    max_depth: int | None,
+) -> dict:
+    """Build a policy-filtered recursive folder tree."""
+    folders: dict[str, dict] = {}
+    files: list[str] = []
+    for entry in storage.list_dir(path):
+        if entry.name.startswith("."):
+            continue
+        if entry.is_dir:
+            if max_depth is not None and depth >= max_depth:
+                folders[entry.name] = {"folders": {}, "files": []}
+            else:
+                folders[entry.name] = _build_tree(
+                    storage, entry.relative, depth + 1, max_depth
+                )
+        else:
+            files.append(entry.relative)
+    return {"folders": folders, "files": files}
+
+
+def list_files(folder: str = "", extension: str | None = None) -> list[str]:
+    """List every file in the vault (or a subfolder), any type — not just
+    notes/attachments/bases/canvases. extension filters by suffix without
+    the dot (e.g. "lock" to find .lock files, "canvas", "base"); omit for
+    everything. Hidden files/folders (dotfiles, .trash/) are skipped, same
+    as list_folder_tool."""
+    storage = _storage()
+    base = storage.resolve_read(folder, allow_empty=True)
+    if base.relative:
+        if not storage.exists(base.relative, read=True):
+            raise FileNotFoundError(f"Folder not found: {folder!r}")
+        if not stat.S_ISDIR(storage.stat(base.relative).st_mode):
+            raise ValueError(f"Not a folder: {folder!r}")
+
+    suffix = f".{extension.lstrip('.')}" if extension else None
+    results: list[str] = []
+    for item in storage.list_files(base.relative):
+        if any(part.startswith(".") for part in item.relative.split("/")):
+            continue
+        if suffix and not item.relative.endswith(suffix):
+            continue
+        results.append(item.relative)
+
+    return sorted(results)
 
 
 def rename_folder(

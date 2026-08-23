@@ -272,6 +272,38 @@ def get_periodic_note(index: VaultIndex, period: str = "daily", date_str: str = 
             "content": content, "frontmatter": {}, "tasks": []}
 
 
+_FM_OPERATORS = {
+    "$ne": lambda actual, expected: actual != expected,
+    "$eq": lambda actual, expected: actual == expected,
+    "$in": lambda actual, expected: actual in expected,
+    "$nin": lambda actual, expected: actual not in expected,
+    "$exists": lambda actual, expected: (actual is not None) == bool(expected),
+}
+
+
+def matches_frontmatter_filter(frontmatter: dict, frontmatter_filter: dict) -> bool:
+    """Check a note's frontmatter against a filter dict.
+
+    Each value is either a plain value (exact match, backward compatible)
+    or an operator dict like {"$ne": "done"}, {"$nin": [...]}, or
+    {"$exists": True} ("$exists": False matches a missing/None field).
+    Multiple operators on the same field are all required to hold (AND).
+    """
+    for key, expected in frontmatter_filter.items():
+        actual = frontmatter.get(key)
+        if isinstance(expected, dict) and expected and all(k.startswith("$") for k in expected):
+            for op, op_value in expected.items():
+                fn = _FM_OPERATORS.get(op)
+                if fn is None:
+                    raise ValueError(f"Unknown frontmatter_filter operator: {op!r}")
+                if not fn(actual, op_value):
+                    return False
+        else:
+            if actual != expected:
+                return False
+    return True
+
+
 def query_notes(
     index: VaultIndex,
     tags: list[str] | None = None,
@@ -284,11 +316,17 @@ def query_notes(
     folder: str = "",
 ) -> list[dict]:
     """Filter notes by tags, status, or arbitrary frontmatter fields.
-    sort_by: 'path' | 'title' | 'created' | 'mtime'."""
+    sort_by: 'path' | 'title' | 'created' | 'mtime'.
+    frontmatter_filter values may be a plain value (exact match) or an
+    operator dict: {"$ne": v}, {"$eq": v}, {"$in": [...]}, {"$nin": [...]},
+    {"$exists": True|False}."""
     cfg = get_config()
     storage = VaultStorage.from_config(cfg)
     all_notes = index.get_all_notes()
     results: list[dict] = []
+
+    if frontmatter_filter:
+        matches_frontmatter_filter({}, frontmatter_filter)  # validate operators up front
 
     for note_path in sorted(all_notes):
         if folder and not note_path.startswith(folder.rstrip("/") + "/"):
@@ -303,9 +341,7 @@ def query_notes(
             if status is not None and note_status != status:
                 continue
 
-            if frontmatter_filter and not all(
-                note.frontmatter.get(k) == v for k, v in frontmatter_filter.items()
-            ):
+            if frontmatter_filter and not matches_frontmatter_filter(note.frontmatter, frontmatter_filter):
                 continue
 
             if inline_field_filter and not all(

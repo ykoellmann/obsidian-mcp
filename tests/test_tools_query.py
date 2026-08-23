@@ -315,6 +315,44 @@ def test_query_notes_frontmatter_filter(vault_factory):
     assert results[0]["path"] == "a.md"
 
 
+def test_query_notes_frontmatter_filter_ne(vault_factory):
+    idx = vault_factory({
+        "a.md": "---\nstatus: active\n---\n",
+        "b.md": "---\nstatus: done\n---\n",
+    })
+    results = query_notes(idx, frontmatter_filter={"status": {"$ne": "done"}})
+    assert [r["path"] for r in results] == ["a.md"]
+
+
+def test_query_notes_frontmatter_filter_nin(vault_factory):
+    idx = vault_factory({
+        "a.md": "---\nstatus: in-progress\n---\n",
+        "b.md": "---\nstatus: active\n---\n",
+    })
+    results = query_notes(
+        idx, frontmatter_filter={"status": {"$nin": ["inbox", "active", "done", "archived"]}}
+    )
+    assert [r["path"] for r in results] == ["a.md"]
+
+
+def test_query_notes_frontmatter_filter_exists(vault_factory):
+    idx = vault_factory({
+        "a.md": "---\ndue: 2026-08-20\n---\n",
+        "b.md": "---\nstatus: active\n---\n",
+    })
+    results = query_notes(idx, frontmatter_filter={"due": {"$exists": True}})
+    assert [r["path"] for r in results] == ["a.md"]
+
+    results = query_notes(idx, frontmatter_filter={"due": {"$exists": False}})
+    assert [r["path"] for r in results] == ["b.md"]
+
+
+def test_query_notes_frontmatter_filter_unknown_operator_raises(vault_factory):
+    idx = vault_factory({"a.md": "---\nstatus: active\n---\n"})
+    with pytest.raises(ValueError, match="Unknown frontmatter_filter operator"):
+        query_notes(idx, frontmatter_filter={"status": {"$bogus": "x"}})
+
+
 def test_query_notes_sort_by_title(vault_factory):
     idx = vault_factory({
         "z.md": "---\ntitle: Zebra\n---\n",
