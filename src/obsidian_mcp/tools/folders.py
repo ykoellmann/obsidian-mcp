@@ -35,13 +35,14 @@ def delete_folder(path: str, trash: bool = True) -> dict:
         raise FileNotFoundError(f"Folder not found: {path!r}")
     if not stat.S_ISDIR(storage.stat(target.relative, read=False).st_mode):
         raise ValueError(f"Not a folder: {path!r}")
+    authorization = storage.authorize_tree(target.relative, permanent=not trash)
     cfg = get_config()
     lock = acquire_lock(target.relative, lock_path=cfg.lock_path)
     try:
         if trash:
-            storage.trash(target.relative)
+            storage.trash(target.relative, authorization=authorization)
         else:
-            storage.delete(target.relative)
+            storage.delete(target.relative, authorization=authorization)
     finally:
         lock.release()
     return {"path": target.relative, "status": "deleted", "trash": trash}
@@ -179,8 +180,8 @@ def rename_folder(
     if storage.exists(destination.relative, read=False):
         raise FileExistsError(f"Target already exists: {to_path!r}")
 
-    source_paths = storage.authorize_tree(from_path, destination=to_path)
-    notes_inside = [rel for rel in source_paths if rel.lower().endswith(".md")]
+    authorization = storage.authorize_tree(from_path, destination=to_path)
+    notes_inside = [rel for rel in authorization.paths if rel.lower().endswith(".md")]
     from_prefix = from_path.rstrip("/")
     to_prefix = to_path.rstrip("/")
     link_re = re.compile(
@@ -214,7 +215,7 @@ def rename_folder(
             )
             storage.write_text_atomic(rel, rewritten)
             updated_files.append(rel)
-        storage.move(from_path, to_path)
+        storage.move(from_path, to_path, authorization=authorization)
     finally:
         for lock in reversed(locks):
             lock.release()

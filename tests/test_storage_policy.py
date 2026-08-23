@@ -95,6 +95,23 @@ def test_list_files_authorizes_once_and_carries_scandir_stat(tmp_path, monkeypat
     assert discovered[0].stat_result.st_ino == note.stat().st_ino
 
 
+def test_authorized_delete_plan_avoids_second_tree_walk(tmp_path, monkeypatch):
+    (tmp_path / "folder").mkdir()
+    (tmp_path / "folder" / "note.md").write_text("note")
+    storage = VaultStorage(
+        VaultAccessPolicy(tmp_path, allow_permanent_delete=True)
+    )
+    authorization = storage.authorize_tree("folder", permanent=True)
+
+    def unexpected_second_walk(*args, **kwargs):
+        raise AssertionError("authorized tree must not be walked again")
+
+    monkeypatch.setattr(storage, "_tree_paths", unexpected_second_walk)
+    storage.delete("folder", authorization=authorization)
+
+    assert not (tmp_path / "folder").exists()
+
+
 def test_read_only_applies_to_binary_gateway(tmp_path):
     storage = VaultStorage(VaultAccessPolicy(tmp_path, read_only=True))
     with pytest.raises(WritePermissionError):

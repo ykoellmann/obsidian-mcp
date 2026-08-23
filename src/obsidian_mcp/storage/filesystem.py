@@ -50,6 +50,17 @@ class TrashEntry:
     mtime: float
 
 
+@dataclass(frozen=True)
+class _AuthorizedTree:
+    """One storage instance's fully authorized tree-mutation input."""
+
+    storage: object
+    source: VaultPath
+    destination: VaultPath | None
+    paths: tuple[str, ...]
+    permanent: bool
+
+
 def _require_secure_platform() -> None:
     if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "supports_dir_fd"):
         raise SecureStorageError("This platform lacks descriptor-relative no-follow filesystem APIs")
@@ -246,13 +257,12 @@ class VaultStorage:
         self,
         path: str,
         *,
-        operation: str = "delete",
         destination: str | None = None,
         permanent: bool = False,
-    ) -> list[str]:
+    ) -> _AuthorizedTree:
         """Preauthorize every source descendant and mapped destination.
 
-        ``operation=delete`` applies write/delete policy to every descendant.
+        Delete policy is applied to every source descendant.
         ``destination`` additionally authorizes each mapped destination before
         any rename or directory creation occurs.
         """
@@ -268,7 +278,7 @@ class VaultStorage:
         *,
         destination: VaultPath | None = None,
         permanent: bool = False,
-    ) -> list[str]:
+    ) -> _AuthorizedTree:
         source_paths = self._tree_paths(source)
         source_is_dir = False
         with _opened_parent(self.policy.root, source.relative) as (source_parent, source_leaf):
@@ -300,7 +310,29 @@ class VaultStorage:
                 suffix = rel[len(prefix):] if rel.startswith(prefix) else ""
                 mapped = f"{dest.relative}/{suffix}" if suffix else dest.relative
                 self.policy.resolve_write(mapped)
-        return source_paths
+        return _AuthorizedTree(
+            storage=self,
+            source=source,
+            destination=destination,
+            paths=tuple(source_paths),
+            permanent=permanent,
+        )
+
+    def _validate_authorization(
+        self,
+        authorization: _AuthorizedTree,
+        *,
+        source: VaultPath,
+        destination: VaultPath | None,
+        permanent: bool,
+    ) -> None:
+        if (
+            authorization.storage is not self
+            or authorization.source.relative != source.relative
+            or authorization.destination != destination
+            or authorization.permanent != permanent
+        ):
+            raise VaultPathError("Tree authorization does not match this mutation")
 
     def read_text(self, path: str) -> str:
         target = self.resolve_read(path)
@@ -459,27 +491,61 @@ class VaultStorage:
                     raise FileExistsError(f"Target already exists: {destination.relative!r}")
                 os.rename(src_leaf, dst_leaf, src_dir_fd=src_parent, dst_dir_fd=dst_parent)
 
-    def move(self, from_path: str, to_path: str) -> tuple[VaultPath, VaultPath]:
+    def move(
+        self,
+        from_path: str,
+        to_path: str,
+        *,
+        authorization: _AuthorizedTree | None = None,
+    ) -> tuple[VaultPath, VaultPath]:
         source = self.resolve_delete(from_path)
         destination = self.resolve_write(to_path)
         if source.relative == destination.relative:
             raise VaultPathError("Source and destination must differ")
         if destination.relative.startswith(source.relative + "/"):
             raise VaultPathError("Destination cannot be inside the source tree")
-        self._authorize_resolved_tree(source, destination=destination)
+        if authorization is None:
+            self._authorize_resolved_tree(source, destination=destination)
+        else:
+            self._validate_authorization(
+                authorization,
+                source=source,
+                destination=destination,
+                permanent=False,
+            )
         self._rename_relative(source, destination)
         return source, destination
 
-    def delete(self, path: str) -> VaultPath:
+    def delete(
+        self, path: str, *, authorization: _AuthorizedTree | None = None
+    ) -> VaultPath:
         target = self.resolve_delete(path, permanent=True)
-        self._authorize_resolved_tree(target, permanent=True)
+        if authorization is None:
+            self._authorize_resolved_tree(target, permanent=True)
+        else:
+            self._validate_authorization(
+                authorization,
+                source=target,
+                destination=None,
+                permanent=True,
+            )
         with _opened_parent(self.policy.root, target.relative) as (parent_fd, leaf):
             _remove_tree_fd(parent_fd, leaf)
         return target
 
-    def trash(self, path: str) -> tuple[VaultPath, Path]:
+    def trash(
+        self, path: str, *, authorization: _AuthorizedTree | None = None
+    ) -> tuple[VaultPath, Path]:
         source = self.resolve_delete(path)
-        self._authorize_resolved_tree(source)
+        if authorization is None:
+            self._authorize_resolved_tree(source)
+        else:
+            self._validate_authorization(
+                authorization,
+                source=source,
+                destination=None,
+                permanent=False,
+            )
         with _opened_dir(self.policy.root, "") as root_fd:
             try:
                 trash_fd = os.open(".trash", _dir_flags(), dir_fd=root_fd)

@@ -341,22 +341,22 @@ def test_rename_folder_updates_index(vault_factory):
     assert "Projekte/note.md" not in all_notes
 
 
-def test_delete_folder_releases_lock_when_tree_authorization_fails(vault_factory, monkeypatch):
+def test_delete_folder_preauthorizes_tree_before_lock(vault_factory, monkeypatch):
     vault_factory({"folder/protected.md": "secret"})
     monkeypatch.setenv("WRITE_PATHS", "folder/")
     monkeypatch.setenv("DENY_WRITE_PATHS", "folder/protected.md")
     cfg_mod._config = None
-    lock_released = False
+    lock_attempted = False
 
-    class TrackingLock:
-        def release(self):
-            nonlocal lock_released
-            lock_released = True
+    def unexpected_lock(*args, **kwargs):
+        nonlocal lock_attempted
+        lock_attempted = True
+        raise AssertionError("lock must not be created before complete authorization")
 
-    monkeypatch.setattr(folders_module, "acquire_lock", lambda *args, **kwargs: TrackingLock())
+    monkeypatch.setattr(folders_module, "acquire_lock", unexpected_lock)
     with pytest.raises(PermissionError):
         delete_folder("folder")
-    assert lock_released is True
+    assert lock_attempted is False
 
 
 def test_rename_folder_releases_partial_lock_set(vault_factory, monkeypatch):
