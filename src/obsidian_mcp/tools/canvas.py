@@ -7,6 +7,7 @@ from ..config import get_config
 from ..storage.filesystem import VaultStorage
 from ..storage.locking import acquire_lock
 from ..storage.policy import InvalidFileTypeError
+from ..storage.revisions import prepare_full_write, read_text_for_update, revision_result
 
 
 def list_canvases() -> list[str]:
@@ -29,7 +30,7 @@ def read_canvas(path: str) -> dict:
     if not storage.exists(path, read=True):
         raise FileNotFoundError(f"Canvas not found: {path!r}")
     try:
-        raw = storage.read_text(path)
+        raw, revision = storage.read_text_with_revision(path)
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid canvas JSON in {path!r}: {exc}") from exc
@@ -56,13 +57,15 @@ def read_canvas(path: str) -> dict:
             "label": edge.get("label"),
         })
 
-    return {"path": path, "nodes": nodes, "edges": edges}
+    return {"path": path, "nodes": nodes, "edges": edges, "revision": revision.token}
 
 
 def write_canvas(
     path: str,
     nodes: list[dict] | None = None,
     edges: list[dict] | None = None,
+    expected_revision: str | None = None,
+    create_only: bool = False,
 ) -> dict:
     """Create or fully overwrite a canvas file.
 
@@ -77,6 +80,9 @@ def write_canvas(
         raise InvalidFileTypeError("Canvas paths must end in .canvas")
     target = storage.resolve_write(path)
     path = target.relative
+    expected, effective_create_only = prepare_full_write(
+        storage, path, expected_revision, create_only
+    )
 
     built_nodes = [_normalize_node(n) for n in (nodes or [])]
     built_edges = [_normalize_edge(e) for e in (edges or [])]
@@ -84,16 +90,21 @@ def write_canvas(
 
     lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
-        storage.write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
+        revision = storage.write_text_atomic(
+            path,
+            json.dumps(data, indent=2, ensure_ascii=False),
+            expected_revision=expected,
+            create_only=effective_create_only,
+        )
     finally:
         lock.release()
 
-    return {
+    return revision_result({
         "path": path,
         "status": "written",
         "nodes": len(built_nodes),
         "edges": len(built_edges),
-    }
+    }, revision)
 
 
 def patch_canvas(
@@ -103,6 +114,7 @@ def patch_canvas(
     delete_node_ids: list[str] | None = None,
     add_edges: list[dict] | None = None,
     delete_edge_ids: list[str] | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Atomically update an existing canvas: add/update/delete nodes and edges.
 
@@ -121,7 +133,8 @@ def patch_canvas(
     lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
         try:
-            data = json.loads(storage.read_text(path))
+            raw, current_revision = read_text_for_update(storage, path, expected_revision)
+            data = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid canvas JSON in {path!r}: {exc}") from exc
 
@@ -157,16 +170,20 @@ def patch_canvas(
         if add_edges:
             edges.extend(_normalize_edge(e) for e in add_edges)
 
-        storage.write_text_atomic(path, json.dumps({"nodes": nodes, "edges": edges}, indent=2, ensure_ascii=False))
+        revision = storage.write_text_atomic(
+            path,
+            json.dumps({"nodes": nodes, "edges": edges}, indent=2, ensure_ascii=False),
+            expected_revision=current_revision,
+        )
     finally:
         lock.release()
 
-    return {
+    return revision_result({
         "path": path,
         "status": "patched",
         "nodes": len(nodes),
         "edges": len(edges),
-    }
+    }, revision)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

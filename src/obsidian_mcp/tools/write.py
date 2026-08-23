@@ -8,9 +8,15 @@ import yaml
 
 from ..config import get_config
 from ..domain.index import VaultIndex
+from ..domain.models import (
+    PreconditionRequiredError,
+    RevisionConflictError,
+    normalize_revision_token,
+)
 from ..storage.filesystem import VaultStorage
 from ..storage.locking import acquire_lock
 from ..storage.policy import WritePermissionError as PolicyWritePermissionError
+from ..storage.revisions import read_text_for_update, revision_result
 from .read import _is_excluded
 
 WritePermissionError = PolicyWritePermissionError
@@ -49,6 +55,8 @@ def write_note(
     content: str,
     index: VaultIndex | None = None,
     dry_run: bool = False,
+    expected_revision: str | None = None,
+    create_only: bool = False,
 ) -> dict:
     """Write (create or overwrite) a note.
 
@@ -68,7 +76,13 @@ def write_note(
 
     lock = acquire_lock(path, lock_path=get_config().lock_path)
     try:
-        before = storage.read_text(path) if storage.exists(path, read=True) else ""
+        exists = storage.exists(path, read=True)
+        if exists:
+            before, current_revision = read_text_for_update(storage, path, expected_revision)
+        else:
+            if expected_revision is not None:
+                raise RevisionConflictError(path, expected_revision, None)
+            before, current_revision = "", None
 
         frontmatter_preserved = False
         if not _FM_RE.match(content) and before:
@@ -86,21 +100,34 @@ def write_note(
                 "frontmatter_preserved": frontmatter_preserved,
                 "preview": content,
                 "diff": diff,
+                "revision": current_revision,
             }
 
-        storage.write_text_atomic(path, content)
+        if (
+            exists
+            and not create_only
+            and get_config().require_write_preconditions
+            and expected_revision is None
+        ):
+            raise PreconditionRequiredError(path)
+        revision = storage.write_text_atomic(
+            path,
+            content,
+            expected_revision=current_revision,
+            create_only=create_only or not exists,
+        )
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {
+    return revision_result({
         "path": path,
         "status": "written",
         "frontmatter_preserved": frontmatter_preserved,
         "diff": diff,
-    }
+    }, revision)
 
 
 def patch_note(
@@ -110,6 +137,7 @@ def patch_note(
     mode: str = "replace",
     target_type: str = "heading",
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Edit a note section or block reference.
 
@@ -122,19 +150,23 @@ def patch_note(
 
     lock = acquire_lock(path, lock_path=get_config().lock_path)
     try:
-        raw = _storage().read_text(path)
+        storage = _storage()
+        raw, current_revision = read_text_for_update(storage, path, expected_revision)
         if target_type == "block_ref":
             patched = _patch_block_ref(raw, section, new_content, mode)
         else:
             patched = _patch_section(raw, section, new_content, mode)
-        _storage().write_text_atomic(path, patched)
+        revision = storage.write_text_atomic(path, patched, expected_revision=current_revision)
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "patched", "mode": mode, "target_type": target_type}
+    return revision_result(
+        {"path": path, "status": "patched", "mode": mode, "target_type": target_type},
+        revision,
+    )
 
 
 def _find_section_bounds(content: str, heading: str) -> tuple[int, int, int, int]:
@@ -180,7 +212,12 @@ def _patch_block_ref(content: str, block_id: str, new_content: str, mode: str) -
     raise ValueError(f"Unknown mode: {mode!r}")
 
 
-def delete_note(path: str, trash: bool = True, index: VaultIndex | None = None) -> dict:
+def delete_note(
+    path: str,
+    trash: bool = True,
+    index: VaultIndex | None = None,
+    expected_revision: str | None = None,
+) -> dict:
     """Delete a note. trash=True moves it to .trash/ in the vault root."""
     cfg = get_config()
     _require_note_path(path)
@@ -188,10 +225,16 @@ def delete_note(path: str, trash: bool = True, index: VaultIndex | None = None) 
     path = target.relative
     lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
+        storage = _storage()
+        current = storage.revision(path, read=False)
+        if expected_revision is not None and current.token != normalize_revision_token(expected_revision):
+            raise RevisionConflictError(path, expected_revision, current)
+        if cfg.require_write_preconditions and expected_revision is None:
+            raise PreconditionRequiredError(path)
         if trash:
-            _storage().trash(path)
+            storage.trash(path)
         else:
-            _storage().delete(path)
+            storage.delete(path)
     finally:
         lock.release()
 
@@ -232,7 +275,11 @@ def restore_note(trashed_name: str, to_path: str, index: VaultIndex | None = Non
     if index is not None:
         index.update(to_path)
 
-    return {"from": f".trash/{trashed_name}", "to": to_path, "status": "restored"}
+    revision = storage.revision(to_path, read=False)
+    return revision_result(
+        {"from": f".trash/{trashed_name}", "to": to_path, "status": "restored"},
+        revision,
+    )
 
 
 def append_to_note(
@@ -241,6 +288,7 @@ def append_to_note(
     section: str | None = None,
     create: bool = True,
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Append content to a note (or a specific section). Creates the note if it doesn't exist."""
     _require_note_path(path)
@@ -250,23 +298,31 @@ def append_to_note(
     try:
         storage = _storage()
         if storage.exists(path, read=True):
-            raw = _storage().read_text(path)
+            raw, current_revision = read_text_for_update(storage, path, expected_revision)
             if section:
                 patched = _patch_section(raw, section, content, mode="append")
             else:
                 patched = raw.rstrip("\n") + "\n\n" + content.strip() + "\n"
         elif create:
+            if expected_revision is not None:
+                raise RevisionConflictError(path, expected_revision, None)
             patched = content
+            current_revision = None
         else:
             raise FileNotFoundError(f"Note not found: {path!r}")
-        _storage().write_text_atomic(path, patched)
+        revision = storage.write_text_atomic(
+            path,
+            patched,
+            expected_revision=current_revision,
+            create_only=current_revision is None,
+        )
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "appended"}
+    return revision_result({"path": path, "status": "appended"}, revision)
 
 
 def patch_frontmatter(
@@ -275,6 +331,7 @@ def patch_frontmatter(
     merge_arrays: bool = True,
     index: VaultIndex | None = None,
     dry_run: bool = False,
+    expected_revision: str | None = None,
 ) -> dict:
     """Update YAML frontmatter, optionally returning a write-free preview."""
     _require_note_path(path)
@@ -286,7 +343,8 @@ def patch_frontmatter(
 
     lock = acquire_lock(path, lock_path=get_config().lock_path)
     try:
-        raw = _storage().read_text(path)
+        storage = _storage()
+        raw, current_revision = read_text_for_update(storage, path, expected_revision)
         patched = _apply_frontmatter_updates(raw, updates, merge_arrays)
         diff = _unified_diff(raw, patched, path)
 
@@ -297,21 +355,22 @@ def patch_frontmatter(
                 "updated_keys": list(updates.keys()),
                 "preview": patched,
                 "diff": diff,
+                "revision": current_revision,
             }
 
-        _storage().write_text_atomic(path, patched)
+        revision = storage.write_text_atomic(path, patched, expected_revision=current_revision)
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {
+    return revision_result({
         "path": path,
         "status": "frontmatter_patched",
         "updated_keys": list(updates.keys()),
         "diff": diff,
-    }
+    }, revision)
 
 
 def patch_frontmatter_batch(
@@ -336,6 +395,7 @@ def patch_frontmatter_batch(
                 entry.get("updates", {}),
                 merge_arrays=entry.get("merge_arrays", True),
                 index=index,
+                expected_revision=entry.get("expected_revision"),
             )
             succeeded.append(result)
         except Exception as exc:
@@ -371,6 +431,7 @@ def manage_tags(
     add: list[str] | None = None,
     remove: list[str] | None = None,
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Add or remove tags on a note. Updates frontmatter tags array and strips inline #tags."""
     _require_note_path(path)
@@ -385,16 +446,19 @@ def manage_tags(
 
     lock = acquire_lock(path, lock_path=get_config().lock_path)
     try:
-        raw = _storage().read_text(path)
+        storage = _storage()
+        raw, current_revision = read_text_for_update(storage, path, expected_revision)
         patched = _apply_tag_changes(raw, add, remove)
-        _storage().write_text_atomic(path, patched)
+        revision = storage.write_text_atomic(path, patched, expected_revision=current_revision)
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "tags_updated", "added": add, "removed": remove}
+    return revision_result(
+        {"path": path, "status": "tags_updated", "added": add, "removed": remove}, revision
+    )
 
 
 def _apply_tag_changes(raw: str, add: list[str], remove: list[str]) -> str:
@@ -539,6 +603,7 @@ def patch_note_text(
     count: int = 1,
     dry_run: bool = False,
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Find and replace text anywhere in a note's body — no heading/block-ref
     anchor required, unlike patch_note_tool. For a handful of scattered
@@ -569,7 +634,7 @@ def patch_note_text(
 
     lock = acquire_lock(path, lock_path=get_config().lock_path)
     try:
-        raw = storage.read_text(path)
+        raw, current_revision = read_text_for_update(storage, path, expected_revision)
         replace_count = count if count > 0 else 0
         patched, n = pattern.subn(replace, raw, count=replace_count)
         if n == 0:
@@ -583,16 +648,19 @@ def patch_note_text(
                 "replacements": n,
                 "preview": _match_snippets(raw, pattern, limit=5),
                 "diff": diff,
+                "revision": current_revision,
             }
 
-        storage.write_text_atomic(path, patched)
+        revision = storage.write_text_atomic(path, patched, expected_revision=current_revision)
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "patched", "replacements": n, "diff": diff}
+    return revision_result(
+        {"path": path, "status": "patched", "replacements": n, "diff": diff}, revision
+    )
 
 
 def find_replace_in_vault(

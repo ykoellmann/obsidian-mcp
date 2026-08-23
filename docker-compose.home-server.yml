@@ -25,8 +25,11 @@ services:
       DENY_WRITE_PATHS: ".obsidian/,.trash/,_AI_INSTRUCTIONS.md"
       ALLOW_PERMANENT_DELETE: "false"
       MAX_ATTACHMENT_BYTES: "${MAX_ATTACHMENT_BYTES:-26214400}"
+      REQUIRE_WRITE_PRECONDITIONS: "${REQUIRE_WRITE_PRECONDITIONS:-true}"
+      WATCHER_DEBOUNCE_MS: "${WATCHER_DEBOUNCE_MS:-100}"
+      INDEX_RECONCILE_INTERVAL: "${INDEX_RECONCILE_INTERVAL:-900}"
       LOCK_PATH: /data/locks
-      EXCLUDE_PATHS: "private,.obsidian,.trash"
+      EXCLUDE_PATHS: "private/,.obsidian/,.trash/"
       API_KEY: "${API_KEY:?set API_KEY in .env}"
       ENABLE_CANVAS: "${ENABLE_CANVAS:-false}"
       ENABLE_EXCALIDRAW: "${ENABLE_EXCALIDRAW:-false}"

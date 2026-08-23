@@ -24,28 +24,80 @@ class VaultWatcher:
         self,
         vault_root: Path,
         poll_interval: float = 2.0,
+        debounce_ms: int = 100,
+        reconcile_interval: float = 900.0,
         policy: VaultAccessPolicy | None = None,
     ) -> None:
         self._vault_root = vault_root
         self._policy = policy or VaultAccessPolicy(vault_root)
         self._storage = VaultStorage(self._policy)
         self._poll_interval = poll_interval
+        self._debounce_seconds = debounce_ms / 1000
+        self._reconcile_interval = reconcile_interval
         self._observer = None
         self._poll_thread: threading.Thread | None = None
+        self._reconcile_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._debounce_lock = threading.Lock()
+        self._pending: dict[str, threading.Timer] = {}
 
-    def start(self, on_change: Callable[[str], None]) -> None:
+    def start(
+        self,
+        on_change: Callable[[str], None],
+        *,
+        on_reconcile: Callable[[], None] | None = None,
+    ) -> None:
+        def debounced(path: str) -> None:
+            if self._debounce_seconds == 0:
+                on_change(path)
+                return
+            with self._debounce_lock:
+                previous = self._pending.pop(path, None)
+                if previous is not None:
+                    previous.cancel()
+
+                def deliver() -> None:
+                    with self._debounce_lock:
+                        self._pending.pop(path, None)
+                    if not self._stop_event.is_set():
+                        on_change(path)
+
+                timer = threading.Timer(self._debounce_seconds, deliver)
+                timer.daemon = True
+                self._pending[path] = timer
+                timer.start()
+
         watch_mode = os.environ.get("WATCH_MODE", "auto").lower()
-        if watch_mode == "poll" or not self._try_watchdog(on_change):
-            self._start_polling(on_change)
+        if watch_mode == "poll" or not self._try_watchdog(debounced):
+            self._start_polling(debounced)
+        if on_reconcile is not None:
+            self._start_reconciliation(on_reconcile)
 
     def stop(self) -> None:
         self._stop_event.set()
+        with self._debounce_lock:
+            timers = list(self._pending.values())
+            self._pending.clear()
+        for timer in timers:
+            timer.cancel()
         if self._observer is not None:
             self._observer.stop()
             self._observer.join()
         if self._poll_thread is not None:
             self._poll_thread.join(timeout=self._poll_interval + 1)
+        if self._reconcile_thread is not None:
+            self._reconcile_thread.join(timeout=1)
+
+    def _start_reconciliation(self, on_reconcile: Callable[[], None]) -> None:
+        def run() -> None:
+            while not self._stop_event.wait(self._reconcile_interval):
+                try:
+                    on_reconcile()
+                except Exception:
+                    logger.exception("Periodic index reconciliation failed")
+
+        self._reconcile_thread = threading.Thread(target=run, daemon=True)
+        self._reconcile_thread.start()
 
     def _try_watchdog(self, on_change: Callable[[str], None]) -> bool:
         try:

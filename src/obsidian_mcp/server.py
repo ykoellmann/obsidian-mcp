@@ -8,15 +8,18 @@ import mimetypes
 import os
 import threading
 from dataclasses import dataclass
+from functools import wraps
 
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, AuthProvider, MultiAuth, TokenVerifier
 from fastmcp.server.auth.providers.github import GitHubProvider
+from fastmcp.tools.base import ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from .config import ConfigError, get_config
 from .domain.index import VaultIndex
+from .domain.models import PreconditionRequiredError, RevisionConflictError
 from .storage.filesystem import VaultStorage
 from .storage.policy import (
     InvalidFileTypeError,
@@ -100,6 +103,19 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message
 logger = logging.getLogger(__name__)
 
 
+def _mutation_boundary(function):
+    """Return expected optimistic-concurrency failures as MCP error results."""
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except (RevisionConflictError, PreconditionRequiredError) as exc:
+            return ToolResult(structured_content=exc.to_dict(), is_error=True)
+
+    return wrapped
+
+
 _DEFAULT_INSTRUCTIONS = r"""\
 You are connected to **obsidian-mcp**, an MCP server for an Obsidian vault.
 
@@ -125,6 +141,9 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 - `lint_schema_tool()` — validate frontmatter against the enums declared in _AI_INSTRUCTIONS.md
 
 ### Writing
+- Direct reads return an opaque `revision`. Pass it as `expected_revision` to pin a write
+  to those bytes. On a revision conflict, read again before deciding whether to retry.
+  A retried append with an old revision fails safely; a blind retry can append twice.
 - `write_note_tool(path, content, dry_run)` — create or overwrite a note; preserves existing
   frontmatter if the new content has none; dry_run previews {preview, diff} without writing
 - `patch_note_tool(path, section, new_content, mode, target_type)` — edit one section;
@@ -599,7 +618,14 @@ def find_similar_notes_tool(
 # ── Write ─────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def write_note_tool(path: str, content: str, dry_run: bool = False) -> dict:
+@_mutation_boundary
+def write_note_tool(
+    path: str,
+    content: str,
+    dry_run: bool = False,
+    expected_revision: str | None = None,
+    create_only: bool = False,
+) -> dict:
     """Write (create or overwrite) a note. Respects READ_ONLY and WRITE_PATHS.
     If `content` has no frontmatter of its own and a note already exists at
     `path`, its existing frontmatter is preserved rather than dropped —
@@ -607,29 +633,47 @@ def write_note_tool(path: str, content: str, dry_run: bool = False) -> dict:
     a `diff` (unified diff against the current file).
     dry_run=True previews {preview, diff, frontmatter_preserved} without
     writing anything — check it, then call again with dry_run=False."""
-    result = write_note(path, content, index=_index, dry_run=dry_run)
+    result = write_note(
+        path,
+        content,
+        index=_index,
+        dry_run=dry_run,
+        expected_revision=expected_revision,
+        create_only=create_only,
+    )
     if result.get("status") != "dry_run":
         log_write("write_note_tool", path, "wrote note")
     return result
 
 
 @mcp.tool()
+@_mutation_boundary
 def patch_note_tool(
     path: str,
     section: str,
     new_content: str,
     mode: str = "replace",
     target_type: str = "heading",
+    expected_revision: str | None = None,
 ) -> dict:
     """Edit a section or block reference inside a note.
     mode: 'replace' (default) | 'insert_before' | 'insert_after' | 'append'.
     target_type: 'heading' (default) | 'block_ref' (use section='^block-id')."""
-    result = patch_note(path, section, new_content, mode=mode, target_type=target_type, index=_index)
+    result = patch_note(
+        path,
+        section,
+        new_content,
+        mode=mode,
+        target_type=target_type,
+        index=_index,
+        expected_revision=expected_revision,
+    )
     log_write("patch_note_tool", path, f"patched section {section!r} ({mode})")
     return result
 
 
 @mcp.tool()
+@_mutation_boundary
 def patch_note_text_tool(
     path: str,
     find: str,
@@ -637,6 +681,7 @@ def patch_note_text_tool(
     mode: str = "exact",
     count: int = 1,
     dry_run: bool = False,
+    expected_revision: str | None = None,
 ) -> dict:
     """Find and replace text anywhere in one note's body — no heading/block-ref
     anchor required, unlike patch_note_tool. Cheaper than write_note_tool for
@@ -645,16 +690,28 @@ def patch_note_text_tool(
     count: max replacements (default 1, first match only); 0 = replace all.
     dry_run=True previews {replacements, preview, diff} without writing.
     Raises ValueError if `find` doesn't match anything."""
-    result = patch_note_text(path, find, replace, mode=mode, count=count, dry_run=dry_run, index=_index)
+    result = patch_note_text(
+        path,
+        find,
+        replace,
+        mode=mode,
+        count=count,
+        dry_run=dry_run,
+        index=_index,
+        expected_revision=expected_revision,
+    )
     if result.get("status") != "dry_run":
         log_write("patch_note_text_tool", path, f"replaced {result.get('replacements')} match(es)")
     return result
 
 
-def delete_note_tool(path: str, trash: bool = True) -> dict:
+@_mutation_boundary
+def delete_note_tool(
+    path: str, trash: bool = True, expected_revision: str | None = None
+) -> dict:
     """Delete a note from the vault.
     trash=True (default) moves it to .trash/ instead of permanent deletion."""
-    result = delete_note(path, trash=trash, index=_index)
+    result = delete_note(path, trash=trash, index=_index, expected_revision=expected_revision)
     log_write("delete_note_tool", path, f"deleted (trash={trash})")
     return result
 
@@ -707,32 +764,50 @@ if _feature_flags.enable_bulk_replace:
 
 
 @mcp.tool()
+@_mutation_boundary
 def append_to_note_tool(
     path: str,
     content: str,
     section: str | None = None,
     create: bool = True,
+    expected_revision: str | None = None,
 ) -> dict:
     """Append content to a note without reading and rewriting the whole file.
     section: optional heading to append under. create=True creates the note if missing."""
-    result = append_to_note(path, content, section=section, create=create, index=_index)
+    result = append_to_note(
+        path,
+        content,
+        section=section,
+        create=create,
+        index=_index,
+        expected_revision=expected_revision,
+    )
     log_write("append_to_note_tool", path, "appended content" + (f" under {section!r}" if section else ""))
     return result
 
 
 @mcp.tool()
+@_mutation_boundary
 def patch_frontmatter_tool(
     path: str,
     updates: dict,
     merge_arrays: bool = True,
     dry_run: bool = False,
+    expected_revision: str | None = None,
 ) -> dict:
     """Update specific YAML frontmatter keys without touching the note body.
     merge_arrays=True merges list values (e.g. tags); False replaces them.
     Result carries a `diff` (unified diff against the current file).
     dry_run=True previews {preview, diff, updated_keys} without writing —
     check it, then call again with dry_run=False."""
-    result = patch_frontmatter(path, updates, merge_arrays=merge_arrays, index=_index, dry_run=dry_run)
+    result = patch_frontmatter(
+        path,
+        updates,
+        merge_arrays=merge_arrays,
+        index=_index,
+        dry_run=dry_run,
+        expected_revision=expected_revision,
+    )
     if result.get("status") != "dry_run":
         log_write("patch_frontmatter_tool", path, f"updated keys: {list(updates.keys())}")
     return result
@@ -751,14 +826,18 @@ def patch_frontmatter_batch_tool(updates: list[dict]) -> dict:
 
 
 @mcp.tool()
+@_mutation_boundary
 def manage_tags_tool(
     path: str,
     add: list[str] | None = None,
     remove: list[str] | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Add or remove tags on a note. Updates frontmatter tags array and strips
     inline #tag occurrences from the body. Returns {added, removed}."""
-    result = manage_tags(path, add=add, remove=remove, index=_index)
+    result = manage_tags(
+        path, add=add, remove=remove, index=_index, expected_revision=expected_revision
+    )
     log_write("manage_tags_tool", path, f"+{add or []} -{remove or []}")
     return result
 
@@ -1019,11 +1098,14 @@ async def health_route(request: Request) -> Response:
     """
     if _cfg is None or _index is None:
         return JSONResponse({"status": "starting"}, status_code=503)
+    ready = _index.is_ready()
     return JSONResponse(
         {
-            "status": "ok",
-            "index_ready": _index.is_ready(),
-        }
+            "status": "ok" if ready else "starting",
+            "index_ready": ready,
+            **_index.reconcile_status(),
+        },
+        status_code=200 if ready else 503,
     )
 
 
@@ -1111,17 +1193,27 @@ def list_templates_tool() -> list[str]:
 
 
 @mcp.tool()
+@_mutation_boundary
 def create_from_template_tool(
     template_path: str,
     output_path: str,
     variables: dict | None = None,
+    expected_revision: str | None = None,
+    create_only: bool = False,
 ) -> dict:
     """Render a template and write it as a new note.
     Built-in variables: {{date}}, {{time}}, {{title}}, {{week}}, {{month}}, {{year}}, {{weekday}}.
     Supports format specs: {{date:YYYY-MM}} → '2026-07'.
     Custom variables passed in 'variables' dict override built-ins.
     Unknown {{vars}} are preserved as-is."""
-    return create_from_template(template_path, output_path, variables=variables, index=_index)
+    return create_from_template(
+        template_path,
+        output_path,
+        variables=variables,
+        index=_index,
+        expected_revision=expected_revision,
+        create_only=create_only,
+    )
 
 
 # ── Canvas ────────────────────────────────────────────────────────────────────
@@ -1140,19 +1232,29 @@ if _feature_flags.enable_canvas:
         return read_canvas(path)
 
     @mcp.tool()
+    @_mutation_boundary
     def write_canvas_tool(
         path: str,
         nodes: list[dict] | None = None,
         edges: list[dict] | None = None,
+        expected_revision: str | None = None,
+        create_only: bool = False,
     ) -> dict:
         """Create or fully overwrite an Obsidian Canvas file.
         Node fields: type ('text'|'file'|'group'|'link'), x, y, width, height.
         Text nodes: text. File nodes: file (vault path). Link nodes: url.
         Edge fields: fromNode, toNode, label (optional). IDs are auto-generated if omitted.
         Returns {path, status, nodes, edges}."""
-        return write_canvas(path, nodes=nodes, edges=edges)
+        return write_canvas(
+            path,
+            nodes=nodes,
+            edges=edges,
+            expected_revision=expected_revision,
+            create_only=create_only,
+        )
 
     @mcp.tool()
+    @_mutation_boundary
     def patch_canvas_tool(
         path: str,
         add_nodes: list[dict] | None = None,
@@ -1160,6 +1262,7 @@ if _feature_flags.enable_canvas:
         delete_node_ids: list[str] | None = None,
         add_edges: list[dict] | None = None,
         delete_edge_ids: list[str] | None = None,
+        expected_revision: str | None = None,
     ) -> dict:
         """Atomically update an existing canvas without rewriting the whole file.
         update_nodes: each dict must include 'id'. delete_node_ids also removes
@@ -1171,6 +1274,7 @@ if _feature_flags.enable_canvas:
             delete_node_ids=delete_node_ids,
             add_edges=add_edges,
             delete_edge_ids=delete_edge_ids,
+            expected_revision=expected_revision,
         )
 
 
@@ -1190,23 +1294,35 @@ if _feature_flags.enable_excalidraw:
         return read_excalidraw(path)
 
     @mcp.tool()
+    @_mutation_boundary
     def write_excalidraw_tool(
         path: str,
         elements: list[dict] | None = None,
         app_state: dict | None = None,
+        expected_revision: str | None = None,
+        create_only: bool = False,
     ) -> dict:
         """Create or fully overwrite an Excalidraw file.
         Element fields: type ('rectangle'|'ellipse'|'text'|'arrow'|'freedraw'|...), x, y,
         width, height. Element 'id' is auto-generated if omitted.
         Returns {path, status, elements}."""
-        return write_excalidraw(path, elements=elements, app_state=app_state, index=_index)
+        return write_excalidraw(
+            path,
+            elements=elements,
+            app_state=app_state,
+            index=_index,
+            expected_revision=expected_revision,
+            create_only=create_only,
+        )
 
     @mcp.tool()
+    @_mutation_boundary
     def patch_excalidraw_tool(
         path: str,
         add_elements: list[dict] | None = None,
         update_elements: list[dict] | None = None,
         delete_element_ids: list[str] | None = None,
+        expected_revision: str | None = None,
     ) -> dict:
         """Atomically update an existing Excalidraw file without rewriting the whole file.
         update_elements: each dict must include 'id'.
@@ -1217,6 +1333,7 @@ if _feature_flags.enable_excalidraw:
             update_elements=update_elements,
             delete_element_ids=delete_element_ids,
             index=_index,
+            expected_revision=expected_revision,
         )
 
 
@@ -1231,43 +1348,82 @@ if _feature_flags.enable_kanban:
         return read_kanban(path)
 
     @mcp.tool()
-    def create_kanban_board_tool(path: str, columns: list[str]) -> dict:
+    @_mutation_boundary
+    def create_kanban_board_tool(
+        path: str,
+        columns: list[str],
+        expected_revision: str | None = None,
+        create_only: bool = False,
+    ) -> dict:
         """Create a new Kanban board with the given column names.
         Returns {path, status, columns}."""
-        return create_kanban_board(path, columns, index=_index)
+        return create_kanban_board(
+            path,
+            columns,
+            index=_index,
+            expected_revision=expected_revision,
+            create_only=create_only,
+        )
 
     @mcp.tool()
+    @_mutation_boundary
     def add_kanban_card_tool(
         path: str,
         column: str,
         text: str,
         done: bool = False,
+        expected_revision: str | None = None,
     ) -> dict:
         """Add a card to a Kanban column. Card is inserted at the top of the column.
         Returns {path, status, column, card, done}."""
-        return add_kanban_card(path, column, text, done=done, index=_index)
+        return add_kanban_card(
+            path,
+            column,
+            text,
+            done=done,
+            index=_index,
+            expected_revision=expected_revision,
+        )
 
     @mcp.tool()
+    @_mutation_boundary
     def move_kanban_card_tool(
         path: str,
         card_text: str,
         from_column: str,
         to_column: str,
         done: bool | None = None,
+        expected_revision: str | None = None,
     ) -> dict:
         """Move a card from one column to another. done=true/false updates the tick state.
         Returns {path, status, card, from, to}."""
-        return move_kanban_card(path, card_text, from_column, to_column, done=done, index=_index)
+        return move_kanban_card(
+            path,
+            card_text,
+            from_column,
+            to_column,
+            done=done,
+            index=_index,
+            expected_revision=expected_revision,
+        )
 
     @mcp.tool()
+    @_mutation_boundary
     def delete_kanban_card_tool(
         path: str,
         card_text: str,
         column: str | None = None,
+        expected_revision: str | None = None,
     ) -> dict:
         """Delete a card from the Kanban board. column limits the search to one column.
         Returns {path, status, card}."""
-        return delete_kanban_card(path, card_text, column=column, index=_index)
+        return delete_kanban_card(
+            path,
+            card_text,
+            column=column,
+            index=_index,
+            expected_revision=expected_revision,
+        )
 
 
 # ── Bases ─────────────────────────────────────────────────────────────────────
@@ -1286,12 +1442,15 @@ if _feature_flags.enable_bases:
         return read_base(path)
 
     @mcp.tool()
+    @_mutation_boundary
     def write_base_tool(
         path: str,
         filters: dict | None = None,
         formulas: dict | None = None,
         properties: dict | None = None,
         views: list[dict] | None = None,
+        expected_revision: str | None = None,
+        create_only: bool = False,
     ) -> dict:
         """Create or fully overwrite a .base file.
         filters: boolean tree ({and:[...]}, {or:[...]}, {not:...}) or a single
@@ -1301,9 +1460,19 @@ if _feature_flags.enable_bases:
         'type' (e.g. 'table'|'cards'|'list') is required per view.
         Returns {path, status, views, known_properties} — known_properties is
         collected from existing .base files in the vault to keep naming consistent."""
-        return write_base(path, filters=filters, formulas=formulas, properties=properties, views=views, index=_index)
+        return write_base(
+            path,
+            filters=filters,
+            formulas=formulas,
+            properties=properties,
+            views=views,
+            index=_index,
+            expected_revision=expected_revision,
+            create_only=create_only,
+        )
 
     @mcp.tool()
+    @_mutation_boundary
     def patch_base_tool(
         path: str,
         update_formulas: dict | None = None,
@@ -1314,6 +1483,7 @@ if _feature_flags.enable_bases:
         add_views: list[dict] | None = None,
         update_views: list[dict] | None = None,
         delete_view_names: list[str] | None = None,
+        expected_revision: str | None = None,
     ) -> dict:
         """Atomically update an existing .base file without rewriting it wholesale.
         update_formulas/update_properties are merged by key. set_filters replaces
@@ -1330,6 +1500,7 @@ if _feature_flags.enable_bases:
             update_views=update_views,
             delete_view_names=delete_view_names,
             index=_index,
+            expected_revision=expected_revision,
         )
 
 
@@ -1389,13 +1560,16 @@ if _feature_flags.enable_folder_rename:
     mcp.tool()(rename_folder_tool)
 
 
-@mcp.tool()
 def list_trash_tool() -> dict:
     """List items sitting in .trash/ (from delete_note_tool/delete_folder_tool
     with trash=True). Names here are what restore_note_tool/restore_folder_tool
     expect as trashed_name.
     Returns {items: [{name, type, size_bytes, mtime}]}."""
     return list_trash()
+
+
+if _feature_flags.enable_delete:
+    mcp.tool()(list_trash_tool)
 
 
 def restore_folder_tool(trashed_name: str, to_path: str) -> dict:
@@ -1441,10 +1615,25 @@ def main() -> None:
     global _cfg, _index, _watcher
     _cfg = get_config()
     policy = VaultAccessPolicy.from_config(_cfg)
+    VaultStorage(policy).probe_create_only_support()
     _index = VaultIndex(_cfg.vault_path, exclude_paths=_cfg.exclude_paths, policy=policy)
-    _watcher = VaultWatcher(_cfg.vault_path, policy=policy)
-    threading.Thread(target=_index.build, daemon=True).start()
-    _watcher.start(on_change=_index.update)
+    _watcher = VaultWatcher(
+        _cfg.vault_path,
+        debounce_ms=_cfg.watcher_debounce_ms,
+        reconcile_interval=_cfg.index_reconcile_interval,
+        policy=policy,
+    )
+
+    def initialize_index() -> None:
+        try:
+            _index.build(publish_ready=False)
+            _watcher.start(on_change=_index.update, on_reconcile=_index.reconcile)
+            _index.reconcile()
+            _index.mark_ready()
+        except Exception:
+            logger.exception("Initial vault index build/reconciliation failed")
+
+    threading.Thread(target=initialize_index, daemon=True).start()
     if _cfg.transport == "stdio":
         logger.info("Starting obsidian-mcp (transport=stdio)")
         mcp.run(transport=_cfg.transport)

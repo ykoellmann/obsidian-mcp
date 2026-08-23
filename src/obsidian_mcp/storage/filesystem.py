@@ -9,6 +9,7 @@ then performed relative to directory file descriptors opened with
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import stat
 import uuid
@@ -16,6 +17,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..domain.models import FileRevision, RevisionConflictError, normalize_revision_token
 from .policy import (
     ProtectedPathError,
     ReadPermissionError,
@@ -70,6 +72,8 @@ def _require_secure_platform() -> None:
         raise SecureStorageError("renameat-style directory descriptors are unavailable")
     if os.unlink not in os.supports_dir_fd or os.mkdir not in os.supports_dir_fd:
         raise SecureStorageError("unlinkat/mkdirat-style directory descriptors are unavailable")
+    if not hasattr(os, "link"):
+        raise SecureStorageError("linkat-style no-replace file creation is unavailable")
 
 
 def _dir_flags() -> int:
@@ -144,6 +148,30 @@ def _write_all(fd: int, data: bytes) -> None:
         if written <= 0:
             raise OSError("short write")
         view = view[written:]
+
+
+def _read_all(fd: int) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
+def _revision_at(parent_fd: int, leaf: str) -> FileRevision | None:
+    try:
+        fd = os.open(leaf, _file_flags(), dir_fd=parent_fd)
+    except FileNotFoundError:
+        return None
+    try:
+        content = _read_all(fd)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise IsADirectoryError(f"Target is not a regular file: {leaf!r}")
+        return FileRevision.from_bytes(content, mtime_ns=info.st_mtime_ns)
+    finally:
+        os.close(fd)
 
 
 def _scandir_tree(fd: int, prefix: str = "") -> Iterator[tuple[str, os.stat_result, bool]]:
@@ -335,42 +363,70 @@ class VaultStorage:
             raise VaultPathError("Tree authorization does not match this mutation")
 
     def read_text(self, path: str) -> str:
-        target = self.resolve_read(path)
-        with _opened_parent(self.policy.root, target.relative) as (parent_fd, leaf):
-            fd = os.open(leaf, _file_flags(), dir_fd=parent_fd)
-            try:
-                with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as stream:
-                    fd = -1
-                    return stream.read()
-            finally:
-                if fd >= 0:
-                    os.close(fd)
+        content, _ = self.read_text_with_revision(path)
+        return content
 
-    def read_bytes(self, path: str) -> bytes:
+    def read_text_with_revision(self, path: str) -> tuple[str, FileRevision]:
         target = self.resolve_read(path)
         with _opened_parent(self.policy.root, target.relative) as (parent_fd, leaf):
             fd = os.open(leaf, _file_flags(), dir_fd=parent_fd)
             try:
-                chunks: list[bytes] = []
-                while True:
-                    chunk = os.read(fd, 1024 * 1024)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                return b"".join(chunks)
+                content = _read_all(fd)
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise IsADirectoryError(f"Target is not a regular file: {target.relative!r}")
+                return (
+                    content.decode("utf-8", errors="replace"),
+                    FileRevision.from_bytes(content, mtime_ns=info.st_mtime_ns),
+                )
             finally:
                 os.close(fd)
 
-    def _write_atomic(self, target: VaultPath, data: bytes) -> None:
+    def read_bytes(self, path: str) -> bytes:
+        content, _ = self.read_bytes_with_revision(path)
+        return content
+
+    def read_bytes_with_revision(self, path: str) -> tuple[bytes, FileRevision]:
+        target = self.resolve_read(path)
+        with _opened_parent(self.policy.root, target.relative) as (parent_fd, leaf):
+            fd = os.open(leaf, _file_flags(), dir_fd=parent_fd)
+            try:
+                content = _read_all(fd)
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    raise IsADirectoryError(f"Target is not a regular file: {target.relative!r}")
+                return content, FileRevision.from_bytes(content, mtime_ns=info.st_mtime_ns)
+            finally:
+                os.close(fd)
+
+    def revision(self, path: str, *, read: bool = True) -> FileRevision:
+        target = self.resolve_read(path) if read else self.resolve_write(path)
+        with _opened_parent(self.policy.root, target.relative) as (parent_fd, leaf):
+            revision = _revision_at(parent_fd, leaf)
+        if revision is None:
+            raise FileNotFoundError(f"Path not found: {target.relative!r}")
+        return revision
+
+    def _write_atomic(
+        self,
+        target: VaultPath,
+        data: bytes,
+        *,
+        expected_revision: str | None = None,
+        create_only: bool = False,
+    ) -> FileRevision:
+        expected = normalize_revision_token(expected_revision) if expected_revision is not None else None
         tmp_name = f".obsidian-mcp-tmp-{uuid.uuid4().hex}"
         with _opened_parent(self.policy.root, target.relative, create=True) as (parent_fd, leaf):
-            try:
+            current = _revision_at(parent_fd, leaf)
+            if create_only and current is not None:
+                raise RevisionConflictError(target.relative, expected, current)
+            if expected is not None and (current is None or current.token != expected):
+                raise RevisionConflictError(target.relative, expected, current)
+            effective_create_only = create_only or current is None
+            existing_mode = None
+            if current is not None:
                 existing = _ensure_not_symlink(parent_fd, leaf)
-            except FileNotFoundError:
-                existing_mode = None
-            else:
-                if not stat.S_ISREG(existing.st_mode):
-                    raise IsADirectoryError(f"Target is not a regular file: {target.relative!r}")
                 existing_mode = stat.S_IMODE(existing.st_mode) & 0o777
             # O_EXCL + dirfd ensures the temporary file is created in the
             # already-authorized parent and cannot be redirected by a symlink.
@@ -388,8 +444,40 @@ class VaultStorage:
                 os.fsync(tmp_fd)
                 os.close(tmp_fd)
                 tmp_fd = -1
-                os.rename(tmp_name, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-                committed = True
+                latest = _revision_at(parent_fd, leaf)
+                if effective_create_only:
+                    if latest is not None:
+                        raise RevisionConflictError(target.relative, expected, latest)
+                    try:
+                        os.link(
+                            tmp_name,
+                            leaf,
+                            src_dir_fd=parent_fd,
+                            dst_dir_fd=parent_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileExistsError:
+                        raise RevisionConflictError(
+                            target.relative, expected, _revision_at(parent_fd, leaf)
+                        ) from None
+                    except OSError as exc:
+                        if exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EPERM}:
+                            raise SecureStorageError(
+                                "The vault filesystem does not support atomic no-replace file creation"
+                            ) from exc
+                        raise
+                    committed = True
+                    os.unlink(tmp_name, dir_fd=parent_fd)
+                else:
+                    if expected is not None and (latest is None or latest.token != expected):
+                        raise RevisionConflictError(target.relative, expected, latest)
+                    os.rename(tmp_name, leaf, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                    committed = True
+                os.fsync(parent_fd)
+                final = _revision_at(parent_fd, leaf)
+                if final is None:
+                    raise OSError(f"Committed file disappeared: {target.relative!r}")
+                return final
             finally:
                 if tmp_fd >= 0:
                     os.close(tmp_fd)
@@ -397,13 +485,94 @@ class VaultStorage:
                     with contextlib.suppress(FileNotFoundError):
                         os.unlink(tmp_name, dir_fd=parent_fd)
 
-    def write_text_atomic(self, path: str, content: str) -> None:
+    def write_text_atomic(
+        self,
+        path: str,
+        content: str,
+        *,
+        expected_revision: str | None = None,
+        create_only: bool = False,
+    ) -> FileRevision:
         target = self.resolve_write(path)
-        self._write_atomic(target, content.encode("utf-8"))
+        return self._write_atomic(
+            target,
+            content.encode("utf-8"),
+            expected_revision=expected_revision,
+            create_only=create_only,
+        )
 
-    def write_bytes_atomic(self, path: str, content: bytes) -> None:
+    def write_bytes_atomic(
+        self,
+        path: str,
+        content: bytes,
+        *,
+        expected_revision: str | None = None,
+        create_only: bool = False,
+    ) -> FileRevision:
         target = self.resolve_write(path)
-        self._write_atomic(target, content)
+        return self._write_atomic(
+            target,
+            content,
+            expected_revision=expected_revision,
+            create_only=create_only,
+        )
+
+    def probe_create_only_support(self) -> None:
+        """Verify the mounted vault supports the hard-link no-replace primitive."""
+        if self.policy.read_only:
+            return
+        probe_dirs = {""}
+        if self.policy.write_paths:
+            probe_dirs = {
+                rule.rstrip("/")
+                if rule.endswith("/")
+                else rule.rsplit("/", 1)[0]
+                if "/" in rule
+                else ""
+                for rule in self.policy.write_paths
+            }
+        for probe_dir in sorted(probe_dirs):
+            self._probe_create_only_directory(probe_dir)
+
+    def _probe_create_only_directory(self, probe_dir: str) -> None:
+        probe_name = f".obsidian-mcp-link-probe-{uuid.uuid4().hex}"
+        try:
+            context = _opened_dir(self.policy.root, probe_dir)
+            with context as directory_fd:
+                self._run_create_only_probe(directory_fd, probe_name)
+        except FileNotFoundError as exc:
+            raise SecureStorageError(
+                f"Configured writable directory does not exist: {probe_dir!r}"
+            ) from exc
+
+    @staticmethod
+    def _run_create_only_probe(directory_fd: int, probe_name: str) -> None:
+        source = f"{probe_name}.source"
+        destination = f"{probe_name}.destination"
+        fd = os.open(
+            source,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        os.close(fd)
+        try:
+            os.link(
+                source,
+                destination,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except OSError as exc:
+            raise SecureStorageError(
+                "The writable vault filesystem does not support atomic no-replace file creation"
+            ) from exc
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(destination, dir_fd=directory_fd)
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(source, dir_fd=directory_fd)
 
     def make_dir(self, path: str) -> VaultPath:
         target = self.resolve_write(path)

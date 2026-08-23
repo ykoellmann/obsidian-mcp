@@ -23,6 +23,12 @@ def test_home_server_compose_has_read_only_vault_and_nested_write_overlays():
     for flag in ("ENABLE_MOVE", "ENABLE_FOLDER_RENAME", "ENABLE_BULK_REPLACE"):
         assert service["environment"][flag] == "${" + flag + ":-false}"
     assert service["environment"]["ENABLE_DELETE"] == "false"
+    assert service["environment"]["REQUIRE_WRITE_PRECONDITIONS"] == (
+        "${REQUIRE_WRITE_PRECONDITIONS:-true}"
+    )
+    assert service["environment"]["INDEX_RECONCILE_INTERVAL"] == (
+        "${INDEX_RECONCILE_INTERVAL:-900}"
+    )
 
 
 def test_home_server_compose_uses_private_tunnel_network():
@@ -40,3 +46,4 @@ def test_generic_compose_defaults_to_read_only_and_persistent_fastmcp_home():
     environment = document["services"]["obsidian-mcp"]["environment"]
     assert "READ_ONLY=${READ_ONLY:-true}" in environment
     assert "FASTMCP_HOME=${FASTMCP_HOME:-/data/fastmcp}" in environment
+    assert "REQUIRE_WRITE_PRECONDITIONS=${REQUIRE_WRITE_PRECONDITIONS:-true}" in environment

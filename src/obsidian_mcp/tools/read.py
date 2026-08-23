@@ -45,7 +45,7 @@ def list_notes(folder: str = "", include_meta: bool = False) -> list:
 
 def read_note(path: str) -> dict:
     cfg = get_config()
-    raw = VaultStorage.from_config(cfg).read_text(path)
+    raw, revision = VaultStorage.from_config(cfg).read_text_with_revision(path)
     note = parse_note(raw, path=path)
     return {
         "content": note.content,
@@ -77,6 +77,7 @@ def read_note(path: str) -> dict:
             for t in note.tasks
         ],
         "inline_fields": note.inline_fields,
+        "revision": revision.token,
     }
 
 
@@ -163,7 +164,7 @@ def get_note_outline(path: str) -> dict:
     """Return the structural map of a note: headings, block refs, frontmatter keys.
     Does not return body text — efficient for large notes."""
     cfg = get_config()
-    raw = VaultStorage.from_config(cfg).read_text(path)
+    raw, revision = VaultStorage.from_config(cfg).read_text_with_revision(path)
     note = parse_note(raw, path=path)
 
     headings = [
@@ -183,6 +184,7 @@ def get_note_outline(path: str) -> dict:
         "inline_fields": note.inline_fields,
         "word_count": len(raw.split()),
         "line_count": len(raw.splitlines()),
+        "revision": revision.token,
     }
 
 

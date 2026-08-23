@@ -73,6 +73,8 @@ VAULT_PATH=/path/to/your/obsidian/vault
 # DENY_READ_PATHS=.obsidian/,.trash/ # security boundary for all reads
 # DENY_WRITE_PATHS=.obsidian/,.trash/,_AI_INSTRUCTIONS.md
 # ALLOW_PERMANENT_DELETE=false
+# REQUIRE_WRITE_PRECONDITIONS=true # require read revision before full overwrite
+# INDEX_RECONCILE_INTERVAL=900     # full Markdown hash sweep every 15 minutes
 # TRANSPORT=stdio           # stdio (default), http (recommended for network use), or sse (legacy)
 ```
 
@@ -93,6 +95,21 @@ by the MCP process umask. Atomic overwrites preserve the existing file's
 permission bits. In a shared sync deployment, run the MCP and sync daemon with
 compatible UID/GID and umask settings so both can continue reading and updating
 new notes; the home-server profile exposes these as `PUID` and `PGID`.
+
+Direct note reads return an opaque `sha256:...` revision. Pass it as
+`expected_revision` when replacing or appending to an existing note so an edit
+landed by Obsidian Sync during the client's think time is reported as a conflict
+instead of silently overwritten. Network Compose configurations enable strict
+full-overwrite preconditions by default. Incremental patch/tag/frontmatter tools
+always protect the exact version they read internally. This is optimistic
+concurrency, not exactly-once execution: after a lost append response, re-read
+and verify the result before retrying without the old revision.
+
+Watcher events are debounced, and the index additionally hashes readable,
+indexable Markdown every 15 minutes by default to repair missed events. PDFs,
+images, other attachments, excluded paths, and Excalidraw files are not hashed.
+See [the design note](docs/implementation/phase-3-sync-concurrency.md) for the
+scope, measured cost, health fields, and remaining final-rename race.
 
 Full list of variables — including `API_KEY`, `PUBLIC_BASE_URL`, and the
 `OAUTH_GITHUB_*` variables for the optional second auth variant — is
@@ -179,7 +196,11 @@ The `docker-compose.yml` pulls the pre-built image from GHCR — no cloning or b
 
 If you enable GitHub OAuth (see [Option B](#option-b-github-oauth-claudeai-webmobile-custom-connector)), uncomment the `fastmcp-data` volume in `docker-compose.yml` so logins survive container restarts.
 
-The image has a built-in `HEALTHCHECK` against `GET /health` (unauthenticated, no vault content or filesystem paths — just `{status, index_ready}`), visible in `docker ps`/`docker compose ps`. Only meaningful for `TRANSPORT=http`/`sse`; a no-op for `stdio`.
+The image has a built-in `HEALTHCHECK` against `GET /health` (unauthenticated,
+with no vault content or filesystem paths). It reports index readiness plus the
+last reconciliation time, duration, and error, and is visible in
+`docker ps`/`docker compose ps`. Only meaningful for `TRANSPORT=http`/`sse`; a
+no-op for `stdio`.
 
 ### Hardened home-server Compose profile
 
@@ -334,7 +355,9 @@ etc.) automatically and redirects you to GitHub to log in on first connect.
 > claude.ai out and forces re-authentication. Set `FASTMCP_HOME` to a mounted
 > path (see `docker-compose.yml`) to avoid that.
 
-Keep the vault synced on the server with Syncthing, git+cron, rclone, or Obsidian Sync — obsidian-mcp picks up changes automatically via its file watcher.
+Keep the vault synced on the server with Syncthing, git+cron, rclone, or
+Obsidian Sync. The file watcher picks up normal changes, while periodic
+Markdown reconciliation repairs missed watcher events.
 
 ## Vault Conventions (Customization)
 
