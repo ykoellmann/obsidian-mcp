@@ -20,13 +20,15 @@ services:
       HOST: 0.0.0.0
       PORT: 8000
       READ_ONLY: "false"
+      READ_PATHS: "${READ_PATHS:-}"
       WRITE_PATHS: "${AI_MEMORY_PATH:-AI-Memory}/,${AI_OUTPUT_PATH:-AI-Output}/"
       DENY_READ_PATHS: ".obsidian/,.trash/"
       DENY_WRITE_PATHS: ".obsidian/,.trash/,_AI_INSTRUCTIONS.md"
       ALLOW_PERMANENT_DELETE: "false"
       MAX_ATTACHMENT_BYTES: "${MAX_ATTACHMENT_BYTES:-26214400}"
       LOCK_PATH: /data/locks
-      EXCLUDE_PATHS: "private,.obsidian,.trash"
+      AUDIT_LOG_PATH: /data/audit.jsonl
+      EXCLUDE_PATHS: "private/,.obsidian/,.trash/"
       API_KEY: "${API_KEY:?set API_KEY in .env}"
       ENABLE_CANVAS: "${ENABLE_CANVAS:-false}"
       ENABLE_EXCALIDRAW: "${ENABLE_EXCALIDRAW:-false}"

@@ -35,6 +35,7 @@ _HIGH_RISK_TOOLS = {
     "delete": {
         "delete_note_tool",
         "delete_folder_tool",
+        "list_trash_tool",
         "restore_note_tool",
         "restore_folder_tool",
     },

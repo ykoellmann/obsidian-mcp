@@ -22,6 +22,7 @@ from .policy import (
     VaultAccessPolicy,
     VaultPath,
     VaultPathError,
+    WritePermissionError,
 )
 
 PathTraversalError = VaultPathError
@@ -81,7 +82,9 @@ def _file_flags() -> int:
 
 
 @contextlib.contextmanager
-def _opened_parent(root: Path, relative: str, *, create: bool = False) -> Iterator[tuple[int, str]]:
+def _opened_parent(
+    root: Path, relative: str, *, create_from: int | None = None
+) -> Iterator[tuple[int, str]]:
     """Yield ``(parent_fd, leaf)`` with every parent opened no-follow."""
     _require_secure_platform()
     parts = [part for part in relative.split("/") if part]
@@ -91,11 +94,11 @@ def _opened_parent(root: Path, relative: str, *, create: bool = False) -> Iterat
     fds = [root_fd]
     try:
         current = root_fd
-        for component in parts[:-1]:
+        for depth, component in enumerate(parts[:-1]):
             try:
                 child = os.open(component, _dir_flags(), dir_fd=current)
             except FileNotFoundError:
-                if not create:
+                if create_from is None or depth < create_from:
                     raise
                 os.mkdir(component, 0o777, dir_fd=current)
                 child = os.open(component, _dir_flags(), dir_fd=current)
@@ -208,6 +211,33 @@ class VaultStorage:
 
     def resolve_delete(self, path: str, *, permanent: bool = False) -> VaultPath:
         return self.policy.resolve_delete(path, permanent=permanent)
+
+    def _write_create_from(self, target: VaultPath) -> int:
+        """First parent depth that a matching write scope permits creating."""
+        if not self.policy.write_paths:
+            return 0
+        matching_scopes = (
+            self.policy.rule_path(rule)
+            for rule in self.policy.write_paths
+            if self.policy._matches(target.relative, rule)
+        )
+        return min(max(len(scope.split("/")) - 1, 0) for scope in matching_scopes)
+
+    @contextlib.contextmanager
+    def _opened_write_parent(self, target: VaultPath) -> Iterator[tuple[int, str]]:
+        try:
+            with _opened_parent(
+                self.policy.root,
+                target.relative,
+                create_from=self._write_create_from(target),
+            ) as opened:
+                yield opened
+        except FileNotFoundError as exc:
+            if self.policy.write_paths:
+                raise WritePermissionError(
+                    "A parent above the configured WRITE_PATHS scope does not exist"
+                ) from exc
+            raise
 
     def stat(self, path: str, *, read: bool = True) -> os.stat_result:
         target = self.resolve_read(path) if read else self.resolve_write(path)
@@ -363,7 +393,7 @@ class VaultStorage:
 
     def _write_atomic(self, target: VaultPath, data: bytes) -> None:
         tmp_name = f".obsidian-mcp-tmp-{uuid.uuid4().hex}"
-        with _opened_parent(self.policy.root, target.relative, create=True) as (parent_fd, leaf):
+        with self._opened_write_parent(target) as (parent_fd, leaf):
             try:
                 existing = _ensure_not_symlink(parent_fd, leaf)
             except FileNotFoundError:
@@ -407,7 +437,7 @@ class VaultStorage:
 
     def make_dir(self, path: str) -> VaultPath:
         target = self.resolve_write(path)
-        with _opened_parent(self.policy.root, target.relative, create=True) as (parent_fd, leaf):
+        with self._opened_write_parent(target) as (parent_fd, leaf):
             try:
                 os.mkdir(leaf, 0o777, dir_fd=parent_fd)
             except FileExistsError:
@@ -424,10 +454,10 @@ class VaultStorage:
                 for item in sorted(items, key=lambda entry: entry.name):
                     rel = f"{target.relative}/{item.name}" if target.relative else item.name
                     try:
-                        authorized = self.resolve_read(rel)
                         info = item.stat(follow_symlinks=False)
                         if stat.S_ISLNK(info.st_mode):
                             continue
+                        authorized = self.policy.authorize_discovered_read(rel, info)
                     except (VaultPathError, ReadPermissionError, OSError):
                         continue
                     entries.append(
@@ -482,7 +512,7 @@ class VaultStorage:
     def _rename_relative(self, source: VaultPath, destination: VaultPath) -> None:
         with _opened_parent(self.policy.root, source.relative) as (src_parent, src_leaf):
             _ensure_not_symlink(src_parent, src_leaf)
-            with _opened_parent(self.policy.root, destination.relative, create=True) as (dst_parent, dst_leaf):
+            with self._opened_write_parent(destination) as (dst_parent, dst_leaf):
                 try:
                     _stat_at(dst_parent, dst_leaf)
                 except FileNotFoundError:
@@ -630,7 +660,7 @@ class VaultStorage:
                     os.close(source_fd)
         with (
             _opened_dir(self.policy.root, ".trash") as trash_fd,
-            _opened_parent(self.policy.root, destination.relative, create=True) as (dst_parent, dst_leaf),
+            self._opened_write_parent(destination) as (dst_parent, dst_leaf),
         ):
             try:
                 _stat_at(dst_parent, dst_leaf)

@@ -21,10 +21,12 @@ class Config:
     vault_path: Path = field(init=False)
     read_only: bool = field(init=False)
     write_paths: tuple[str, ...] = field(init=False)
+    read_paths: tuple[str, ...] = field(init=False)
     exclude_paths: tuple[str, ...] = field(init=False)
     deny_read_paths: tuple[str, ...] = field(init=False)
     deny_write_paths: tuple[str, ...] = field(init=False)
     lock_path: Path = field(init=False)
+    audit_log_path: Path = field(init=False)
     allow_permanent_delete: bool = field(init=False)
     max_attachment_bytes: int = field(init=False)
     transport: str = field(init=False)
@@ -61,6 +63,15 @@ class Config:
 
         raw_write = os.environ.get("WRITE_PATHS", "")
         try:
+            set_value(
+                self,
+                "read_paths",
+                tuple(
+                    path_rules_from_env(
+                        os.environ.get("READ_PATHS", ""), name="READ_PATHS"
+                    )
+                ),
+            )
             set_value(
                 self, "write_paths", tuple(path_rules_from_env(raw_write, name="WRITE_PATHS"))
             )
@@ -119,6 +130,22 @@ class Config:
             )
         if self.lock_path == self.vault_path or self.vault_path in self.lock_path.parents:
             raise ConfigError("LOCK_PATH must be outside VAULT_PATH")
+
+        raw_audit_path = os.environ.get("AUDIT_LOG_PATH", "")
+        audit_log_path = (
+            Path(os.path.abspath(Path(raw_audit_path).expanduser()))
+            if raw_audit_path
+            else self.lock_path / "audit.jsonl"
+        )
+        resolved_audit_parent = audit_log_path.parent.resolve()
+        if (
+            audit_log_path == self.vault_path
+            or self.vault_path in audit_log_path.parents
+            or resolved_audit_parent == self.vault_path
+            or self.vault_path in resolved_audit_parent.parents
+        ):
+            raise ConfigError("AUDIT_LOG_PATH must be outside VAULT_PATH")
+        set_value(self, "audit_log_path", audit_log_path)
 
         set_value(
             self,

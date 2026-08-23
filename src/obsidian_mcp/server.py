@@ -1389,13 +1389,16 @@ if _feature_flags.enable_folder_rename:
     mcp.tool()(rename_folder_tool)
 
 
-@mcp.tool()
 def list_trash_tool() -> dict:
     """List items sitting in .trash/ (from delete_note_tool/delete_folder_tool
     with trash=True). Names here are what restore_note_tool/restore_folder_tool
     expect as trashed_name.
     Returns {items: [{name, type, size_bytes, mtime}]}."""
     return list_trash()
+
+
+if _feature_flags.enable_delete:
+    mcp.tool()(list_trash_tool)
 
 
 def restore_folder_tool(trashed_name: str, to_path: str) -> dict:
