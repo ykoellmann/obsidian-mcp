@@ -2,6 +2,7 @@
 identity resolution, and VaultResolutionMiddleware."""
 from __future__ import annotations
 
+import importlib
 import json
 
 import pytest
@@ -12,11 +13,9 @@ import obsidian_mcp.config as cfg_mod
 from obsidian_mcp import server as server_mod
 from obsidian_mcp.config import Config
 from obsidian_mcp.server import (
-    _DEFAULT_INSTRUCTIONS,
     VaultResolutionMiddleware,
     _APIKeyAuthProvider,
     _identities_from_env,
-    _load_instructions,
     _resolve_identity,
     _select_vault,
     list_vaults_tool,
@@ -79,15 +78,21 @@ def test_shared_server_instructions_do_not_expose_default_vault_conventions(
     (tmp_path / "a" / "_AI_INSTRUCTIONS.md").write_text(
         "private default-vault instructions", encoding="utf-8"
     )
-    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
-    monkeypatch.setenv("TRANSPORT", "sse")
-    monkeypatch.delenv("VAULT_PATH", raising=False)
-    monkeypatch.setattr(cfg_mod, "_config", None)
+    with monkeypatch.context() as profile_env:
+        profile_env.setenv("VAULTS_CONFIG", str(config_path))
+        profile_env.setenv("TRANSPORT", "sse")
+        profile_env.setenv("TOOL_PROFILE", "focused")
+        profile_env.delenv("VAULT_PATH", raising=False)
+        profile_env.setattr(cfg_mod, "_config", None)
+        server = importlib.reload(server_mod)
 
-    instructions = _load_instructions()
+        instructions = server._load_instructions()
 
-    assert instructions == _DEFAULT_INSTRUCTIONS
-    assert "private default-vault instructions" not in instructions
+        assert instructions == server._FOCUSED_INSTRUCTIONS
+        assert "private default-vault instructions" not in instructions
+
+    cfg_mod._config = None
+    importlib.reload(server_mod)
 
 
 # ── _APIKeyAuthProvider (multi-key) ─────────────────────────────────────────

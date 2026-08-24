@@ -78,6 +78,7 @@ VAULT_PATH=/path/to/your/obsidian/vault
 # REQUIRE_WRITE_PRECONDITIONS=true # require read revision before full overwrite
 # INDEX_RECONCILE_INTERVAL=900     # full Markdown hash sweep every 15 minutes
 # TRANSPORT=stdio           # stdio (default), http (recommended for network use), or sse (legacy)
+# TOOL_PROFILE=full         # opt into the larger compatibility surface
 ```
 
 Slash-suffixed policy entries such as `Notes/` cover that directory and its
@@ -116,7 +117,9 @@ not inspect existing content, but `write_note_tool` is not one of them.
 The best-effort JSONL audit log is application state, not vault content. It
 defaults beneath `LOCK_PATH` for native runs and to `/data/audit.jsonl` in
 Docker. `AUDIT_LOG_PATH` must remain outside `VAULT_PATH`; the final log file
-is opened without following symlinks.
+is opened without following symlinks. In multi-vault mode it must remain
+outside every vault root configured in `vaults.json`; startup validation
+rejects any overlap.
 
 New files and directories use the normal `0666`/`0777` creation modes filtered
 by the MCP process umask. Atomic overwrites preserve the existing file's
@@ -143,6 +146,40 @@ Full list of variables — including `API_KEY`, `PUBLIC_BASE_URL`, and the
 `OAUTH_GITHUB_*` variables for the optional second auth variant — is
 documented with inline comments in `.env.example`; see [Remote Setup](#remote-setup-recommended)
 for the two auth variants in detail.
+
+### Tool profiles
+
+`TOOL_PROFILE=focused` is the default. It permits these 33 base tools (31 are
+registered by default; move and folder rename still require their flags):
+
+```text
+list_vaults_tool, get_vault_conventions_tool, list_notes_tool,
+list_folder_tool, read_note_tool, get_note_outline_tool, search_notes_tool,
+find_similar_notes_tool, query_notes_tool, write_note_tool, patch_note_tool,
+patch_note_text_tool, append_to_note_tool, patch_frontmatter_tool,
+manage_tags_tool, move_note_tool, create_folder_tool, rename_folder_tool,
+get_backlinks_tool, get_broken_links_tool, get_orphans_tool,
+get_link_graph_tool, get_tasks_tool, get_periodic_note_tool, lint_schema_tool,
+get_vault_stats_tool, list_all_tags_tool, list_templates_tool,
+create_from_template_tool, list_attachments_tool, read_attachment_tool,
+add_attachment_tool, create_attachment_token_tool
+```
+
+Set `TOOL_PROFILE=full` to opt into the larger compatibility surface. It
+permits all 48 base tools; the separate high-impact mutation gates described
+below leave 40 registered unless explicitly enabled.
+
+The focused profile hides uncommon administrative, destructive, batch, audit,
+rendered-read, and alias convenience tools; their Python implementations and
+the full profile remain available. Profiles only reduce what the model sees:
+`READ_ONLY`, authentication, `WRITE_PATHS`, and `EXCLUDE_PATHS` still control
+access. Each explicitly enabled optional format group is added to either
+profile. High-impact feature gates and profiles intersect: enabling a tool
+does not expose it if the selected profile also hides it.
+
+If a documented capability is missing, check `TOOL_PROFILE` and the relevant
+`ENABLE_*` flag, then reconnect the MCP client so it refreshes
+`tools/list`.
 
 ### Optional plugin-format tools (Canvas / Excalidraw / Kanban / Bases)
 
