@@ -69,10 +69,11 @@ _PROFILE_ENV = (
 _SCHEMA_SNAPSHOT = Path(__file__).parent / "snapshots" / "tool_profile_input_schemas.json"
 
 
-def _reload_server(monkeypatch, profile: str = "full", **flags: bool):
+def _reload_server(monkeypatch, profile: str | None = "full", **flags: bool):
     for name in _PROFILE_ENV:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("TOOL_PROFILE", profile)
+    if profile is not None:
+        monkeypatch.setenv("TOOL_PROFILE", profile)
     for group, enabled in flags.items():
         monkeypatch.setenv(f"ENABLE_{group.upper()}", "true" if enabled else "false")
     cfg_mod._config = None
@@ -85,11 +86,7 @@ async def _tool_names(server) -> set[str]:
 
 @pytest.mark.asyncio
 async def test_default_focused_profile_has_exact_surface(monkeypatch):
-    monkeypatch.delenv("TOOL_PROFILE", raising=False)
-    for name in _PROFILE_ENV:
-        if name != "TOOL_PROFILE":
-            monkeypatch.delenv(name, raising=False)
-    server = importlib.reload(server_mod)
+    server = _reload_server(monkeypatch, profile=None)
     assert await _tool_names(server) == DEFAULT_FOCUSED_TOOL_NAMES
 
 
@@ -97,6 +94,13 @@ async def test_default_focused_profile_has_exact_surface(monkeypatch):
 async def test_explicit_full_profile_has_exact_documented_surface(monkeypatch):
     server = _reload_server(monkeypatch, "full")
     assert await _tool_names(server) == DEFAULT_FULL_TOOL_NAMES
+
+
+def test_documented_profile_cardinalities():
+    assert len(BASE_FULL_TOOL_NAMES) == 48
+    assert len(DEFAULT_FULL_TOOL_NAMES) == 40
+    assert len(FOCUSED_TOOL_NAMES) == 33
+    assert len(DEFAULT_FOCUSED_TOOL_NAMES) == 31
 
 
 @pytest.mark.asyncio

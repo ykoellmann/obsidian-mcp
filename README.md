@@ -117,7 +117,9 @@ not inspect existing content, but `write_note_tool` is not one of them.
 The best-effort JSONL audit log is application state, not vault content. It
 defaults beneath `LOCK_PATH` for native runs and to `/data/audit.jsonl` in
 Docker. `AUDIT_LOG_PATH` must remain outside `VAULT_PATH`; the final log file
-is opened without following symlinks.
+is opened without following symlinks. In multi-vault mode it must remain
+outside every vault root configured in `vaults.json`; startup validation
+rejects any overlap.
 
 New files and directories use the normal `0666`/`0777` creation modes filtered
 by the MCP process umask. Atomic overwrites preserve the existing file's
