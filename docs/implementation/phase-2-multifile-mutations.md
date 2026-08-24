@@ -2,8 +2,14 @@
 
 ## Status
 
-Proposed implementation plan. Depends on Phase 1's canonical path and storage
-policy APIs.
+Parked. The transaction-based implementation developed from this plan was
+closed after review found that its complexity and operational costs outweighed
+the underlying consistency problem. Do not implement this plan as written.
+
+See
+[`multi-file-mutations-reassessment.md`](multi-file-mutations-reassessment.md)
+for the findings, current decision, and the much smaller roll-forward design to
+consider if this work is resumed.
 
 ## Objective
 

@@ -1,6 +1,8 @@
 services:
   obsidian-mcp:
     image: ghcr.io/ykoellmann/obsidian-mcp:latest
+    # Inherits the image's /health HEALTHCHECK (including its startup grace
+    # period); duplicating it here would create two sources of truth.
     # To build locally instead: comment out 'image' and uncomment 'build'
     # build: .
     restart: unless-stopped
@@ -18,6 +20,9 @@ services:
       - DENY_WRITE_PATHS=${DENY_WRITE_PATHS:-.obsidian/,.trash/,_AI_INSTRUCTIONS.md}
       - ALLOW_PERMANENT_DELETE=${ALLOW_PERMANENT_DELETE:-false}
       - MAX_ATTACHMENT_BYTES=${MAX_ATTACHMENT_BYTES:-26214400}
+      - REQUIRE_WRITE_PRECONDITIONS=${REQUIRE_WRITE_PRECONDITIONS:-true}
+      - WATCHER_DEBOUNCE_MS=${WATCHER_DEBOUNCE_MS:-100}
+      - INDEX_RECONCILE_INTERVAL=${INDEX_RECONCILE_INTERVAL:-900}
       - LOCK_PATH=${LOCK_PATH:-/data/locks}
       - AUDIT_LOG_PATH=${AUDIT_LOG_PATH:-/data/audit.jsonl}
       - EXCLUDE_PATHS=${EXCLUDE_PATHS:-private/,.obsidian/,.trash/}

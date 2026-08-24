@@ -10,6 +10,7 @@ services:
   obsidian-mcp:
     build:
       context: .
+    # The locally built image supplies the /health HEALTHCHECK.
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
     environment:
@@ -26,6 +27,9 @@ services:
       DENY_WRITE_PATHS: ".obsidian/,.trash/,_AI_INSTRUCTIONS.md"
       ALLOW_PERMANENT_DELETE: "false"
       MAX_ATTACHMENT_BYTES: "${MAX_ATTACHMENT_BYTES:-26214400}"
+      REQUIRE_WRITE_PRECONDITIONS: "${REQUIRE_WRITE_PRECONDITIONS:-true}"
+      WATCHER_DEBOUNCE_MS: "${WATCHER_DEBOUNCE_MS:-100}"
+      INDEX_RECONCILE_INTERVAL: "${INDEX_RECONCILE_INTERVAL:-900}"
       LOCK_PATH: /data/locks
       AUDIT_LOG_PATH: /data/audit.jsonl
       EXCLUDE_PATHS: "private/,.obsidian/,.trash/"

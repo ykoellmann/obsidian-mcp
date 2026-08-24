@@ -400,6 +400,7 @@ def test_main_builds_policy_aware_index_and_watcher_per_vault(tmp_path, monkeypa
     data["vaults"]["private"]["read_paths"] = ["Memory/"]
     data["vaults"]["monari"]["write_paths"] = ["Output/"]
     config_path.write_text(json.dumps(data), encoding="utf-8")
+    (tmp_path / "b" / "Output").mkdir()
     monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
     monkeypatch.setenv("TRANSPORT", "sse")
 
@@ -416,21 +417,32 @@ def test_main_builds_policy_aware_index_and_watcher_per_vault(tmp_path, monkeypa
             self.policy = policy
             created_indices[path.name] = self
 
-        def build(self):
+        def build(self, *, publish_ready=True):
+            self.publish_ready = publish_ready
             return None
 
         def update(self, _path):
             return None
 
+        def reconcile(self):
+            self.reconciled = True
+
+        def mark_ready(self):
+            self.ready = True
+
     class FakeWatcher:
-        def __init__(self, path, *, policy):
+        def __init__(self, path, *, debounce_ms, reconcile_interval, policy):
             self.path = path
+            self.debounce_ms = debounce_ms
+            self.reconcile_interval = reconcile_interval
             self.policy = policy
             self.callback = None
+            self.reconcile_callback = None
             created_watchers[path.name] = self
 
-        def start(self, *, on_change):
+        def start(self, *, on_change, on_reconcile):
             self.callback = on_change
+            self.reconcile_callback = on_reconcile
 
     class FakeThread:
         def __init__(self, *, target, daemon):
@@ -456,3 +468,7 @@ def test_main_builds_policy_aware_index_and_watcher_per_vault(tmp_path, monkeypa
     assert created_indices["b"].policy.write_paths == ("Output/",)
     assert created_watchers["a"].policy is created_indices["a"].policy
     assert created_watchers["b"].policy is created_indices["b"].policy
+    assert created_indices["a"].publish_ready is False
+    assert created_indices["a"].reconciled is True
+    assert created_indices["a"].ready is True
+    assert created_watchers["a"].reconcile_callback == created_indices["a"].reconcile

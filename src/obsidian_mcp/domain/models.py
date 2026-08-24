@@ -1,6 +1,66 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(frozen=True)
+class FileRevision:
+    """A content revision. Only the SHA-256 token is part of the public API."""
+
+    sha256: str
+    size: int
+    mtime_ns: int
+
+    @property
+    def token(self) -> str:
+        return f"sha256:{self.sha256}"
+
+    @classmethod
+    def from_bytes(cls, content: bytes, *, mtime_ns: int) -> FileRevision:
+        return cls(hashlib.sha256(content).hexdigest(), len(content), mtime_ns)
+
+
+def normalize_revision_token(value: str) -> str:
+    """Validate and normalize the opaque revision accepted from MCP clients."""
+    digest = value.strip().removeprefix("sha256:").lower()
+    if len(digest) != 64:
+        raise ValueError("expected_revision must be a sha256:<64 hex characters> token")
+    try:
+        int(digest, 16)
+    except ValueError as exc:
+        raise ValueError("expected_revision must be a sha256:<64 hex characters> token") from exc
+    return f"sha256:{digest}"
+
+
+class RevisionConflictError(RuntimeError):
+    """A conditional mutation observed a different current file revision."""
+
+    def __init__(self, path: str, expected: str | None, actual: FileRevision | None) -> None:
+        self.path = path
+        self.expected = normalize_revision_token(expected) if expected is not None else None
+        self.actual = actual
+        super().__init__(f"Revision conflict for {path!r}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "error": "revision_conflict",
+            "path": self.path,
+            "expected_revision": self.expected,
+            "actual_revision": self.actual.token if self.actual else None,
+        }
+
+
+class PreconditionRequiredError(PermissionError):
+    """Strict mode requires the caller to pin replacement to a prior read."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        super().__init__(f"expected_revision is required to overwrite {path!r}")
+
+    def to_dict(self) -> dict[str, str]:
+        return {"error": "precondition_required", "path": self.path}
 
 
 @dataclass

@@ -106,6 +106,9 @@ def test_security_path_defaults_and_lock_outside_vault(tmp_path, monkeypatch):
     assert cfg.enable_folder_rename is False
     assert cfg.enable_bulk_replace is False
     assert cfg.enable_delete is False
+    assert cfg.require_write_preconditions is False
+    assert cfg.index_reconcile_interval == 900
+    assert cfg.watcher_debounce_ms == 100
 
 
 def test_native_default_lock_path_is_external_and_usable(tmp_path, monkeypatch):
@@ -162,6 +165,24 @@ def test_max_attachment_bytes_must_be_positive(tmp_path, monkeypatch, value):
 def test_max_attachment_bytes_defaults_to_25_mib(tmp_path, monkeypatch):
     _base_env(monkeypatch, tmp_path)
     assert Config().max_attachment_bytes == 25 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("INDEX_RECONCILE_INTERVAL", "0"),
+        ("INDEX_RECONCILE_INTERVAL", "invalid"),
+        ("INDEX_RECONCILE_INTERVAL", "nan"),
+        ("INDEX_RECONCILE_INTERVAL", "inf"),
+        ("WATCHER_DEBOUNCE_MS", "-1"),
+        ("WATCHER_DEBOUNCE_MS", "invalid"),
+    ],
+)
+def test_sync_timing_configuration_is_validated(tmp_path, monkeypatch, name, value):
+    _base_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ConfigError, match=name):
+        Config()
 
 
 @pytest.mark.parametrize(

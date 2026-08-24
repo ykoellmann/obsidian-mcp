@@ -55,3 +55,36 @@ async def test_health_requires_no_auth(tmp_path, vault_factory, monkeypatch):
         resp = await client.get("/health")
 
     assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_health_is_503_until_index_is_ready(tmp_path, monkeypatch):
+    index = server.VaultIndex(tmp_path)
+    cfg = server.get_config()
+    monkeypatch.setattr(server, "_cfg", cfg)
+    monkeypatch.setattr(server, "_indices", {cfg.default_vault_name: index})
+
+    async with _client() as client:
+        resp = await client.get("/health")
+
+    assert resp.status_code == 503
+    assert resp.json()["index_ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_periodic_reconcile_error_is_reported_without_discarding_ready_index(
+    tmp_path, vault_factory, monkeypatch
+):
+    index = vault_factory({"note.md": "content"})
+    monkeypatch.setattr(index._storage, "list_files", lambda: (_ for _ in ()).throw(OSError("disk")))
+    with pytest.raises(OSError):
+        index.reconcile()
+    cfg = server.get_config()
+    monkeypatch.setattr(server, "_cfg", cfg)
+    monkeypatch.setattr(server, "_indices", {cfg.default_vault_name: index})
+
+    async with _client() as client:
+        resp = await client.get("/health")
+
+    assert resp.status_code == 200
+    assert resp.json()["last_reconcile_error"] == "disk"

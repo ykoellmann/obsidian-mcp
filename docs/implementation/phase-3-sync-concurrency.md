@@ -1,411 +1,141 @@
-# Phase 3: Sync-aware concurrency and conflict handling
+# Simplified sync hardening
 
-## Status
+## Goal and threat model
 
-Proposed implementation plan. Depends on Phase 1 and uses Phase 2's revision and
-mutation-plan concepts.
+The MCP server and Obsidian Sync may write the same vault without sharing a
+lock. The realistic lost-update window is the time between an MCP client
+reading a note and later writing its answer, while a phone or desktop edit is
+synced into the same file.
 
-## Objective
+This design detects that conflict with content revisions and keeps the search
+index self-healing. It does not attempt distributed transactions, automatic
+Markdown merging, or exactly-once execution.
 
-Prevent silent lost updates when obsidian-mcp and a non-cooperating sync process
-modify the same vault. Make conflicts visible, recoverable and safe for an MCP
-client to retry.
+## Content revisions
 
-The target deployment runs obsidian-mcp beside Obsidian Headless Sync. Both
-processes observe the same host directory, but only the MCP process participates
-in MCP file locks.
-
-## Constraints
-
-- Obsidian Headless Sync does not acquire obsidian-mcp lock files.
-- Atomic replacement prevents partial files but does not prevent last-writer-wins
-  data loss.
-- No portable filesystem primitive atomically compares a content hash and
-  replaces a file.
-- Multi-file mutations cannot be made fully atomic with ordinary filesystem
-  operations.
-- Filesystem watcher events may be duplicated, coalesced, reordered or missed
-  across container bind mounts.
-- Obsidian Sync conflict handling is useful recovery behavior, not an
-  application-level concurrency contract.
-
-The design therefore combines optimistic revisions, narrow write windows,
-idempotency, conflict copies, watcher reconciliation and operational limits.
-
-## Revision model
-
-Define a strong content revision:
-
-```python
-@dataclass(frozen=True)
-class FileRevision:
-    sha256: str
-    size: int
-    mtime_ns: int
-```
-
-The SHA-256 content hash is authoritative. Size and nanosecond mtime are fast
-change detectors and diagnostics, not security decisions.
-
-All reads that may precede a write should return a revision:
-
-- `read_note_tool`;
-- `get_note_outline_tool`;
-- `read_attachment_tool`;
-- Canvas, Bases, Excalidraw and Kanban reads;
-- mutation dry runs.
-
-Example:
-
-```json
-{
-  "path": "AI-Memory/session.md",
-  "revision": {
-    "sha256": "...",
-    "size": 1234,
-    "mtime_ns": 1787390000000000000
-  }
-}
-```
-
-## Write preconditions
-
-Mutations of existing files accept `expected_revision`:
-
-```python
-write_note(path, content, expected_revision=None, create_only=False)
-patch_note(path, ..., expected_revision=None)
-delete_note(path, expected_revision=None)
-move_note(path, ..., expected_revision=None)
-```
-
-Modes:
-
-- `create_only=true`: fail if the destination exists;
-- `expected_revision=<sha256>`: fail unless current content matches;
-- no precondition: allowed only when policy explicitly permits blind writes.
-
-Add configuration:
-
-```env
-REQUIRE_WRITE_PRECONDITIONS=true
-ALLOW_BLIND_CREATE=true
-ALLOW_BLIND_OVERWRITE=false
-```
-
-Recommended behavior:
-
-- creating a unique new file does not require a prior revision;
-- overwriting, patching, deleting or moving an existing file requires a revision;
-- append can be revisionless only when it is idempotent and rereads the latest
-  content while holding the MCP lock;
-- HTTP attachment PUT uses `If-Match` and `If-None-Match: *` semantics.
-
-On mismatch, return a structured conflict:
-
-```json
-{
-  "error": "revision_conflict",
-  "path": "AI-Memory/session.md",
-  "expected": "sha256:...",
-  "actual": "sha256:...",
-  "current_mtime_ns": 1787390000000000000
-}
-```
-
-Do not include current file content automatically; the caller must issue a new
-authorized read.
-
-## Safe single-file write algorithm
-
-For an existing file:
-
-1. Resolve and authorize the path.
-2. Acquire the external MCP path lock.
-3. Open and hash the current file.
-4. Compare it with `expected_revision`.
-5. Produce the new content from that exact version.
-6. Write and flush a temporary file beside the destination.
-7. Re-hash the destination immediately before replacement; metadata is only an
-   optimization and never substitutes for content validation.
-8. If it changed, retain neither the staged file nor a misleading success result;
-   return a conflict.
-9. Atomically replace the destination.
-10. Hash the committed file and return its new revision.
-
-Step 7 cannot eliminate the final race with a non-cooperating writer. The
-completion guarantee is therefore conflict detection and recovery evidence,
-not proof that no external writer raced the final replacement. Use a
-platform-specific compare-and-swap/no-clobber primitive where available, detect
-post-write divergence, and retain filesystem snapshots and Sync history as
-recovery layers.
-
-## Idempotent append
-
-Retries are common with remote MCP clients. Add an optional `operation_id` to
-append-like tools:
-
-```python
-append_to_note(path, content, operation_id="uuid")
-```
-
-Maintain a small SQLite operation ledger at the configured external
-operation-ledger path, never inside the vault:
+Each direct note read returns an opaque revision token:
 
 ```text
-principal_id
-operation_id
-tool_name
-target_path
-request_digest
-status                    # pending | complete
-initial_revision
-expected_result_revision
-result_revision
-result_json
-created_at
-PRIMARY KEY (principal_id, operation_id)
+sha256:<64 lowercase hexadecimal characters>
 ```
 
-Rules:
+SHA-256 of the exact file bytes is authoritative. Size and nanosecond mtime are
+kept internally for diagnostics, but never decide whether content is unchanged.
+Direct single-file mutations return the new revision. List and search results do
+not hash every result and do not include revisions.
 
-- the same principal, operation ID and request digest returns the stored result;
-- reuse with different content is rejected;
-- never expire a `pending` row automatically; retain it until retry or operator
-  reconciliation proves whether the replacement occurred;
-- retain each `complete` row for at least the configured supported retry window;
-  clients must not expect idempotent replay after that advertised window;
-- use `BEGIN IMMEDIATE` plus the composite primary key to atomically reserve a
-  unique pending operation before replacement; a concurrent retry must observe
-  that reservation rather than execute the append again;
-- persist `initial_revision` and `expected_result_revision` in the pending row,
-  then atomically transition it to `complete` with `result_revision` and
-  `result_json` after replacement;
-- before processing any retry, resolve the target through the current
-  `VaultAccessPolicy`; changes to `READ_ONLY`, `WRITE_PATHS` or deny rules must
-  reject the request before staging, replacement or pending-row recovery can
-  mutate the vault;
-- after authorization, reconcile a pending row against its expected post-state:
-  finalize the result when the replacement is proven, retry only when the
-  original state is proven, and otherwise return outcome-unknown without
-  repeating the append;
-- do not store note content in the ledger.
+Incremental read-modify-write tools read content and its revision together once,
+derive their change from those bytes, and pass that revision to the atomic write.
+A caller may also supply `expected_revision` to pin the mutation to an earlier
+read. Full replacement tools accept `expected_revision` and `create_only`.
 
-For append-heavy memory, prefer one event per uniquely named file over repeatedly
-appending to a shared note. This is naturally idempotent and minimizes conflicts.
+`REQUIRE_WRITE_PRECONDITIONS=true` makes an existing full-file replacement
+require the revision returned by an earlier read. Creating a missing path remains
+allowed and automatically uses no-replace semantics. The native default is
+`false` for compatibility; network Compose examples default it to `true`.
 
-## Conflict-copy policy
+Revision mismatches are returned as MCP error results (`isError: true`) with a
+machine-readable `revision_conflict` payload. The current content is not included;
+the client must read again before deciding whether to retry or merge.
 
-Do not silently merge arbitrary Markdown in the MCP server.
+## Atomic writes and their limit
 
-When a revision conflict occurs:
+For an existing file, the storage gateway:
 
-- leave the current vault file untouched;
-- return a conflict to the client;
-- optionally save the proposed content outside the vault under
-  the configured conflict directory under an opaque identifier derived from
-  principal and operation ID (never join caller input directly as a path);
-- expose an operator command to inspect or discard staged conflict content;
-- never put secrets or denied source content into a conflict record.
+1. authorizes and opens the target descriptor-relatively without following links;
+2. reads and checks the expected content revision;
+3. writes and flushes a temporary file beside the destination;
+4. checks the destination revision again immediately before replacement;
+5. atomically renames the staged file and flushes the directory;
+6. returns the committed content revision.
 
-For multi-file operations, use Phase 2 transaction recovery and disable them by
-default when continuous external sync is active.
+For a path observed as missing, a hard-link commit provides portable no-replace
+behavior: a concurrent creator wins and MCP returns a conflict instead of
+overwriting it. Startup probes this primitive on every configured writable
+filesystem and fails clearly if the mount does not support it.
 
-## Watcher and index consistency
+The final check and rename are not one portable compare-and-swap operation. A
+non-cooperating sync writer can still land in that very small interval. Revision
+checks materially protect the much larger client think-time window, but snapshots
+and Obsidian Sync history remain the final recovery layer.
 
-### Event handling
+New files and directories continue to use normal `0666`/`0777` creation modes
+filtered by the process umask. Replacing a file preserves its existing permission
+bits.
 
-- Debounce repeated events per canonical path for a short interval.
-- Treat create, modify, move and delete explicitly.
-- Ignore lock, transaction and temporary-file patterns.
-- Never index denied paths.
-- Record the revision most recently indexed.
-- If an event revision already matches the index, skip reparsing.
+## Append and retry behavior
 
-### Startup ordering
+Appending to existing notes is supported. The safe client workflow is:
 
-Current startup launches the initial index build and watcher concurrently. Make
-the sequence deterministic:
+1. read the note and revision `R`;
+2. append using `expected_revision=R`;
+3. if the response is lost, retrying with `R` returns a revision conflict;
+4. read again and verify whether the intended content is present.
 
-1. start watcher event capture into a queue;
-2. build an initial snapshot;
-3. replay queued events against the snapshot;
-4. mark the index ready;
-5. process live events normally.
+This is optimistic concurrency, not exactly-once execution. An append without a
+caller revision still protects the server's own read-to-write interval, but a
+blind retry can append twice. There is deliberately no SQLite operation ledger,
+pending-operation recovery protocol, or conflict-content store.
 
-This avoids losing a sync change that occurs during the initial scan.
+## Watcher and reconciliation
 
-### Reconciliation
+Filesystem events are debounced per path (`WATCHER_DEBOUNCE_MS`, default 100 ms)
+because sync clients commonly produce short event storms.
 
-Add periodic reconciliation even when watchdog/inotify is active:
+Watcher delivery can be lost across bind mounts and network filesystems, so the
+index also performs a full content-revision reconciliation every
+`INDEX_RECONCILE_INTERVAL` seconds (default 900, or 15 minutes). Startup ordering
+is:
 
-```env
-INDEX_RECONCILE_INTERVAL=300
-```
+1. build the initial index;
+2. start the watcher;
+3. run one full reconciliation;
+4. publish the index as ready.
 
-Reconciliation hashes every in-scope file on a bounded periodic schedule;
-size and mtime may prioritize work but cannot be the sole trigger. It repairs
-missed events and removes deleted entries even when metadata was preserved.
+The startup sweep repairs changes that land between the build and watcher start.
+There is no startup event queue or overflow state machine; a later missed event
+self-heals at the next periodic sweep.
 
-Expose health information without sensitive paths:
+Reconciliation hashes only readable, indexable Markdown notes. Attachments,
+excluded paths, denied paths, and `*.excalidraw.md` files are never part of the
+sweep. This invariant is what keeps a vault containing large PDFs, images, or
+audio inexpensive to reconcile. Each Markdown file is read at most once per
+sweep, and changed content is passed directly into indexing rather than read
+again.
 
-```json
-{
-  "status": "ok",
-  "index_ready": true,
-  "last_event_at": "...",
-  "last_reconcile_at": "...",
-  "pending_events": 0,
-  "conflicts_total": 0
-}
-```
+The implementation intentionally does not use a size/mtime stat cache. Same-size
+Obsidian edits are common, and coarse NAS timestamps can otherwise leave a
+"racily clean" note stale indefinitely. Measurements on approximately 1 KB notes
+showed a full-hash pass taking about 0.24 seconds for 1,000 notes, 1.1 seconds for
+5,000, and 2.3 seconds for 10,000. At the default interval, the 10,000-note case
+is roughly a 0.25% background duty cycle. Cold spinning-disk performance may be
+slower, so health reports the observed duration.
 
-## Deployment conventions for Obsidian Headless Sync
+## Readiness and health
 
-Use one host vault directory with asymmetric mounts:
+The unauthenticated health response contains no vault paths or content and adds:
 
-| Container | Mount | Mode |
-|---|---|---|
-| Headless Sync | `/srv/obsidian/vault:/vault` | read-write |
-| MCP | `/srv/obsidian/vault:/vault` | read-only |
-| MCP | `/srv/obsidian/vault/AI-Memory:/vault/AI-Memory` | read-write nested mount |
-| MCP | `/srv/obsidian/vault/AI-Output:/vault/AI-Output` | read-write nested mount |
+- `index_ready`;
+- `last_reconcile_at`;
+- `last_reconcile_duration_seconds`;
+- `last_reconcile_error`.
 
-Run both containers with compatible UID/GID values. The sync container must be
-able to upload MCP-created files, while MCP must be unable to write elsewhere at
-the kernel/filesystem layer.
+A failed initial build or a vault-wide startup scan failure leaves the index
+unready and returns HTTP 503. A failure confined to one Markdown note is
+reported in reconciliation telemetry after the other notes have been swept; it
+does not make the usable index permanently unavailable. Later periodic failures
+likewise do not discard an already usable index or change readiness by
+themselves.
 
-Recommended vault conventions:
+## Deliberately excluded
 
-```text
-AI-Memory/Events/<date>/<uuid>.md     # create-only, preferred
-AI-Memory/Summaries/<period>.md       # conditional overwrite
-AI-Output/Drafts/<uuid>.md            # create-only
-AI-Output/Published/                  # promoted by a human workflow
-```
+- SQLite operation ledger and exactly-once claims;
+- staged conflict copies and operator conflict CLI;
+- HTTP attachment ETag/`If-Match` handling;
+- blind-create/blind-overwrite configuration matrices;
+- stat-cache and filesystem timestamp-granularity probing;
+- multi-file transaction or sync guarantees.
 
-Avoid having a human client and the MCP service repeatedly edit the same
-long-lived note.
-
-Set a distinct Sync device name. Start with the sync implementation's documented
-merge conflict strategy, but retain independent host snapshots.
-
-## Backup and recovery
-
-Obsidian Sync history is useful but is not the sole backup for an automated
-writer. Before enabling writes:
-
-- configure ZFS/Btrfs snapshots, filesystem snapshots, or a versioned backup;
-- retain enough history to cover delayed discovery of an AI mistake;
-- test restoration of one file and the whole vault;
-- monitor free space, sync health and conflict files;
-- alert when the MCP conflict rate or pending watcher queue is non-zero for a
-  sustained period.
-
-## File-level changes
-
-### `src/obsidian_mcp/domain/models.py`
-
-- Add `FileRevision` and structured conflict result models.
-
-### `src/obsidian_mcp/storage/filesystem.py`
-
-- Add revision calculation, precondition validation, staged conditional writes
-  and HTTP ETag helpers.
-
-### `src/obsidian_mcp/storage/locking.py`
-
-- Integrate revision checks with external path locks.
-
-### `src/obsidian_mcp/storage/operations.py` (new)
-
-- Implement the SQLite idempotency ledger and retention cleanup.
-
-### `src/obsidian_mcp/storage/watcher.py`
-
-- Add event queueing, debouncing, ignore patterns and health metrics.
-
-### `src/obsidian_mcp/domain/index.py`
-
-- Track indexed revisions.
-- Implement queued startup replay and periodic reconciliation.
-
-### Tool modules and `server.py`
-
-- Return revisions from reads and successful writes.
-- Accept revision preconditions and operation IDs.
-- Map HTTP attachment conditions to `ETag`, `If-Match`,
-  `If-None-Match` and HTTP 412.
-- Return stable MCP conflict errors.
-
-### `config.py`, `.env.example`, README and Compose example
-
-- Add precondition, operation-ledger and reconciliation settings.
-- Document the nested mount pattern and backup requirement.
-
-## Test plan
-
-### Revision tests
-
-- Revision is stable for unchanged bytes.
-- Revision changes for any content change.
-- Metadata-only changes do not change the authoritative hash.
-- Expected revision success returns the new revision.
-- Stale expected revision leaves the file untouched.
-- `create_only` fails if a sync writer creates the destination first.
-
-### Concurrency tests
-
-- Two MCP writers with the same expected revision: exactly one succeeds.
-- External write before lock acquisition: MCP detects conflict.
-- External write after staging but before replacement: MCP detects conflict at
-  the second check.
-- Append retry with the same operation ID is applied once.
-- Operation ID reuse with different content is rejected.
-- Simulated watcher events during initial index build are replayed.
-- Dropped watcher event is repaired by reconciliation.
-
-### Container integration test
-
-Run a fake or test Sync writer beside MCP against bind mounts:
-
-1. Sync writes a note; MCP indexes it.
-2. MCP creates a unique AI event; Sync observes it.
-3. Sync changes a note after MCP reads it; MCP conditional write conflicts.
-4. MCP attempts a write outside nested mounts; both policy and OS deny it.
-5. Restart both containers; revisions and idempotency records still behave
-   correctly.
-
-### Fault injection
-
-- process termination after staging;
-- process termination immediately after replacement;
-- disk full;
-- permission change;
-- watcher overflow;
-- corrupt operation ledger;
-- temporary loss of the bind mount or sync process.
-
-## Rollout
-
-1. Add revisions to responses without requiring them.
-2. Update instructions so clients read before mutating.
-3. Enable `REQUIRE_WRITE_PRECONDITIONS` in a disposable vault.
-4. Deploy create-only `AI-Output` writes.
-5. Verify files round-trip through Obsidian Sync and another client.
-6. Enable idempotent memory events.
-7. Enable conditional updates only after conflict and restore drills.
-8. Keep multi-file operations disabled under continuous sync unless there is a
-   specific, tested need.
-
-## Completion criteria
-
-- Existing-file mutations validate stale versions and use the strongest
-  available no-clobber primitive; unavoidable final races with non-cooperating
-  writers are detected after the write and surfaced with recovery evidence.
-- Retried appends do not duplicate content.
-- Watcher startup and reconciliation tolerate concurrent sync activity.
-- Conflict handling never overwrites the remote/local winner automatically.
-- The recommended nested-mount deployment passes an end-to-end sync test.
-- A documented and tested backup restoration procedure exists before production
-  writes are enabled.
+High-impact multi-file move, folder rename, bulk replacement, and delete
+workflows remain separately feature-gated. `list_trash_tool` is hidden with the
+rest of the delete/restore workflow when `ENABLE_DELETE=false`.

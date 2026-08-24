@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import math
 import os
 import tempfile
 from collections.abc import Mapping
@@ -215,6 +216,9 @@ class Config:
     audit_log_path: Path = field(init=False)
     allow_permanent_delete: bool = field(init=False)
     max_attachment_bytes: int = field(init=False)
+    require_write_preconditions: bool = field(init=False)
+    index_reconcile_interval: float = field(init=False)
+    watcher_debounce_ms: int = field(init=False)
     transport: str = field(init=False)
     host: str = field(init=False)
     port: int = field(init=False)
@@ -361,6 +365,29 @@ class Config:
             raise ConfigError("MAX_ATTACHMENT_BYTES must be a positive integer")
         set_value(self, "max_attachment_bytes", max_attachment_bytes)
 
+        set_value(
+            self,
+            "require_write_preconditions",
+            os.environ.get("REQUIRE_WRITE_PRECONDITIONS", "false").lower()
+            in ("1", "true", "yes"),
+        )
+        try:
+            reconcile_interval = float(os.environ.get("INDEX_RECONCILE_INTERVAL", "900"))
+        except ValueError as exc:
+            raise ConfigError("INDEX_RECONCILE_INTERVAL must be a finite positive number") from exc
+        if not math.isfinite(reconcile_interval) or reconcile_interval <= 0:
+            raise ConfigError("INDEX_RECONCILE_INTERVAL must be a finite positive number")
+        set_value(self, "index_reconcile_interval", reconcile_interval)
+
+        try:
+            debounce_ms = int(os.environ.get("WATCHER_DEBOUNCE_MS", "100"))
+        except ValueError as exc:
+            raise ConfigError("WATCHER_DEBOUNCE_MS must be a non-negative integer") from exc
+        if debounce_ms < 0:
+            raise ConfigError("WATCHER_DEBOUNCE_MS must be a non-negative integer")
+        set_value(self, "watcher_debounce_ms", debounce_ms)
+
+        # Optional plugin-format tool groups — opt-in, disabled by default.
         for attribute, environment in (
             ("enable_canvas", "ENABLE_CANVAS"),
             ("enable_excalidraw", "ENABLE_EXCALIDRAW"),
