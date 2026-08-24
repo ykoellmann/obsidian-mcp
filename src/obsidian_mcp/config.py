@@ -1,17 +1,9 @@
-"""Load and validate environment configuration.
+"""Load and validate single- or multi-vault environment configuration.
 
-Two modes, chosen by whether VAULTS_CONFIG is set:
-
-- Single-vault (default, unchanged from before multi-vault support): one
-  vault from VAULT_PATH/WRITE_PATHS/EXCLUDE_PATHS, one global API_KEY/
-  OAUTH_GITHUB_ALLOWED_LOGINS. No migration needed for existing deployments.
-- Multi-vault: VAULTS_CONFIG points at a JSON file declaring named vaults
-  and identities (API keys / GitHub logins) mapped to the vaults each may
-  access. Which vault a given request resolves to is tracked via a
-  contextvar, set once per tool call by VaultResolutionMiddleware in
-  server.py — every other module keeps calling get_config().vault_path
-  etc. unchanged, since those become properties that resolve against
-  whichever vault is current.
+When ``VAULTS_CONFIG`` is set, the active vault is selected per request by
+``VaultResolutionMiddleware``. Filesystem policy remains per-vault: every
+property used by storage resolves through the same context variable as the
+vault root.
 """
 
 from __future__ import annotations
@@ -19,31 +11,57 @@ from __future__ import annotations
 import contextvars
 import json
 import os
+import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
+
+from .storage.policy import VaultPathError, normalise_path_rules, path_rules_from_env
 
 
 class ConfigError(Exception):
     pass
 
 
-@dataclass
+def _path_rules(value: object, *, name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """Normalize JSON path rules without comma-delimited env parsing."""
+    if value is None:
+        values = list(default)
+    elif isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+        values = list(value)
+    else:
+        raise ConfigError(f"{name} must be a list of strings")
+    try:
+        return normalise_path_rules(values, name=name)
+    except VaultPathError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+@dataclass(frozen=True)
 class VaultEntry:
     name: str
     path: Path
-    write_paths: list[str] = field(default_factory=list)
-    exclude_paths: list[str] = field(default_factory=list)
-    read_only: bool | None = None  # None = inherit the server-wide READ_ONLY
+    write_paths: tuple[str, ...] = ()
+    read_paths: tuple[str, ...] = ()
+    exclude_paths: tuple[str, ...] = ()
+    deny_read_paths: tuple[str, ...] = (".obsidian/", ".trash/")
+    deny_write_paths: tuple[str, ...] = (
+        ".obsidian/",
+        ".trash/",
+        "_AI_INSTRUCTIONS.md",
+    )
+    read_only: bool | None = None
     description: str = ""
 
 
-@dataclass
+@dataclass(frozen=True)
 class Identity:
-    """One entry from VAULTS_CONFIG's "identities" list: an API key or a
-    GitHub login, and which vaults it may resolve to."""
-    type: str  # "api_key" | "github_login"
+    """One API key or GitHub login and the vaults it may access."""
+
+    type: str
     value: str
-    vaults: list[str]
+    vaults: tuple[str, ...]
     default: str | None = None
 
 
@@ -53,9 +71,6 @@ _current_vault_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 
 
 def set_current_vault(name: str | None) -> contextvars.Token:
-    """Set the active vault for the current context (task/request). Returns
-    a token — pass it to reset_current_vault() when done, typically in a
-    finally block, so the setting doesn't leak past the call it was for."""
     return _current_vault_var.set(name)
 
 
@@ -63,10 +78,8 @@ def reset_current_vault(token: contextvars.Token) -> None:
     _current_vault_var.reset(token)
 
 
-def load_vaults_file(path_str: str) -> tuple[dict[str, VaultEntry], list[Identity]]:
-    """Parse a VAULTS_CONFIG JSON file into (vaults, identities). Shared by
-    Config.__init__ (strict — raises ConfigError on any problem) and
-    server.py's _build_auth() (best-effort — see its docstring for why)."""
+def load_vaults_file(path_str: str) -> tuple[dict[str, VaultEntry], tuple[Identity, ...]]:
+    """Parse and validate ``VAULTS_CONFIG`` JSON."""
     path = Path(path_str)
     if not path.is_file():
         raise ConfigError(f"VAULTS_CONFIG file not found: {path}")
@@ -74,26 +87,56 @@ def load_vaults_file(path_str: str) -> tuple[dict[str, VaultEntry], list[Identit
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise ConfigError(f"VAULTS_CONFIG is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError("VAULTS_CONFIG must contain a JSON object")
 
     vaults_raw = data.get("vaults") or {}
-    if not vaults_raw:
+    if not isinstance(vaults_raw, dict) or not vaults_raw:
         raise ConfigError("VAULTS_CONFIG must define at least one vault under 'vaults'")
 
     vaults: dict[str, VaultEntry] = {}
-    for name, entry in vaults_raw.items():
-        raw_path = entry.get("path", "")
-        if not raw_path:
+    for name, raw_entry in vaults_raw.items():
+        if not isinstance(name, str) or not name:
+            raise ConfigError("Vault names in VAULTS_CONFIG must be non-empty strings")
+        if not isinstance(raw_entry, dict):
+            raise ConfigError(f"Vault {name!r} in VAULTS_CONFIG must be an object")
+        raw_path = raw_entry.get("path", "")
+        if not isinstance(raw_path, str) or not raw_path:
             raise ConfigError(f"Vault {name!r} in VAULTS_CONFIG is missing 'path'")
         vault_path = Path(raw_path).resolve()
         if not vault_path.is_dir():
-            raise ConfigError(f"Vault {name!r} path does not exist or is not a directory: {vault_path}")
+            raise ConfigError(
+                f"Vault {name!r} path does not exist or is not a directory: {vault_path}"
+            )
+        read_only = raw_entry.get("read_only")
+        if read_only is not None and not isinstance(read_only, bool):
+            raise ConfigError(f"Vault {name!r} read_only must be a boolean")
         vaults[name] = VaultEntry(
             name=name,
             path=vault_path,
-            write_paths=list(entry.get("write_paths", [])),
-            exclude_paths=list(entry.get("exclude_paths", ["private", ".obsidian"])),
-            read_only=entry.get("read_only"),
-            description=str(entry.get("description", "")),
+            write_paths=_path_rules(
+                raw_entry.get("write_paths"), name=f"vault {name!r} write_paths"
+            ),
+            read_paths=_path_rules(
+                raw_entry.get("read_paths"), name=f"vault {name!r} read_paths"
+            ),
+            exclude_paths=_path_rules(
+                raw_entry.get("exclude_paths"),
+                name=f"vault {name!r} exclude_paths",
+                default=("private/", ".obsidian/", ".trash/"),
+            ),
+            deny_read_paths=_path_rules(
+                raw_entry.get("deny_read_paths"),
+                name=f"vault {name!r} deny_read_paths",
+                default=(".obsidian/", ".trash/"),
+            ),
+            deny_write_paths=_path_rules(
+                raw_entry.get("deny_write_paths"),
+                name=f"vault {name!r} deny_write_paths",
+                default=(".obsidian/", ".trash/", "_AI_INSTRUCTIONS.md"),
+            ),
+            read_only=read_only,
+            description=str(raw_entry.get("description", "")),
         )
 
     vault_items = list(vaults.items())
@@ -110,115 +153,251 @@ def load_vaults_file(path_str: str) -> tuple[dict[str, VaultEntry], list[Identit
                 )
 
     identities_raw = data.get("identities") or []
-    if not identities_raw:
+    if not isinstance(identities_raw, list) or not identities_raw:
         raise ConfigError("VAULTS_CONFIG must define at least one identity under 'identities'")
 
     identities: list[Identity] = []
-    for ident in identities_raw:
-        itype = ident.get("type")
-        if itype not in ("api_key", "github_login"):
-            raise ConfigError(f"Unknown identity type in VAULTS_CONFIG: {itype!r} (must be 'api_key' or 'github_login')")
-        value = str(ident.get("value", ""))
+    for raw_identity in identities_raw:
+        if not isinstance(raw_identity, dict):
+            raise ConfigError("Identity entries in VAULTS_CONFIG must be objects")
+        identity_type = raw_identity.get("type")
+        if identity_type not in ("api_key", "github_login"):
+            raise ConfigError(
+                f"Unknown identity type in VAULTS_CONFIG: {identity_type!r} "
+                "(must be 'api_key' or 'github_login')"
+            )
+        value = str(raw_identity.get("value", ""))
         if not value:
             raise ConfigError("An identity entry in VAULTS_CONFIG is missing 'value'")
-        if itype == "github_login":
+        if identity_type == "github_login":
             value = value.lower()
-        ident_vaults = list(ident.get("vaults", []))
-        if not ident_vaults:
+        raw_identity_vaults = raw_identity.get("vaults", [])
+        if not isinstance(raw_identity_vaults, list) or not all(
+            isinstance(item, str) for item in raw_identity_vaults
+        ):
+            raise ConfigError(f"Identity {value!r} 'vaults' must be a list of strings")
+        identity_vaults = tuple(raw_identity_vaults)
+        if not identity_vaults:
             raise ConfigError(f"Identity {value!r} in VAULTS_CONFIG has no 'vaults'")
-        for v in ident_vaults:
-            if v not in vaults:
-                raise ConfigError(f"Identity {value!r} references unknown vault {v!r}")
-        default = ident.get("default")
-        if default is None and len(ident_vaults) == 1:
-            default = ident_vaults[0]
-        if default is not None and default not in ident_vaults:
-            raise ConfigError(f"Identity {value!r} default vault {default!r} is not in its own 'vaults' list")
-        identities.append(Identity(type=itype, value=value, vaults=ident_vaults, default=default))
+        for vault_name in identity_vaults:
+            if vault_name not in vaults:
+                raise ConfigError(
+                    f"Identity {value!r} references unknown vault {vault_name!r}"
+                )
+        default = raw_identity.get("default")
+        if default is None and len(identity_vaults) == 1:
+            default = identity_vaults[0]
+        if default is not None and default not in identity_vaults:
+            raise ConfigError(
+                f"Identity {value!r} default vault {default!r} is not in its own 'vaults' list"
+            )
+        identities.append(
+            Identity(
+                type=identity_type,
+                value=value,
+                vaults=identity_vaults,
+                default=default,
+            )
+        )
+    return vaults, tuple(identities)
 
-    return vaults, identities
 
-
+@dataclass(frozen=True, init=False)
 class Config:
-    # Server-wide (not per-vault) settings.
-    transport: str
-    host: str
-    port: int
-    public_base_url: str
-    oauth_github_client_id: str
-    oauth_github_client_secret: str
-    enable_canvas: bool
-    enable_excalidraw: bool
-    enable_kanban: bool
-    enable_bases: bool
+    """Validated immutable configuration with context-selected vault fields."""
 
-    # Multi-vault state.
-    multi_vault: bool
-    vaults: dict[str, VaultEntry]
-    identities: list[Identity]
-    default_vault_name: str
+    multi_vault: bool = field(init=False)
+    vaults: Mapping[str, VaultEntry] = field(init=False)
+    identities: tuple[Identity, ...] = field(init=False)
+    default_vault_name: str = field(init=False)
+    _global_read_only: bool = field(init=False, repr=False)
+    lock_path: Path = field(init=False)
+    audit_log_path: Path = field(init=False)
+    allow_permanent_delete: bool = field(init=False)
+    max_attachment_bytes: int = field(init=False)
+    transport: str = field(init=False)
+    host: str = field(init=False)
+    port: int = field(init=False)
+    api_key: str = field(init=False, repr=False)
+    public_base_url: str = field(init=False)
+    oauth_github_client_id: str = field(init=False)
+    oauth_github_client_secret: str = field(init=False, repr=False)
+    oauth_github_allowed_logins: tuple[str, ...] = field(init=False)
+    enable_canvas: bool = field(init=False)
+    enable_excalidraw: bool = field(init=False)
+    enable_kanban: bool = field(init=False)
+    enable_bases: bool = field(init=False)
+    enable_move: bool = field(init=False)
+    enable_folder_rename: bool = field(init=False)
+    enable_bulk_replace: bool = field(init=False)
+    enable_delete: bool = field(init=False)
 
     def __init__(self) -> None:
+        set_value = object.__setattr__
         vaults_config_path = os.environ.get("VAULTS_CONFIG", "")
-        self.multi_vault = bool(vaults_config_path)
-        self._global_read_only = os.environ.get("READ_ONLY", "false").lower() in ("1", "true", "yes")
+        set_value(self, "multi_vault", bool(vaults_config_path))
+        set_value(
+            self,
+            "_global_read_only",
+            os.environ.get("READ_ONLY", "false").lower() in ("1", "true", "yes"),
+        )
 
         if self.multi_vault:
-            self.vaults, self.identities = load_vaults_file(vaults_config_path)
-            self.default_vault_name = next(iter(self.vaults))
-            # Single global api_key/oauth_github_allowed_logins don't apply
-            # in multi-vault mode — identities in VAULTS_CONFIG are the
-            # single source of truth for who may authenticate at all.
-            self.api_key = ""
-            self.oauth_github_allowed_logins = [
-                i.value for i in self.identities if i.type == "github_login"
-            ]
+            vaults, identities = load_vaults_file(vaults_config_path)
+            set_value(self, "vaults", MappingProxyType(vaults))
+            set_value(self, "identities", identities)
+            set_value(self, "default_vault_name", next(iter(vaults)))
+            set_value(self, "api_key", "")
+            set_value(
+                self,
+                "oauth_github_allowed_logins",
+                tuple(identity.value for identity in identities if identity.type == "github_login"),
+            )
         else:
             raw_vault = os.environ.get("VAULT_PATH", "")
             if not raw_vault:
                 raise ConfigError("VAULT_PATH is required")
             vault_path = Path(raw_vault).resolve()
             if not vault_path.is_dir():
-                raise ConfigError(f"VAULT_PATH does not exist or is not a directory: {vault_path}")
-
-            raw_write = os.environ.get("WRITE_PATHS", "")
-            raw_exclude = os.environ.get("EXCLUDE_PATHS", "private,.obsidian")
-            self.vaults = {
-                "default": VaultEntry(
+                raise ConfigError(
+                    f"VAULT_PATH does not exist or is not a directory: {vault_path}"
+                )
+            try:
+                entry = VaultEntry(
                     name="default",
                     path=vault_path,
-                    write_paths=[p.strip() for p in raw_write.split(",") if p.strip()],
-                    exclude_paths=[p.strip() for p in raw_exclude.split(",") if p.strip()],
+                    write_paths=tuple(
+                        path_rules_from_env(
+                            os.environ.get("WRITE_PATHS", ""), name="WRITE_PATHS"
+                        )
+                    ),
+                    read_paths=tuple(
+                        path_rules_from_env(
+                            os.environ.get("READ_PATHS", ""), name="READ_PATHS"
+                        )
+                    ),
+                    exclude_paths=tuple(
+                        path_rules_from_env(
+                            os.environ.get("EXCLUDE_PATHS", "private/,.obsidian/,.trash/"),
+                            name="EXCLUDE_PATHS",
+                        )
+                    ),
+                    deny_read_paths=tuple(
+                        path_rules_from_env(
+                            os.environ.get("DENY_READ_PATHS", ".obsidian/,.trash/"),
+                            name="DENY_READ_PATHS",
+                        )
+                    ),
+                    deny_write_paths=tuple(
+                        path_rules_from_env(
+                            os.environ.get(
+                                "DENY_WRITE_PATHS",
+                                ".obsidian/,.trash/,_AI_INSTRUCTIONS.md",
+                            ),
+                            name="DENY_WRITE_PATHS",
+                        )
+                    ),
                 )
-            }
-            self.identities = []
-            self.default_vault_name = "default"
-
-            self.api_key = os.environ.get("API_KEY") or os.environ.get("OBSIDIAN_MCP_API_KEY") or ""
+            except VaultPathError as exc:
+                raise ConfigError(str(exc)) from exc
+            set_value(self, "vaults", MappingProxyType({"default": entry}))
+            set_value(self, "identities", ())
+            set_value(self, "default_vault_name", "default")
+            set_value(
+                self,
+                "api_key",
+                os.environ.get("API_KEY") or os.environ.get("OBSIDIAN_MCP_API_KEY") or "",
+            )
             raw_logins = os.environ.get("OAUTH_GITHUB_ALLOWED_LOGINS", "")
-            self.oauth_github_allowed_logins = [
-                login.strip().lower() for login in raw_logins.split(",") if login.strip()
-            ]
+            set_value(
+                self,
+                "oauth_github_allowed_logins",
+                tuple(login.strip().lower() for login in raw_logins.split(",") if login.strip()),
+            )
 
-        # Optional plugin-format tool groups — opt-in, disabled by default.
-        self.enable_canvas = os.environ.get("ENABLE_CANVAS", "false").lower() in ("1", "true", "yes")
-        self.enable_excalidraw = os.environ.get("ENABLE_EXCALIDRAW", "false").lower() in ("1", "true", "yes")
-        self.enable_kanban = os.environ.get("ENABLE_KANBAN", "false").lower() in ("1", "true", "yes")
-        self.enable_bases = os.environ.get("ENABLE_BASES", "false").lower() in ("1", "true", "yes")
+        raw_lock_path = os.environ.get("LOCK_PATH", "")
+        if raw_lock_path:
+            lock_path = Path(raw_lock_path).expanduser().resolve()
+        elif os.environ.get("FASTMCP_HOME"):
+            lock_path = (Path(os.environ["FASTMCP_HOME"]).expanduser() / "locks").resolve()
+        else:
+            lock_path = (Path(tempfile.gettempdir()) / "obsidian-mcp-locks").resolve()
+        for vault in self.vaults.values():
+            if lock_path == vault.path or vault.path in lock_path.parents:
+                raise ConfigError("LOCK_PATH must be outside every configured vault")
+        set_value(self, "lock_path", lock_path)
 
-        self.transport = os.environ.get("TRANSPORT", "stdio")
+        raw_audit_path = os.environ.get("AUDIT_LOG_PATH", "")
+        audit_log_path = (
+            Path(os.path.abspath(Path(raw_audit_path).expanduser()))
+            if raw_audit_path
+            else lock_path / "audit.jsonl"
+        )
+        resolved_audit_parent = audit_log_path.parent.resolve()
+        for vault in self.vaults.values():
+            if (
+                audit_log_path == vault.path
+                or vault.path in audit_log_path.parents
+                or resolved_audit_parent == vault.path
+                or vault.path in resolved_audit_parent.parents
+            ):
+                raise ConfigError("AUDIT_LOG_PATH must be outside every configured vault")
+        set_value(self, "audit_log_path", audit_log_path)
+
+        set_value(
+            self,
+            "allow_permanent_delete",
+            os.environ.get("ALLOW_PERMANENT_DELETE", "false").lower()
+            in ("1", "true", "yes"),
+        )
+        raw_max_attachment_bytes = os.environ.get(
+            "MAX_ATTACHMENT_BYTES", str(25 * 1024 * 1024)
+        )
+        try:
+            max_attachment_bytes = int(raw_max_attachment_bytes)
+        except ValueError as exc:
+            raise ConfigError("MAX_ATTACHMENT_BYTES must be a positive integer") from exc
+        if max_attachment_bytes <= 0:
+            raise ConfigError("MAX_ATTACHMENT_BYTES must be a positive integer")
+        set_value(self, "max_attachment_bytes", max_attachment_bytes)
+
+        for attribute, environment in (
+            ("enable_canvas", "ENABLE_CANVAS"),
+            ("enable_excalidraw", "ENABLE_EXCALIDRAW"),
+            ("enable_kanban", "ENABLE_KANBAN"),
+            ("enable_bases", "ENABLE_BASES"),
+            ("enable_move", "ENABLE_MOVE"),
+            ("enable_folder_rename", "ENABLE_FOLDER_RENAME"),
+            ("enable_bulk_replace", "ENABLE_BULK_REPLACE"),
+            ("enable_delete", "ENABLE_DELETE"),
+        ):
+            set_value(
+                self,
+                attribute,
+                os.environ.get(environment, "false").lower() in ("1", "true", "yes"),
+            )
+
+        set_value(self, "transport", os.environ.get("TRANSPORT", "stdio"))
         if self.multi_vault and self.transport == "stdio":
             raise ConfigError(
                 "VAULTS_CONFIG requires an authenticated network transport; "
                 "TRANSPORT=stdio cannot identify the calling identity"
             )
-        self.host = os.environ.get("HOST", "0.0.0.0")
-        self.port = int(os.environ.get("PORT", "8000"))
-        self.public_base_url = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+        set_value(self, "host", os.environ.get("HOST", "0.0.0.0"))
+        set_value(self, "port", int(os.environ.get("PORT", "8000")))
+        set_value(self, "public_base_url", os.environ.get("PUBLIC_BASE_URL", "").rstrip("/"))
+        set_value(
+            self, "oauth_github_client_id", os.environ.get("OAUTH_GITHUB_CLIENT_ID", "")
+        )
+        set_value(
+            self,
+            "oauth_github_client_secret",
+            os.environ.get("OAUTH_GITHUB_CLIENT_SECRET", ""),
+        )
 
-        self.oauth_github_client_id = os.environ.get("OAUTH_GITHUB_CLIENT_ID", "")
-        self.oauth_github_client_secret = os.environ.get("OAUTH_GITHUB_CLIENT_SECRET", "")
-        oauth_configured = bool(self.oauth_github_client_id or self.oauth_github_client_secret)
+        oauth_configured = bool(
+            self.oauth_github_client_id or self.oauth_github_client_secret
+        )
         if oauth_configured:
             if not (self.oauth_github_client_id and self.oauth_github_client_secret):
                 raise ConfigError(
@@ -237,7 +416,9 @@ class Config:
                     "(used as the OAuth callback base URL, e.g. https://your-server.com)"
                 )
 
-        has_api_keys = bool(self.api_key) or any(i.type == "api_key" for i in self.identities)
+        has_api_keys = bool(self.api_key) or any(
+            identity.type == "api_key" for identity in self.identities
+        )
         if self.transport != "stdio" and not has_api_keys and not oauth_configured:
             raise ConfigError(
                 f"API_KEY or GitHub OAuth (OAUTH_GITHUB_CLIENT_ID/SECRET) is required when "
@@ -246,10 +427,6 @@ class Config:
             )
 
     def resolve_vault_name(self) -> str:
-        """The vault the current context (contextvar, set per tool call by
-        VaultResolutionMiddleware) resolves to — the default vault outside
-        any such context (e.g. custom HTTP routes, or single-vault mode
-        where nothing ever sets the contextvar)."""
         name = _current_vault_var.get()
         if name is None:
             return self.default_vault_name
@@ -265,12 +442,24 @@ class Config:
         return self._current_vault_entry().path
 
     @property
-    def write_paths(self) -> list[str]:
+    def write_paths(self) -> tuple[str, ...]:
         return self._current_vault_entry().write_paths
 
     @property
-    def exclude_paths(self) -> list[str]:
+    def read_paths(self) -> tuple[str, ...]:
+        return self._current_vault_entry().read_paths
+
+    @property
+    def exclude_paths(self) -> tuple[str, ...]:
         return self._current_vault_entry().exclude_paths
+
+    @property
+    def deny_read_paths(self) -> tuple[str, ...]:
+        return self._current_vault_entry().deny_read_paths
+
+    @property
+    def deny_write_paths(self) -> tuple[str, ...]:
+        return self._current_vault_entry().deny_write_paths
 
     @property
     def read_only(self) -> bool:

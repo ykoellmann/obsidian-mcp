@@ -6,8 +6,7 @@ from pathlib import Path
 
 from ..config import get_config
 from ..domain.index import VaultIndex
-from ..storage.filesystem import read_file, write_file_atomic
-from .write import _check_write_permission
+from ..storage.filesystem import VaultStorage
 
 # Matches {{variable}} and {{variable:format}}
 _VAR_RE = re.compile(r"\{\{(\w+)(?::([^}]*))?\}\}")
@@ -27,9 +26,13 @@ def create_from_template(
     Preserves {{unknown_var}} as-is if not provided.
     """
     cfg = get_config()
-    _check_write_permission(output_path)
+    storage = VaultStorage.from_config(cfg)
+    if not output_path.lower().endswith(".md"):
+        raise ValueError("Template output paths must end in .md")
+    output = storage.resolve_write(output_path)
+    output_path = output.relative
 
-    raw_template = read_file(cfg.vault_path, template_path)
+    raw_template = storage.read_text(template_path)
 
     now = datetime.now()
     today = date.today()
@@ -69,7 +72,7 @@ def create_from_template(
         return val
 
     rendered = _VAR_RE.sub(_replace, raw_template)
-    write_file_atomic(cfg.vault_path, output_path, rendered)
+    storage.write_text_atomic(output_path, rendered)
 
     if index is not None:
         index.update(output_path)
@@ -85,10 +88,12 @@ def create_from_template(
 def list_templates() -> list[str]:
     """List all template files in the Templates/ folder."""
     cfg = get_config()
-    templates_dir = cfg.vault_path / "Templates"
-    if not templates_dir.exists():
+    storage = VaultStorage.from_config(cfg)
+    try:
+        return sorted(
+            p.relative
+            for p in storage.list_files("Templates")
+            if p.relative.lower().endswith(".md")
+        )
+    except (FileNotFoundError, NotADirectoryError):
         return []
-    return sorted(
-        str(p.relative_to(cfg.vault_path))
-        for p in templates_dir.rglob("*.md")
-    )

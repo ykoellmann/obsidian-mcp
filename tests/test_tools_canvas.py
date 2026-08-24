@@ -34,6 +34,12 @@ def test_read_canvas_missing_raises(vault_factory):
         read_canvas("ghost.canvas")
 
 
+def test_read_canvas_rejects_non_canvas_suffix(tmp_path, vault_factory):
+    vault_factory({"note.md": '{"nodes": [], "edges": []}'})
+    with pytest.raises(ValueError, match="end in .canvas"):
+        read_canvas("note.md")
+
+
 def test_read_canvas_invalid_json_raises(tmp_path, vault_factory):
     vault_factory({})
     (tmp_path / "bad.canvas").write_text("NOT JSON {{{")

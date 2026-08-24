@@ -3,39 +3,70 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import mimetypes
+import stat
 import time
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
 from ..config import get_config
-from ..storage.filesystem import validate_path, write_file_atomic_bytes
+from ..storage.filesystem import VaultStorage
+from ..storage.policy import InvalidFileTypeError, matches_path_rule
 
 _TEXT_SUFFIXES = {".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".toml", ".xml", ".html", ".css", ".js", ".ts"}
 _MAX_TOKEN_TTL = 3600
+_ALLOWED_ATTACHMENT_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".tif", ".tiff",
+    ".pdf", ".zip", ".gz", ".tar", ".7z", ".rar", ".epub", ".docx", ".xlsx", ".pptx",
+    ".odt", ".ods", ".odp", ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".mp4", ".webm",
+    ".mov", ".avi", ".woff", ".woff2", ".ttf", ".otf", ".csv", ".txt",
+}
+
+
+class AttachmentTooLargeError(ValueError):
+    """An attachment exceeds the configured write-size limit."""
+
+
+def validate_attachment_path(path: str, *, write: bool = False) -> str:
+    """Apply attachment-specific policy after the vault policy."""
+    canonical = VaultStorage.from_config().resolve_write(path) if write else VaultStorage.from_config().resolve_read(path)
+    parts = Path(canonical.relative).parts
+    if any(part.startswith(".") for part in parts):
+        raise InvalidFileTypeError("Hidden files and directories are not attachments")
+    if write and Path(canonical.relative).suffix.lower() not in _ALLOWED_ATTACHMENT_SUFFIXES:
+        raise InvalidFileTypeError("Attachment writes require an approved binary attachment extension")
+    return canonical.relative
 
 
 def list_attachments(folder: str = "") -> list[dict]:
     """List all non-Markdown files in the vault (images, PDFs, audio, etc.)."""
     cfg = get_config()
-    root = cfg.vault_path
-    base = validate_path(root, folder) if folder else root
+    storage = VaultStorage.from_config(cfg)
 
     results = []
-    for p in base.rglob("*"):
-        if p.is_dir() or p.suffix.lower() == ".md":
+    for resolved in storage.list_files(folder):
+        p = resolved.absolute
+        if p.suffix.lower() == ".md":
             continue
-        rel = str(p.relative_to(root))
-        parts = Path(rel).parts
-        if any(part in cfg.exclude_paths for part in parts):
+        rel = resolved.relative
+        # Listing is intentionally narrower than direct reads: only the
+        # positive attachment formats are advertised to MCP callers.
+        if p.suffix.lower() not in _ALLOWED_ATTACHMENT_SUFFIXES:
             continue
-        stat = p.stat()
-        mime, _ = mimetypes.guess_type(str(p))
+        try:
+            rel = validate_attachment_path(rel)
+            info = resolved.stat_result
+        except InvalidFileTypeError:
+            continue
+        if any(matches_path_rule(rel, rule) for rule in cfg.exclude_paths):
+            continue
+        mime, _ = mimetypes.guess_type(rel)
         results.append({
             "path": rel,
-            "size_bytes": stat.st_size,
+            "size_bytes": info.st_size,
             "mime_type": mime or "application/octet-stream",
-            "mtime": stat.st_mtime,
+            "mtime": info.st_mtime,
         })
 
     return sorted(results, key=lambda x: x["path"])
@@ -44,26 +75,30 @@ def list_attachments(folder: str = "") -> list[dict]:
 def read_attachment(path: str) -> dict:
     """Read an attachment file. Text files returned as UTF-8 string; binary files as base64."""
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-
-    if not target.exists():
-        raise FileNotFoundError(f"Attachment not found: {path!r}")
-    if target.is_dir():
+    storage = VaultStorage.from_config(cfg)
+    target = storage.resolve_read(path)
+    path = validate_attachment_path(target.relative)
+    target = storage.resolve_read(path)
+    try:
+        info = storage.stat(path)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Attachment not found: {path!r}") from None
+    if stat.S_ISDIR(info.st_mode):
         raise IsADirectoryError(f"Path is a directory: {path!r}")
 
-    mime, _ = mimetypes.guess_type(str(target))
+    mime, _ = mimetypes.guess_type(path)
     mime = mime or "application/octet-stream"
-    is_text = mime.startswith("text/") or target.suffix.lower() in _TEXT_SUFFIXES
+    is_text = mime.startswith("text/") or Path(path).suffix.lower() in _TEXT_SUFFIXES
 
     if is_text:
         return {
             "path": path,
             "mime_type": mime,
             "encoding": "utf-8",
-            "content": target.read_text(encoding="utf-8", errors="replace"),
+            "content": storage.read_text(path),
         }
 
-    data = target.read_bytes()
+    data = storage.read_bytes(path)
     return {
         "path": path,
         "mime_type": mime,
@@ -81,13 +116,14 @@ def write_attachment_bytes(path: str, data: bytes) -> dict:
     round trip needed).
     """
     cfg = get_config()
-    validate_path(cfg.vault_path, path)
+    storage = VaultStorage.from_config(cfg)
+    path = validate_attachment_path(path, write=True)
+    if len(data) > cfg.max_attachment_bytes:
+        raise AttachmentTooLargeError(
+            f"Attachment exceeds MAX_ATTACHMENT_BYTES ({cfg.max_attachment_bytes} bytes)"
+        )
 
-    # Refuse .md through this path to keep write_note as the canonical text entrypoint
-    if Path(path).suffix.lower() == ".md":
-        raise ValueError("Use write_note_tool for Markdown files, not add_attachment_tool")
-
-    write_file_atomic_bytes(cfg.vault_path, path, data)
+    storage.write_bytes_atomic(path, data)
 
     mime, _ = mimetypes.guess_type(path)
     return {
@@ -101,6 +137,14 @@ def write_attachment_bytes(path: str, data: bytes) -> dict:
 def add_attachment(path: str, content_base64: str) -> dict:
     """Write a binary attachment from a base64-encoded string.
     Use this to add images, PDFs, or other binary files to the vault."""
+    cfg = get_config()
+    # Reject obviously oversized encodings before allocating their decoded
+    # byte string.  write_attachment_bytes repeats the exact post-decode check.
+    encoded_limit = ((cfg.max_attachment_bytes + 2) // 3) * 4 + 4
+    if len(content_base64) > encoded_limit:
+        raise AttachmentTooLargeError(
+            f"Attachment exceeds MAX_ATTACHMENT_BYTES ({cfg.max_attachment_bytes} bytes)"
+        )
     try:
         data = base64.b64decode(content_base64, validate=True)
     except Exception as exc:
@@ -113,7 +157,11 @@ def _sign_attachment_token(signing_key: str, method: str, path: str, vault: str,
     # vault is part of the signed message (not just a side channel) so a
     # token minted for one vault can't be replayed against another by
     # tampering with an unsigned query param.
-    msg = f"{method}:{path}:{vault}:{expires_at}".encode()
+    msg = json.dumps(
+        [method, path, vault, expires_at],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
     return hmac.new(signing_key.encode(), msg, hashlib.sha256).hexdigest()
 
 
@@ -143,6 +191,9 @@ def create_attachment_token(
     if method not in ("GET", "PUT"):
         raise ValueError("method must be 'GET' or 'PUT'")
 
+    # Token signatures use the canonical path, and minting itself must not be
+    # a way to obtain a token for a denied or unwritable destination.
+    path = validate_attachment_path(path, write=(method == "PUT"))
     expires_in = max(1, min(int(expires_in), _MAX_TOKEN_TTL))
     expires_at = int(time.time()) + expires_in
     sig = _sign_attachment_token(signing_key, method, path, vault, expires_at)

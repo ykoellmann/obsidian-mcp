@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import os
 import threading
+from dataclasses import dataclass
 
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, AuthProvider, MultiAuth, TokenVerifier
@@ -24,13 +25,22 @@ from .config import (
     set_current_vault,
 )
 from .domain.index import VaultIndex
-from .storage.filesystem import PathTraversalError, read_file, validate_path
+from .storage.filesystem import VaultStorage
+from .storage.policy import (
+    InvalidFileTypeError,
+    ReadPermissionError,
+    VaultAccessPolicy,
+    VaultPathError,
+    WritePermissionError,
+)
 from .storage.watcher import VaultWatcher
 from .tools.attachments import (
+    AttachmentTooLargeError,
     add_attachment,
     create_attachment_token,
     list_attachments,
     read_attachment,
+    validate_attachment_path,
     verify_attachment_token,
     write_attachment_bytes,
 )
@@ -122,6 +132,11 @@ If it doesn't exist, explore the vault with `list_folder_tool()` and `list_notes
 to understand the structure before writing anything.
 Always use `search_notes_tool` or `query_notes_tool` before creating notes to avoid duplicates.
 
+Obsidian uses the **filename** (without `.md`) as the note title in the UI, graph,
+and default wikilink text. Do **not** start a note with a level-1 heading that
+repeats the filename. Put the first heading at `##` or below only if the body
+needs structure; many notes need no heading at all.
+
 ## Tool Reference
 
 ### Reading & Search
@@ -153,6 +168,11 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 - `move_note_tool(from_path, to_path)` — rename/move + rewrites all wikilinks vault-wide
 - `find_replace_in_vault_tool(search, replace, mode, folder, dry_run)` — bulk find/replace across
   every note; dry_run=True (default) previews matches before writing anything
+
+High-impact mutation tools are disabled by default and absent from the tool
+list until explicitly enabled: `ENABLE_DELETE` registers note/folder deletion,
+`ENABLE_MOVE` registers note moves, `ENABLE_FOLDER_RENAME` registers folder
+renames, and `ENABLE_BULK_REPLACE` registers bulk replacement.
 
 ### Folders
 - `list_folder_tool(path, recursive, max_depth)` — contents (path="" = vault root); hides dotfiles;
@@ -368,18 +388,26 @@ Templates use `{{date}}`, `{{title}}`, `{{week}}` etc.
 def _load_instructions() -> str:
     try:
         cfg = get_config()
-        # FastMCP instructions are fixed at server initialization and are
-        # sent to every client. In multi-vault mode there is no request
-        # identity yet, so loading the first vault's private instructions
-        # here would disclose them to identities restricted to other vaults.
-        if cfg.multi_vault:
-            return _DEFAULT_INSTRUCTIONS
-        instructions_file = cfg.vault_path / "_AI_INSTRUCTIONS.md"
-        if instructions_file.exists():
-            return instructions_file.read_text(encoding="utf-8")
-    except Exception:
-        pass
-    return _DEFAULT_INSTRUCTIONS
+    except ConfigError:
+        # Importing the module before the process environment is configured
+        # is supported (tests, tooling, and FastMCP discovery).
+        return _DEFAULT_INSTRUCTIONS
+    if cfg.multi_vault:
+        # FastMCP exposes server instructions before request middleware has
+        # authenticated an identity and selected one of its allowed vaults.
+        # Per-vault conventions remain available through the authorized tool.
+        return _DEFAULT_INSTRUCTIONS
+    try:
+        vault = VaultStorage.from_config(cfg).read_text("_AI_INSTRUCTIONS.md")
+    except (FileNotFoundError, PermissionError, VaultPathError, OSError):
+        # Missing or unreadable optional instructions do not prevent startup;
+        # descriptor/policy failures are not converted into unrestricted I/O.
+        return _DEFAULT_INSTRUCTIONS
+    return (
+        _DEFAULT_INSTRUCTIONS
+        + "\n\n# Vault-specific instructions (_AI_INSTRUCTIONS.md)\n\n"
+        + vault
+    )
 
 
 class _APIKeyAuthProvider(TokenVerifier):
@@ -475,6 +503,8 @@ def _build_auth() -> AuthProvider | None:
             client_id=client_id,
             client_secret=client_secret,
             base_url=base_url,
+            # Otherwise every MCP request waits on GitHub /user and /user/repos.
+            cache_ttl_seconds=300,
         )
         # Relies on OAuthProxy's private _token_validator attribute — the only
         # hook that runs at token-exchange time, before an allowlist check
@@ -657,35 +687,41 @@ mcp = FastMCP(name="obsidian-mcp", instructions=_load_instructions(), auth=_buil
 mcp.add_middleware(VaultResolutionMiddleware())
 
 
-def _feature_flags_from_env() -> tuple[bool, bool, bool, bool]:
-    """Read the ENABLE_* flags directly from os.environ (not get_config()), so
-    this module can still be imported without VAULT_PATH set (e.g. during
-    testing or linting) — same reasoning as _build_auth() above."""
-    def _flag(name: str) -> bool:
-        return os.environ.get(name, "false").lower() in ("1", "true", "yes")
-
-    return (
-        _flag("ENABLE_CANVAS"),
-        _flag("ENABLE_EXCALIDRAW"),
-        _flag("ENABLE_KANBAN"),
-        _flag("ENABLE_BASES"),
-    )
-
-
-# Gates which optional plugin-format tool groups (Canvas/Excalidraw/Kanban/
-# Bases) get registered below, so disabled tools never appear in the client's
-# tool list. Deliberately not the real Config object (that needs VAULT_PATH,
-# see _build_auth() above) — just the four flags, read straight from the
+# Gates which optional plugin-format and high-impact mutation tool groups get
+# registered below, so disabled tools never appear in the client's tool list.
+# Deliberately not the real Config object (that needs VAULT_PATH,
+# see _build_auth() above) — just the feature flags, read straight from the
 # environment.
+@dataclass(frozen=True)
 class _FeatureFlags:
-    def __init__(self, enable_canvas, enable_excalidraw, enable_kanban, enable_bases):
-        self.enable_canvas = enable_canvas
-        self.enable_excalidraw = enable_excalidraw
-        self.enable_kanban = enable_kanban
-        self.enable_bases = enable_bases
+    enable_canvas: bool
+    enable_excalidraw: bool
+    enable_kanban: bool
+    enable_bases: bool
+    enable_move: bool
+    enable_folder_rename: bool
+    enable_bulk_replace: bool
+    enable_delete: bool
+
+    @classmethod
+    def from_env(cls) -> _FeatureFlags:
+        """Read named flags without constructing the full vault config."""
+        def enabled(name: str) -> bool:
+            return os.environ.get(name, "false").lower() in ("1", "true", "yes")
+
+        return cls(
+            enable_canvas=enabled("ENABLE_CANVAS"),
+            enable_excalidraw=enabled("ENABLE_EXCALIDRAW"),
+            enable_kanban=enabled("ENABLE_KANBAN"),
+            enable_bases=enabled("ENABLE_BASES"),
+            enable_move=enabled("ENABLE_MOVE"),
+            enable_folder_rename=enabled("ENABLE_FOLDER_RENAME"),
+            enable_bulk_replace=enabled("ENABLE_BULK_REPLACE"),
+            enable_delete=enabled("ENABLE_DELETE"),
+        )
 
 
-_feature_flags = _FeatureFlags(*_feature_flags_from_env())
+_feature_flags = _FeatureFlags.from_env()
 
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
@@ -837,7 +873,6 @@ def patch_note_text_tool(
     return result
 
 
-@mcp.tool()
 def delete_note_tool(path: str, trash: bool = True, vault: str | None = None) -> dict:
     """Delete a note from the vault.
     trash=True (default) moves it to .trash/ instead of permanent deletion."""
@@ -846,7 +881,10 @@ def delete_note_tool(path: str, trash: bool = True, vault: str | None = None) ->
     return result
 
 
-@mcp.tool()
+if _feature_flags.enable_delete:
+    mcp.tool()(delete_note_tool)
+
+
 def restore_note_tool(trashed_name: str, to_path: str, vault: str | None = None) -> dict:
     """Restore a note previously moved to .trash/ (see list_trash_tool for names).
     to_path: where to put it back — the original folder can't be recovered
@@ -857,7 +895,10 @@ def restore_note_tool(trashed_name: str, to_path: str, vault: str | None = None)
     return result
 
 
-@mcp.tool()
+if _feature_flags.enable_delete:
+    mcp.tool()(restore_note_tool)
+
+
 def find_replace_in_vault_tool(
     search: str,
     replace: str,
@@ -882,6 +923,10 @@ def find_replace_in_vault_tool(
             f"replaced in {len(result.get('replaced_in', []))} note(s)",
         )
     return result
+
+
+if _feature_flags.enable_bulk_replace:
+    mcp.tool()(find_replace_in_vault_tool)
 
 
 @mcp.tool()
@@ -944,13 +989,16 @@ def manage_tags_tool(
     return result
 
 
-@mcp.tool()
 def move_note_tool(from_path: str, to_path: str, vault: str | None = None) -> dict:
     """Rename or move a note. Automatically rewrites all wikilinks in the vault
     that reference the old path. Returns {from, to, updated_links_in}."""
     result = move_note(from_path, to_path, index=_index)
     log_write("move_note_tool", to_path, f"moved from {from_path}")
     return result
+
+
+if _feature_flags.enable_move:
+    mcp.tool()(move_note_tool)
 
 
 # ── Query / Graph ─────────────────────────────────────────────────────────────
@@ -1267,10 +1315,9 @@ async def health_route(request: Request) -> Response:
     """Unauthenticated liveness/readiness check for Docker HEALTHCHECK,
     uptime monitors, etc. Returns no vault content, so no auth is required.
 
-    Returns {status: "starting"|"ok", vault_path, index_ready}. In
-    multi-vault mode, vault_path/index_ready are for Config.default_vault_name
-    (the first configured vault) — this route doesn't go through
-    VaultResolutionMiddleware, so there's no per-identity vault to report on.
+    Returns {status: "starting"|"ok", index_ready}. In multi-vault mode,
+    index_ready is for Config.default_vault_name (the first configured vault)
+    because this unauthenticated route exposes no per-identity vault details.
     503 while the server hasn't finished setup yet (main() hasn't run or
     hasn't populated _indices yet), 200 once ready — index_ready itself may
     still be False right after startup while the initial index build is in
@@ -1281,7 +1328,6 @@ async def health_route(request: Request) -> Response:
     return JSONResponse(
         {
             "status": "ok",
-            "vault_path": str(_cfg.vault_path),
             "index_ready": _indices[_cfg.default_vault_name].is_ready(),
         }
     )
@@ -1318,13 +1364,15 @@ async def attachment_route(request: Request) -> Response:
     path = request.path_params["path"]
     method = request.method
 
+    # Authenticate and choose a vault before any path-policy check so callers
+    # cannot probe protected path boundaries through response differences.
     vault_name: str | None = None
     access_token = await _check_bearer_token(request, cfg)
     if access_token is not None:
         if cfg.multi_vault:
-            identity = _identity_for_token(cfg, access_token)
-            requested = request.query_params.get("vault")
             try:
+                identity = _identity_for_token(cfg, access_token)
+                requested = request.query_params.get("vault")
                 vault_name = _select_vault(identity, requested)
             except PermissionError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=403)
@@ -1338,22 +1386,49 @@ async def attachment_route(request: Request) -> Response:
 
     context_token = set_current_vault(vault_name)
     try:
+        storage = VaultStorage.from_config(cfg)
+        try:
+            path = validate_attachment_path(path, write=method == "PUT")
+        except InvalidFileTypeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except (VaultPathError, ReadPermissionError, WritePermissionError):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+
         if method == "GET":
             try:
-                target = validate_path(cfg.vault_path, path)
-                data = target.read_bytes()
+                data = storage.read_bytes(path)
             except FileNotFoundError:
-                return JSONResponse({"error": f"Attachment not found: {path!r}"}, status_code=404)
-            except PathTraversalError as exc:
-                return JSONResponse({"error": str(exc)}, status_code=400)
+                return JSONResponse({"error": "Attachment not found"}, status_code=404)
             mime, _ = mimetypes.guess_type(path)
             return Response(data, media_type=mime or "application/octet-stream")
 
-        data = await request.body()
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except ValueError:
+                return JSONResponse({"error": "Invalid Content-Length"}, status_code=400)
+            if declared_length < 0:
+                return JSONResponse({"error": "Invalid Content-Length"}, status_code=400)
+            if declared_length > cfg.max_attachment_bytes:
+                return JSONResponse({"error": "Attachment too large"}, status_code=413)
+
+        chunks: list[bytes] = []
+        received = 0
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > cfg.max_attachment_bytes:
+                return JSONResponse({"error": "Attachment too large"}, status_code=413)
+            chunks.append(chunk)
+        data = b"".join(chunks)
         try:
             result = write_attachment_bytes(path, data)
-        except (ValueError, PathTraversalError) as exc:
+        except AttachmentTooLargeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=413)
+        except (ValueError, InvalidFileTypeError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+        except (VaultPathError, WritePermissionError):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
         return JSONResponse(result)
     finally:
         reset_current_vault(context_token)
@@ -1630,7 +1705,6 @@ def create_folder_tool(path: str, vault: str | None = None) -> dict:
     return result
 
 
-@mcp.tool()
 def delete_folder_tool(path: str, trash: bool = True, vault: str | None = None) -> dict:
     """Delete a vault folder.
     trash=True (default) moves it to .trash/ instead of permanent deletion.
@@ -1640,7 +1714,10 @@ def delete_folder_tool(path: str, trash: bool = True, vault: str | None = None) 
     return result
 
 
-@mcp.tool()
+if _feature_flags.enable_delete:
+    mcp.tool()(delete_folder_tool)
+
+
 def rename_folder_tool(from_path: str, to_path: str, vault: str | None = None) -> dict:
     """Rename or move a vault folder. Rewrites path-based wikilinks in all
     notes that reference notes inside the moved folder.
@@ -1650,7 +1727,10 @@ def rename_folder_tool(from_path: str, to_path: str, vault: str | None = None) -
     return result
 
 
-@mcp.tool()
+if _feature_flags.enable_folder_rename:
+    mcp.tool()(rename_folder_tool)
+
+
 def list_trash_tool(vault: str | None = None) -> dict:
     """List items sitting in .trash/ (from delete_note_tool/delete_folder_tool
     with trash=True). Names here are what restore_note_tool/restore_folder_tool
@@ -1659,7 +1739,10 @@ def list_trash_tool(vault: str | None = None) -> dict:
     return list_trash()
 
 
-@mcp.tool()
+if _feature_flags.enable_delete:
+    mcp.tool()(list_trash_tool)
+
+
 def restore_folder_tool(trashed_name: str, to_path: str, vault: str | None = None) -> dict:
     """Restore a folder previously moved to .trash/ (see list_trash_tool for names).
     to_path: where to put it back — the original parent path can't be
@@ -1670,14 +1753,18 @@ def restore_folder_tool(trashed_name: str, to_path: str, vault: str | None = Non
     return result
 
 
+if _feature_flags.enable_delete:
+    mcp.tool()(restore_folder_tool)
+
+
 # ── MCP Resources ─────────────────────────────────────────────────────────────
 
 @mcp.resource("vault://notes/{path}")
 def vault_note_resource(path: str) -> str:
     """Raw content of a vault note — use as context without calling a tool."""
     try:
-        return read_file(get_config().vault_path, path)
-    except Exception:
+        return VaultStorage.from_config().read_text(path)
+    except (ConfigError, FileNotFoundError, PermissionError, VaultPathError, OSError):
         return ""
 
 
@@ -1699,8 +1786,13 @@ def main() -> None:
     global _cfg
     _cfg = get_config()
     for name, vault in _cfg.vaults.items():
-        index = VaultIndex(vault.path, exclude_paths=vault.exclude_paths)
-        watcher = VaultWatcher(vault.path)
+        context_token = set_current_vault(name)
+        try:
+            policy = VaultAccessPolicy.from_config(_cfg)
+        finally:
+            reset_current_vault(context_token)
+        index = VaultIndex(vault.path, exclude_paths=vault.exclude_paths, policy=policy)
+        watcher = VaultWatcher(vault.path, policy=policy)
         _indices[name] = index
         _watchers[name] = watcher
         threading.Thread(target=index.build, daemon=True).start()

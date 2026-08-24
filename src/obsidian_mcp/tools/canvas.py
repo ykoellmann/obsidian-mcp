@@ -1,30 +1,35 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
 
 from ..config import get_config
-from ..storage.filesystem import validate_path
+from ..storage.filesystem import VaultStorage
 from ..storage.locking import acquire_lock
+from ..storage.policy import InvalidFileTypeError
 
 
 def list_canvases() -> list[str]:
     cfg = get_config()
-    root = cfg.vault_path
+    storage = VaultStorage.from_config(cfg)
     return sorted(
-        str(p.relative_to(root))
-        for p in root.rglob("*.canvas")
+        p.relative
+        for p in storage.list_files()
+        if p.relative.lower().endswith(".canvas")
     )
 
 
 def read_canvas(path: str) -> dict:
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-    if not target.exists():
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".canvas"):
+        raise InvalidFileTypeError("Canvas paths must end in .canvas")
+    target = storage.resolve_read(path)
+    path = target.relative
+    if not storage.exists(path, read=True):
         raise FileNotFoundError(f"Canvas not found: {path!r}")
     try:
-        raw = target.read_text(encoding="utf-8")
+        raw = storage.read_text(path)
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid canvas JSON in {path!r}: {exc}") from exc
@@ -67,16 +72,19 @@ def write_canvas(
     Each edge must have fromNode and toNode. Edge 'id' is auto-generated if omitted.
     """
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".canvas"):
+        raise InvalidFileTypeError("Canvas paths must end in .canvas")
+    target = storage.resolve_write(path)
+    path = target.relative
 
     built_nodes = [_normalize_node(n) for n in (nodes or [])]
     built_edges = [_normalize_edge(e) for e in (edges or [])]
     data = {"nodes": built_nodes, "edges": built_edges}
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    lock = acquire_lock(str(target))
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
-        _write_canvas_atomic(target, data)
+        storage.write_text_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
     finally:
         lock.release()
 
@@ -102,14 +110,18 @@ def patch_canvas(
     delete_node_ids: also removes all edges connected to those nodes.
     """
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-    if not target.exists():
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".canvas"):
+        raise InvalidFileTypeError("Canvas paths must end in .canvas")
+    target = storage.resolve_write(path)
+    path = target.relative
+    if not storage.exists(path, read=False):
         raise FileNotFoundError(f"Canvas not found: {path!r}")
 
-    lock = acquire_lock(str(target))
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
         try:
-            data = json.loads(target.read_text(encoding="utf-8"))
+            data = json.loads(storage.read_text(path))
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid canvas JSON in {path!r}: {exc}") from exc
 
@@ -145,7 +157,7 @@ def patch_canvas(
         if add_edges:
             edges.extend(_normalize_edge(e) for e in add_edges)
 
-        _write_canvas_atomic(target, {"nodes": nodes, "edges": edges})
+        storage.write_text_atomic(path, json.dumps({"nodes": nodes, "edges": edges}, indent=2, ensure_ascii=False))
     finally:
         lock.release()
 
@@ -181,13 +193,3 @@ def _normalize_edge(e: dict) -> dict:
     if "to" in result and "toNode" not in result:
         result["toNode"] = result.pop("to")
     return result
-
-
-def _write_canvas_atomic(target, data: dict) -> None:
-    tmp = target.parent / f".tmp-{uuid.uuid4().hex}.canvas"
-    try:
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, target)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
