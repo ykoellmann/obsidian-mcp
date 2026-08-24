@@ -827,8 +827,10 @@ def list_notes_tool(folder: str = "", include_meta: bool = False, vault: str | N
 
 @profiled_tool()
 def read_note_tool(path: str, vault: str | None = None) -> dict:
-    """Read a note – returns content, frontmatter, tags, aliases, wikilinks,
-    block_refs, callouts, and tasks."""
+    """Read and return one note's full body plus parsed metadata: frontmatter,
+    tags, aliases, wikilinks, block_refs, callouts, and tasks. Prefer
+    get_note_outline_tool when structure is enough and the body may be large.
+    Returns `revision` for pinning a later mutation with expected_revision."""
     return read_note(path)
 
 
@@ -862,7 +864,9 @@ def search_notes_tool(
 
 @profiled_tool()
 def render_note_tool(path: str, depth: int = 1, vault: str | None = None) -> str:
-    """Read a note with all ![[embed]] transclusions resolved inline.
+    """Return a note's full body with ![[embed]] transclusions resolved inline.
+    This may read multiple notes; use only when expanded embedded content is
+    required rather than the source note alone.
     depth: 0=raw, 1=one level of embeds (default), 2=nested embeds."""
     return render_note(path, depth=depth)
 
@@ -871,7 +875,8 @@ def render_note_tool(path: str, depth: int = 1, vault: str | None = None) -> str
 def get_note_outline_tool(path: str, vault: str | None = None) -> dict:
     """Return the structural map of a note without its body text.
     Returns {headings, block_refs, frontmatter_keys, tags, word_count, line_count}.
-    Efficient for large notes where you only need structure."""
+    This reduces the result sent to the model, though the server still reads
+    and parses the note. Prefer for large notes when structure is sufficient."""
     return get_note_outline(path)
 
 
@@ -888,7 +893,8 @@ def find_similar_notes_tool(
     already exist under different vocabulary?"). Ranks by TF-IDF cosine
     similarity over the vault's own vocabulary (a lightweight heuristic,
     not a transformer embedding model — it catches shared distinctive
-    words across differently-phrased notes, not pure synonym rewrites).
+    words across differently-phrased notes, not pure synonym rewrites). It
+    scores the selected vault index rather than reading one named note.
     exclude_path: skip a note (e.g. the one you're editing) from results.
     min_score: filters out noise-level matches (0-1, higher = stricter).
     Returns [{path, score}], most similar first."""
@@ -907,12 +913,14 @@ def write_note_tool(
     create_only: bool = False,
     vault: str | None = None,
 ) -> dict:
-    """Write (create or overwrite) a note. Respects READ_ONLY and WRITE_PATHS.
+    """Create or fully replace a note. Prefer patch_note_tool,
+    patch_note_text_tool, or append_to_note_tool for a targeted edit.
+    Respects READ_ONLY and WRITE_PATHS.
     If `content` has no frontmatter of its own and a note already exists at
     `path`, its existing frontmatter is preserved rather than dropped —
     check the returned `frontmatter_preserved` flag. The result also carries
-    a `diff` (unified diff against the current file).
-    dry_run=True previews {preview, diff, frontmatter_preserved} without
+    a `diff` (unified diff against the current file) and `revision`.
+    dry_run=True previews {preview, diff, frontmatter_preserved, revision} without
     writing anything — check it, then call again with dry_run=False."""
     result = write_note(
         path,
@@ -942,7 +950,9 @@ def patch_note_tool(
     Prefer patch_note_text_tool for literal/regex replacement without a
     structural anchor; use append_to_note_tool for a simple additive entry.
     mode: 'replace' (default) | 'insert_before' | 'insert_after' | 'append'.
-    target_type: 'heading' (default) | 'block_ref' (use section='^block-id')."""
+    target_type: 'heading' (default) | 'block_ref' (use section='^block-id').
+    Reads and rewrites one note atomically; returns status and revision but
+    has no dry-run preview."""
     result = patch_note(
         path,
         section,
@@ -969,11 +979,13 @@ def patch_note_text_tool(
     vault: str | None = None,
 ) -> dict:
     """Find and replace text anywhere in one note's body — no heading/block-ref
-    anchor required, unlike patch_note_tool. Cheaper than write_note_tool for
-    a scattered single-note edit (e.g. bumping one enum value inside a long note).
+    anchor required, unlike patch_note_tool. The caller sends only the change,
+    not the full body; the server still reads and atomically rewrites one note.
+    Prefer over write_note_tool for a scattered edit inside a long note.
     mode: 'exact' (default, literal substring) | 'regex'.
     count: max replacements (default 1, first match only); 0 = replace all.
-    dry_run=True previews {replacements, preview, diff} without writing.
+    dry_run=True previews {replacements, preview, diff, revision} without writing.
+    A successful mutation returns status, replacements, diff, and revision.
     Raises ValueError if `find` doesn't match anything."""
     result = patch_note_text(
         path,
@@ -997,8 +1009,9 @@ def delete_note_tool(
     expected_revision: str | None = None,
     vault: str | None = None,
 ) -> dict:
-    """Delete a note from the vault.
-    trash=True (default) moves it to .trash/ instead of permanent deletion."""
+    """Delete one note. trash=True (default) moves it to .trash/ instead of
+    permanent deletion. expected_revision can pin the target version. This is
+    an immediate mutation with no dry-run or diff; returns {path, status, trash}."""
     result = delete_note(path, trash=trash, index=_index, expected_revision=expected_revision)
     log_write("delete_note_tool", path, f"deleted (trash={trash})")
     return result
@@ -1012,7 +1025,8 @@ def restore_note_tool(trashed_name: str, to_path: str, vault: str | None = None)
     """Restore a note previously moved to .trash/ (see list_trash_tool for names).
     to_path: where to put it back — the original folder can't be recovered
     from the trash entry alone, so you choose the destination.
-    Returns {from, to, status}."""
+    Immediate mutation with no dry-run or revision precondition. Returns
+    {from, to, status}."""
     result = restore_note(trashed_name, to_path, index=_index)
     log_write("restore_note_tool", to_path, f"restored from .trash/{trashed_name}")
     return result
@@ -1037,7 +1051,8 @@ def find_replace_in_vault_tool(
     .trash/ and EXCLUDE_PATHS are always skipped; write-protected files
     (READ_ONLY or outside WRITE_PATHS) are skipped and listed under
     skipped_write_protected rather than aborting the whole run.
-    Returns {replaced_in, total_replacements, skipped_write_protected} when dry_run=False."""
+    This multi-file mutation has no per-note revision preconditions. Returns
+    {replaced_in, total_replacements, skipped_write_protected} when dry_run=False."""
     result = find_replace_in_vault(search, replace, mode=mode, folder=folder, dry_run=dry_run, index=_index)
     if not result.get("dry_run"):
         log_write(
@@ -1063,9 +1078,11 @@ def append_to_note_tool(
     vault: str | None = None,
 ) -> dict:
     """Preferred operation for adding an independent memory or finding.
-    Appends without reading and rewriting the whole file. section optionally
-    targets a heading; create=True can create a missing note. Prefer
-    patch_note_tool when replacing or inserting around existing structure."""
+    The caller need not read or supply the existing body first; the server
+    reads and atomically rewrites one note to preserve its content. section
+    optionally targets a heading; create=True can create a missing note.
+    Prefer patch_note_tool when replacing around existing structure.
+    Returns status and revision; no diff or dry-run preview."""
     result = append_to_note(
         path,
         content,
@@ -1088,10 +1105,11 @@ def patch_frontmatter_tool(
     expected_revision: str | None = None,
     vault: str | None = None,
 ) -> dict:
-    """Update specific YAML frontmatter keys without touching the note body.
+    """Update specific YAML frontmatter keys without replacing the note body.
+    Prefer manage_tags_tool when tags must also be removed from inline text.
     merge_arrays=True merges list values (e.g. tags); False replaces them.
-    Result carries a `diff` (unified diff against the current file).
-    dry_run=True previews {preview, diff, updated_keys} without writing —
+    Result carries a `diff` (unified diff against the current file) and revision.
+    dry_run=True previews {preview, diff, updated_keys, revision} without writing —
     check it, then call again with dry_run=False."""
     result = patch_frontmatter(
         path,
@@ -1108,7 +1126,8 @@ def patch_frontmatter_tool(
 
 @profiled_tool()
 def patch_frontmatter_batch_tool(updates: list[dict], vault: str | None = None) -> dict:
-    """Patch frontmatter on multiple notes in one call.
+    """Patch frontmatter across multiple notes in one call. This is a
+    multi-file mutation with no dry-run preview or caller-supplied revisions.
     updates: list of {"path": str, "updates": dict, "merge_arrays": bool}
     (merge_arrays defaults to True per entry). One entry failing doesn't
     abort the rest — returns {succeeded: [...], failed: [{path, error}]}."""
@@ -1127,8 +1146,9 @@ def manage_tags_tool(
     expected_revision: str | None = None,
     vault: str | None = None,
 ) -> dict:
-    """Add or remove tags on a note. Updates frontmatter tags array and strips
-    inline #tag occurrences from the body. Returns {added, removed}."""
+    """Add or remove tags consistently across frontmatter and inline text.
+    Prefer patch_frontmatter_tool for non-tag YAML fields. Reads and rewrites
+    one note atomically; returns {added, removed, revision} with no dry-run."""
     result = manage_tags(
         path, add=add, remove=remove, index=_index, expected_revision=expected_revision
     )
@@ -1137,8 +1157,10 @@ def manage_tags_tool(
 
 
 def move_note_tool(from_path: str, to_path: str, vault: str | None = None) -> dict:
-    """Rename or move a note. Automatically rewrites all wikilinks in the vault
-    that reference the old path. Returns {from, to, updated_links_in}."""
+    """Rename or move a note and rewrite every affected wikilink in the vault.
+    This is an immediate multi-file mutation, not a cheap path-only rename;
+    there is no dry-run or revision precondition. Returns
+    {from, to, updated_links_in}."""
     result = move_note(from_path, to_path, index=_index)
     log_write("move_note_tool", to_path, f"moved from {from_path}")
     return result
@@ -1152,19 +1174,22 @@ if _feature_flags.enable_move:
 
 @profiled_tool()
 def get_backlinks_tool(path: str, vault: str | None = None) -> list[str]:
-    """Return all notes that link to the given note (alias-aware)."""
+    """Return the direct incoming links for one note (alias-aware). Prefer
+    get_link_graph_tool when you need multiple hops or outgoing links."""
     return get_backlinks(path, _index)
 
 
 @profiled_tool()
 def get_notes_by_tag_tool(tag: str, vault: str | None = None) -> list[str]:
-    """Return all notes that have the given tag."""
+    """Compatibility helper returning paths for one tag. Prefer
+    query_notes_tool when filters may be combined or metadata is needed."""
     return get_notes_by_tag(tag, _index)
 
 
 @profiled_tool()
 def get_vault_conventions_tool(vault: str | None = None) -> str:
-    """Return the vault's AI instructions / conventions from _AI_INSTRUCTIONS.md."""
+    """Read the vault's _AI_INSTRUCTIONS.md conventions. Call this before
+    creating or reorganizing notes when paths, templates, or schema may vary."""
     return get_vault_conventions()
 
 
@@ -1176,7 +1201,8 @@ def get_audit_log_tool(
     limit: int = 50,
     vault: str | None = None,
 ) -> list[dict]:
-    """Query the append-only log of write-tool activity (who/what changed,
+    """Query the append-only audit log rather than scanning current notes.
+    Use for who/what changed,
     not just the .trash/ state after the fact). Most recent first.
     path/tool/since are optional filters (since: ISO timestamp, inclusive).
     Entries: {timestamp, tool, path, summary}. Covers the core note/folder
@@ -1186,8 +1212,8 @@ def get_audit_log_tool(
 
 @profiled_tool()
 def get_note_history_tool(path: str, limit: int = 20, vault: str | None = None) -> list[dict]:
-    """Audit-log entries for one specific note, most recent first —
-    what changed and when, without needing to know which tool was used."""
+    """Query audit-log entries for one note, most recent first. Prefer this
+    over the general audit query when the path is already known."""
     return get_note_history(path, limit=limit)
 
 
@@ -1218,7 +1244,7 @@ def list_vaults_tool() -> list[dict]:
 
 @profiled_tool()
 def lint_schema_tool(vault: str | None = None) -> dict:
-    """Validate every note's frontmatter against the enum fields declared in
+    """Scan every note's frontmatter against enum fields declared in
     the vault's _AI_INSTRUCTIONS.md (under a "Frontmatter Schema" heading,
     e.g. `status: inbox | active | done | archived`). Returns
     {schema, violations: [{path, field, found, expected_enum}]} — only the
@@ -1232,14 +1258,16 @@ def lint_schema_tool(vault: str | None = None) -> dict:
 @profiled_tool()
 def get_broken_links_tool(vault: str | None = None) -> list[dict]:
     """Scan the vault graph for wikilinks that point to non-existent notes.
-    Returns [{source, link}]."""
+    Use for vault-wide link hygiene, not traversal from one note. Returns
+    [{source, link}]."""
     return get_broken_links(_index)
 
 
 @profiled_tool()
 def get_orphans_tool(exclude_folders: list[str] | None = None, vault: str | None = None) -> list[str]:
     """Scan the vault graph for notes that no other note links to.
-    Excludes Journal and Templates by default."""
+    Use for vault-wide link hygiene, not traversal from one note. Excludes
+    Journal and Templates by default."""
     return get_orphans(_index, exclude_folders=exclude_folders or ["Journal", "Templates"])
 
 
@@ -1250,7 +1278,8 @@ def get_link_graph_tool(
     direction: str = "both",
     vault: str | None = None,
 ) -> dict:
-    """Return a traversable link graph starting from a note.
+    """Traverse a bounded link graph starting from one note. Prefer
+    get_backlinks_tool when direct incoming links alone answer the question.
     direction: 'outgoing' | 'incoming' | 'both'.
     Returns {root, nodes: [{path, title, tags}], edges: [{from, to, type}]}."""
     return get_link_graph(root, _index, depth=depth, direction=direction)
@@ -1258,20 +1287,23 @@ def get_link_graph_tool(
 
 @profiled_tool()
 def get_vault_stats_tool(vault: str | None = None) -> dict:
-    """Return vault statistics: note count, link count, orphans, broken links,
-    most-linked notes."""
+    """Compute a vault-wide summary: note count, link count, orphans, broken
+    links, and most-linked notes. Prefer the dedicated graph tools when you
+    need item-level results rather than aggregate statistics."""
     return get_vault_stats(_index)
 
 
 @profiled_tool()
 def get_tag_tree_tool(vault: str | None = None) -> dict:
-    """Return all tags as a nested tree (e.g. konzept → python, ki → llm)."""
+    """Return all tags as a nested hierarchy (e.g. parent → child). Prefer
+    list_all_tags_tool when flat tags and usage counts are sufficient."""
     return get_tag_tree(_index)
 
 
 @profiled_tool()
 def list_all_tags_tool(sort_by: str = "count", vault: str | None = None) -> list[dict]:
-    """Return all tags in the vault with note counts.
+    """Return flat tag metadata from the vault index; note bodies are omitted.
+    Prefer query_notes_tool when you need the notes carrying a known tag.
     sort_by: 'count' (descending, default) | 'name' (alphabetical).
     Returns [{tag, count}]."""
     return list_all_tags(_index, sort_by=sort_by)
@@ -1286,7 +1318,7 @@ def get_tasks_tool(
     due_after: str | None = None,
     vault: str | None = None,
 ) -> list[dict]:
-    """Return tasks from across the vault.
+    """Return parsed tasks from across the vault index; note bodies are omitted.
     status: 'open' | 'done' | 'all'. Optionally filter by folder or tag.
     due_before/due_after: 'YYYY-MM-DD', inclusive; matches the Tasks-plugin
     📅 due date (tasks without one never match either filter).
@@ -1298,7 +1330,8 @@ def get_tasks_tool(
 
 @profiled_tool()
 def get_daily_note_tool(date: str = "today", vault: str | None = None) -> dict:
-    """Read a daily note from Journal/.
+    """Compatibility alias for reading a daily note. Prefer
+    get_periodic_note_tool, which also supports other periods.
     date: 'today' | 'yesterday' | 'YYYY-MM-DD'.
     Returns {path, exists, content, frontmatter, tasks}."""
     return get_daily_note(_index, date_str=date)
@@ -1306,7 +1339,7 @@ def get_daily_note_tool(date: str = "today", vault: str | None = None) -> dict:
 
 @profiled_tool()
 def get_periodic_note_tool(period: str = "daily", date: str = "today", vault: str | None = None) -> dict:
-    """Read or preview a periodic note.
+    """Read one periodic note and return its full body, metadata, and tasks.
     period: 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'yearly'.
     date: 'today' | 'yesterday' | 'YYYY-MM-DD'.
     Returns {path, period, date, exists, content, frontmatter, tasks}."""
@@ -1315,7 +1348,7 @@ def get_periodic_note_tool(period: str = "daily", date: str = "today", vault: st
 
 @profiled_tool()
 def resolve_alias_tool(name: str, vault: str | None = None) -> str | None:
-    """Resolve a note alias or stem to its real vault path.
+    """Resolve one note alias or stem through the vault index; no body is read.
     Returns None if not found."""
     return resolve_alias(name, _index)
 
@@ -1333,7 +1366,9 @@ def query_notes_tool(
     vault: str | None = None,
 ) -> list[dict]:
     """Query notes by tags, folder, status, frontmatter, or inline fields.
-    Prefer this over a tag-only query when filters may be combined.
+    Prefer this over full-text search when structured filters answer the
+    question. It scans and parses candidate notes but returns metadata only,
+    not note bodies.
     tags: all must match (AND). sort_by: 'path'|'title'|'created'|'mtime'.
     inline_field_filter: match Dataview inline fields (key:: value syntax).
     Returns [{path, title, tags, status, created, mtime, frontmatter, inline_fields}]."""
@@ -1354,29 +1389,33 @@ def query_notes_tool(
 
 @profiled_tool()
 def list_attachments_tool(folder: str = "", vault: str | None = None) -> list[dict]:
-    """List all non-Markdown files in the vault: images, PDFs, audio, etc.
-    Returns [{path, size_bytes, mime_type, mtime}]."""
+    """List non-Markdown attachment metadata without returning file content.
+    Covers images, PDFs, audio, and other binaries. Returns
+    [{path, size_bytes, mime_type, mtime}]."""
     return list_attachments(folder)
 
 
 @profiled_tool()
 def read_attachment_tool(path: str, vault: str | None = None) -> dict:
-    """Read an attachment file. Text files returned as UTF-8 string.
-    Binary files (images, PDFs) returned as base64-encoded content with mime_type."""
+    """Read and return an entire attachment. Text is UTF-8; binary files are
+    base64-encoded with mime_type, so large files produce large tool results.
+    Prefer create_attachment_token_tool for large HTTP downloads."""
     return read_attachment(path)
 
 
 @profiled_tool()
 def add_attachment_tool(path: str, content_base64: str, vault: str | None = None) -> dict:
-    """Write a binary attachment (image, PDF, etc.) to the vault from base64-encoded content.
-    Returns {path, status, size_bytes, mime_type}."""
+    """Write one complete binary attachment from base64 content carried in the
+    tool call. Prefer create_attachment_token_tool for large HTTP uploads.
+    Returns {path, status, size_bytes, mime_type}; no dry-run or diff."""
     return add_attachment(path, content_base64)
 
 
 @profiled_tool()
 def create_attachment_token_tool(path: str, method: str = "PUT", expires_in: int = 300, vault: str | None = None) -> dict:
-    """Create a short-lived, single-file upload/download token for the
-    GET/PUT /attachments/{path} HTTP route, instead of handing out the
+    """Create a short-lived single-file token for efficient large HTTP
+    uploads/downloads without base64 content in an MCP tool call. It
+    authorizes the GET/PUT /attachments/{path} route instead of handing out the
     server's master API_KEY. method: 'PUT' (upload) or 'GET' (download).
     expires_in: seconds until the token expires (default 300, max 3600).
 
@@ -1589,7 +1628,8 @@ async def attachment_route(request: Request) -> Response:
 
 @profiled_tool()
 def list_templates_tool(vault: str | None = None) -> list[str]:
-    """List all template files in the Templates/ folder."""
+    """List template paths without reading their bodies. Use before creating a
+    note from established vault structure instead of inventing a new format."""
     return list_templates()
 
 
@@ -1603,7 +1643,9 @@ def create_from_template_tool(
     create_only: bool = False,
     vault: str | None = None,
 ) -> dict:
-    """Render a template and write it as a new note.
+    """Render a template and perform a full note write. Prefer this over
+    write_note_tool when a matching vault template exists. Returns status and
+    revision; there is no dry-run preview.
     Built-in variables: {{date}}, {{time}}, {{title}}, {{week}}, {{month}}, {{year}}, {{weekday}}.
     Supports format specs: {{date:YYYY-MM}} → '2026-07'.
     Custom variables passed in 'variables' dict override built-ins.
@@ -1624,13 +1666,13 @@ if _feature_flags.enable_canvas:
 
     @profiled_tool()
     def list_canvases_tool(vault: str | None = None) -> list[str]:
-        """List all Obsidian Canvas (.canvas) files in the vault."""
+        """List Canvas paths without reading their nodes or edges."""
         return list_canvases()
 
     @profiled_tool()
     def read_canvas_tool(path: str, vault: str | None = None) -> dict:
-        """Read an Obsidian Canvas file.
-        Returns {path, nodes: [{id, type, text, file, x, y}], edges: [{from, to, label}]}."""
+        """Read and return one complete Canvas structure.
+        Returns {path, nodes: [...], edges: [...], revision}."""
         return read_canvas(path)
 
     @profiled_tool()
@@ -1643,11 +1685,12 @@ if _feature_flags.enable_canvas:
         create_only: bool = False,
         vault: str | None = None,
     ) -> dict:
-        """Create or fully overwrite an Obsidian Canvas file.
+        """Create or fully overwrite a Canvas. Prefer patch_canvas_tool for
+        targeted node/edge edits. Full-file mutation with no dry-run preview.
         Node fields: type ('text'|'file'|'group'|'link'), x, y, width, height.
         Text nodes: text. File nodes: file (vault path). Link nodes: url.
         Edge fields: fromNode, toNode, label (optional). IDs are auto-generated if omitted.
-        Returns {path, status, nodes, edges}."""
+        Returns {path, status, nodes, edges, revision}."""
         return write_canvas(
             path,
             nodes=nodes,
@@ -1668,9 +1711,12 @@ if _feature_flags.enable_canvas:
         expected_revision: str | None = None,
         vault: str | None = None,
     ) -> dict:
-        """Atomically update an existing canvas without rewriting the whole file.
+        """Target node/edge changes in one existing Canvas. Prefer this over a
+        full Canvas write when preserving unspecified structure. The tool reads
+        and atomically rewrites one file; no dry-run preview.
         update_nodes: each dict must include 'id'. delete_node_ids also removes
-        all edges connected to those nodes. Returns {path, status, nodes, edges}."""
+        all edges connected to those nodes. Returns
+        {path, status, nodes, edges, revision}."""
         return patch_canvas(
             path,
             add_nodes=add_nodes,
@@ -1688,13 +1734,13 @@ if _feature_flags.enable_excalidraw:
 
     @profiled_tool()
     def list_excalidraw_tool(vault: str | None = None) -> list[str]:
-        """List all Obsidian Excalidraw (*.excalidraw.md) files in the vault."""
+        """List Excalidraw paths without reading their scene data."""
         return list_excalidraw()
 
     @profiled_tool()
     def read_excalidraw_tool(path: str, vault: str | None = None) -> dict:
-        """Read an Obsidian Excalidraw file.
-        Returns {path, elements, app_state, files}."""
+        """Read and return one complete Excalidraw scene.
+        Returns {path, elements, app_state, files, revision}."""
         return read_excalidraw(path)
 
     @profiled_tool()
@@ -1707,10 +1753,12 @@ if _feature_flags.enable_excalidraw:
         create_only: bool = False,
         vault: str | None = None,
     ) -> dict:
-        """Create or fully overwrite an Excalidraw file.
+        """Create or fully overwrite an Excalidraw scene. Prefer
+        patch_excalidraw_tool for targeted element edits. Full-file mutation
+        with no dry-run preview.
         Element fields: type ('rectangle'|'ellipse'|'text'|'arrow'|'freedraw'|...), x, y,
         width, height. Element 'id' is auto-generated if omitted.
-        Returns {path, status, elements}."""
+        Returns {path, status, elements, revision}."""
         return write_excalidraw(
             path,
             elements=elements,
@@ -1730,9 +1778,11 @@ if _feature_flags.enable_excalidraw:
         expected_revision: str | None = None,
         vault: str | None = None,
     ) -> dict:
-        """Atomically update an existing Excalidraw file without rewriting the whole file.
+        """Target element changes in one existing Excalidraw scene. Prefer this
+        over a full scene write when preserving unspecified elements. The tool
+        reads and atomically rewrites one file; no dry-run preview.
         update_elements: each dict must include 'id'.
-        Returns {path, status, elements}."""
+        Returns {path, status, elements, revision}."""
         return patch_excalidraw(
             path,
             add_elements=add_elements,
@@ -1749,8 +1799,9 @@ if _feature_flags.enable_kanban:
 
     @profiled_tool()
     def read_kanban_tool(path: str, vault: str | None = None) -> dict:
-        """Read an Obsidian Kanban board (requires kanban-plugin in frontmatter).
-        Returns {path, plugin, columns: [{name, cards: [{text, done}]}], total_cards}."""
+        """Read and return one complete Kanban board (requires kanban-plugin
+        in frontmatter).
+        Returns {path, plugin, columns: [...], total_cards, revision}."""
         return read_kanban(path)
 
     @profiled_tool()
@@ -1762,8 +1813,10 @@ if _feature_flags.enable_kanban:
         create_only: bool = False,
         vault: str | None = None,
     ) -> dict:
-        """Create a new Kanban board with the given column names.
-        Returns {path, status, columns}."""
+        """Create or fully replace a Kanban board with the given columns.
+        Prefer the card tools for changes to an existing board. Full-file
+        mutation with no dry-run preview.
+        Returns {path, status, columns, revision}."""
         return create_kanban_board(
             path,
             columns,
@@ -1782,8 +1835,9 @@ if _feature_flags.enable_kanban:
         expected_revision: str | None = None,
         vault: str | None = None,
     ) -> dict:
-        """Add a card to a Kanban column. Card is inserted at the top of the column.
-        Returns {path, status, column, card, done}."""
+        """Add one card without supplying the full board. Reads and atomically
+        rewrites one board; no dry-run preview. The card is inserted at the top.
+        Returns {path, status, column, card, done, revision}."""
         return add_kanban_card(
             path,
             column,
@@ -1804,8 +1858,10 @@ if _feature_flags.enable_kanban:
         expected_revision: str | None = None,
         vault: str | None = None,
     ) -> dict:
-        """Move a card from one column to another. done=true/false updates the tick state.
-        Returns {path, status, card, from, to}."""
+        """Move one existing card without supplying the full board. Reads and
+        atomically rewrites one board; no dry-run preview. done=true/false
+        updates the tick state.
+        Returns {path, status, card, from, to, revision}."""
         return move_kanban_card(
             path,
             card_text,
@@ -1825,8 +1881,10 @@ if _feature_flags.enable_kanban:
         expected_revision: str | None = None,
         vault: str | None = None,
     ) -> dict:
-        """Delete a card from the Kanban board. column limits the search to one column.
-        Returns {path, status, card}."""
+        """Delete one card without supplying the full board. Reads and
+        atomically rewrites one board; no dry-run preview. column limits the
+        search to one column.
+        Returns {path, status, card, revision}."""
         return delete_kanban_card(
             path,
             card_text,
@@ -1842,13 +1900,13 @@ if _feature_flags.enable_bases:
 
     @profiled_tool()
     def list_bases_tool(vault: str | None = None) -> list[str]:
-        """List all Obsidian Bases (.base) files in the vault."""
+        """List Base paths without reading their definitions."""
         return list_bases()
 
     @profiled_tool()
     def read_base_tool(path: str, vault: str | None = None) -> dict:
-        """Read an Obsidian Bases file.
-        Returns {path, filters, formulas, properties, views}."""
+        """Read and return one complete Base definition.
+        Returns {path, filters, formulas, properties, views, revision}."""
         return read_base(path)
 
     @profiled_tool()
@@ -1863,13 +1921,15 @@ if _feature_flags.enable_bases:
         create_only: bool = False,
         vault: str | None = None,
     ) -> dict:
-        """Create or fully overwrite a .base file.
+        """Create or fully overwrite a Base. Prefer patch_base_tool for targeted
+        formula, property, filter, or view edits. This full-file mutation also
+        scans existing Bases for known property names; no dry-run preview.
         filters: boolean tree ({and:[...]}, {or:[...]}, {not:...}) or a single
         string statement, e.g. 'status != "done"' or 'file.hasTag("book")'.
         formulas: name -> expression string. properties: name -> {displayName}.
         views: list of {type, name, limit, filters, order, groupBy, summaries};
         'type' (e.g. 'table'|'cards'|'list') is required per view.
-        Returns {path, status, views, known_properties} — known_properties is
+        Returns {path, status, views, known_properties, revision} — known_properties is
         collected from existing .base files in the vault to keep naming consistent."""
         return write_base(
             path,
@@ -1897,10 +1957,11 @@ if _feature_flags.enable_bases:
         expected_revision: str | None = None,
         vault: str | None = None,
     ) -> dict:
-        """Atomically update an existing .base file without rewriting it wholesale.
+        """Target fields in one existing Base while preserving unspecified
+        structure. The tool reads and atomically rewrites one file; no dry-run.
         update_formulas/update_properties are merged by key. set_filters replaces
         the whole filters block. update_views: each dict must include 'name'.
-        Returns {path, status, views}."""
+        Returns {path, status, views, revision}."""
         return patch_base(
             path,
             update_formulas=update_formulas,
@@ -1924,14 +1985,16 @@ def list_folder_tool(path: str = "", recursive: bool = False, max_depth: int | N
     Prefer list_notes_tool for Markdown discovery and parsed note metadata.
     path='': root of the vault.
     recursive=False (default): immediate contents only — {path, folders, files}.
-    recursive=True: full tree dump in one call — {path, tree: {folders: {name: tree}, files: [...]}}.
+    recursive=True walks and returns the full subtree, so bound large requests
+    with max_depth. Returns {path, tree: {folders: {name: tree}, files: [...]}}.
     max_depth limits how many levels deep to descend (None = unlimited)."""
     return list_folder(path, recursive=recursive, max_depth=max_depth)
 
 
 @profiled_tool()
 def list_files_tool(folder: str = "", extension: str | None = None, vault: str | None = None) -> list[str]:
-    """List every file in the vault (or a subfolder), any type — not just
+    """List file paths without reading content or parsed metadata. Covers every
+    file type in the vault (or a subfolder), not just
     notes/attachments/bases/canvases (e.g. .lock files, stray non-Markdown
     files). extension filters by suffix without the dot (e.g. "lock",
     "canvas"); omit for everything. Hidden files/folders are skipped."""
@@ -1940,17 +2003,18 @@ def list_files_tool(folder: str = "", extension: str | None = None, vault: str |
 
 @profiled_tool()
 def create_folder_tool(path: str, vault: str | None = None) -> dict:
-    """Create a folder (and any missing parents) in the vault.
-    Returns {path, status}."""
+    """Create a folder and missing parents without reading note content.
+    Immediate mutation with no dry-run. Returns {path, status}."""
     result = create_folder(path)
     log_write("create_folder_tool", path, "created folder")
     return result
 
 
 def delete_folder_tool(path: str, trash: bool = True, vault: str | None = None) -> dict:
-    """Delete a vault folder.
+    """Delete a folder tree, potentially affecting many files.
     trash=True (default) moves it to .trash/ instead of permanent deletion.
-    Returns {path, status, trash}."""
+    Immediate mutation with no dry-run or revision precondition. Returns
+    {path, status, trash}."""
     result = delete_folder(path, trash=trash)
     log_write("delete_folder_tool", path, f"deleted folder (trash={trash})")
     return result
@@ -1961,9 +2025,10 @@ if _feature_flags.enable_delete:
 
 
 def rename_folder_tool(from_path: str, to_path: str, vault: str | None = None) -> dict:
-    """Rename or move a vault folder. Rewrites path-based wikilinks in all
-    notes that reference notes inside the moved folder.
-    Returns {from, to, notes_moved, updated_links_in}."""
+    """Rename or move a folder and rewrite path-based wikilinks to every note
+    inside it. This is a vault-wide multi-file mutation, not a cheap rename.
+    There is no dry-run or revision precondition. Returns
+    {from, to, notes_moved, updated_links_in}."""
     result = rename_folder(from_path, to_path, index=_index)
     log_write("rename_folder_tool", to_path, f"renamed from {from_path}")
     return result
@@ -1989,7 +2054,8 @@ def restore_folder_tool(trashed_name: str, to_path: str, vault: str | None = Non
     """Restore a folder previously moved to .trash/ (see list_trash_tool for names).
     to_path: where to put it back — the original parent path can't be
     recovered from the trash entry alone, so you choose the destination.
-    Returns {path, status, notes_restored}."""
+    Immediate tree mutation with no dry-run or revision precondition. Returns
+    {path, status, notes_restored}."""
     result = restore_folder(trashed_name, to_path, index=_index)
     log_write("restore_folder_tool", to_path, f"restored from .trash/{trashed_name}")
     return result
