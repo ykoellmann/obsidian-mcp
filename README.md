@@ -72,12 +72,43 @@ VAULT_PATH=/path/to/your/obsidian/vault
 # READ_ONLY=true            # prevent all writes
 # WRITE_PATHS=Notes/,Inbox/ # restrict writes to specific folders
 # TRANSPORT=stdio           # stdio (default), http (recommended for network use), or sse (legacy)
+# TOOL_PROFILE=focused      # smaller tool list for common agent workflows
 ```
 
 Full list of variables — including `API_KEY`, `PUBLIC_BASE_URL`, and the
 `OAUTH_GITHUB_*` variables for the optional second auth variant — is
 documented with inline comments in `.env.example`; see [Remote Setup](#remote-setup-recommended)
 for the two auth variants in detail.
+
+### Tool profiles
+
+`TOOL_PROFILE=full` is the default and preserves the existing 48 base tools.
+For a headless Markdown memory or writing deployment, `TOOL_PROFILE=focused`
+is the recommended starting point. It advertises these 33 base tools:
+
+```text
+list_vaults_tool, get_vault_conventions_tool, list_notes_tool,
+list_folder_tool, read_note_tool, get_note_outline_tool, search_notes_tool,
+find_similar_notes_tool, query_notes_tool, write_note_tool, patch_note_tool,
+patch_note_text_tool, append_to_note_tool, patch_frontmatter_tool,
+manage_tags_tool, move_note_tool, create_folder_tool, rename_folder_tool,
+get_backlinks_tool, get_broken_links_tool, get_orphans_tool,
+get_link_graph_tool, get_tasks_tool, get_periodic_note_tool, lint_schema_tool,
+get_vault_stats_tool, list_all_tags_tool, list_templates_tool,
+create_from_template_tool, list_attachments_tool, read_attachment_tool,
+add_attachment_tool, create_attachment_token_tool
+```
+
+The focused profile hides uncommon administrative, destructive, batch, audit,
+rendered-read, and alias convenience tools; their Python implementations and
+the full profile remain available. Profiles only reduce what the model sees:
+`READ_ONLY`, authentication, `WRITE_PATHS`, and `EXCLUDE_PATHS` still control
+access. Each explicitly enabled optional format group is added to either
+profile.
+
+If a documented capability is missing, check `TOOL_PROFILE` and the relevant
+`ENABLE_*` format flag, then reconnect the MCP client so it refreshes
+`tools/list`.
 
 ### Optional plugin-format tools (Canvas / Excalidraw / Kanban / Bases)
 

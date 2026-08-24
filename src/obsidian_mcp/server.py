@@ -19,6 +19,7 @@ from starlette.responses import JSONResponse, Response
 from .config import (
     ConfigError,
     get_config,
+    get_tool_profile,
     load_vaults_file,
     reset_current_vault,
     set_current_vault,
@@ -26,6 +27,9 @@ from .config import (
 from .domain.index import VaultIndex
 from .storage.filesystem import PathTraversalError, read_file, validate_path
 from .storage.watcher import VaultWatcher
+from .tool_profiles import (
+    profile_tool_decorator,
+)
 from .tools.attachments import (
     add_attachment,
     create_attachment_token,
@@ -96,6 +100,10 @@ from .tools.write import (
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
+
+# Read at import time because FastMCP registrations are created by decorators
+# below.  This deliberately does not instantiate Config or require VAULT_PATH.
+_tool_profile = get_tool_profile()
 
 
 _DEFAULT_INSTRUCTIONS = r"""\
@@ -365,7 +373,50 @@ Templates use `{{date}}`, `{{title}}`, `{{week}}` etc.
 """
 
 
+_FOCUSED_INSTRUCTIONS = """\
+You are connected to obsidian-mcp using its focused tool profile.
+
+Start with `list_vaults_tool()`. If several vaults are returned, choose the
+one matching the request and pass `vault=<name>` on every subsequent call.
+Then call `get_vault_conventions_tool()`; if no conventions file exists, use
+`list_folder_tool()` and `list_notes_tool()` to learn the structure.
+
+Choose tools by intention:
+
+- Discover with `list_notes_tool`, `list_folder_tool`, `search_notes_tool`,
+  `find_similar_notes_tool`, or `query_notes_tool`. Query can combine tags,
+  folder, status, frontmatter, and inline-field filters.
+- Use `get_note_outline_tool` when a large note's structure is enough; use
+  `read_note_tool` when the full body and parsed metadata are required.
+- Prefer `append_to_note_tool` for adding an independent memory or finding.
+  Use `patch_note_tool` for a heading/block-reference edit and
+  `patch_note_text_tool` for exact or regex replacement in one note.
+- `write_note_tool` can create or overwrite a full note. Use its dry run when
+  replacing content. `patch_frontmatter_tool` updates YAML without replacing
+  the body; `manage_tags_tool` also removes matching inline tags.
+- `move_note_tool` and `rename_folder_tool` rewrite affected wikilinks across
+  the vault. Use `create_folder_tool` for missing structure.
+- Use `get_backlinks_tool`, `get_broken_links_tool`, `get_orphans_tool`, and
+  `get_link_graph_tool` for graph questions; these may inspect the whole
+  index. Use `get_tasks_tool`, `get_vault_stats_tool`, `list_all_tags_tool`,
+  and `lint_schema_tool` for vault-wide reports.
+- Use `get_periodic_note_tool(period, date)` for daily, weekly, monthly,
+  quarterly, or yearly notes.
+- Use `list_templates_tool` and `create_from_template_tool` for templated
+  creation. Search first to avoid duplicates.
+- Use `list_attachments_tool`, `read_attachment_tool`, and
+  `add_attachment_tool` for ordinary binary files. For large transfers,
+  `create_attachment_token_tool` creates a short-lived single-file URL.
+
+Optional Canvas, Excalidraw, Kanban, and Bases tools may also appear when the
+operator enables their format group. Profiles only change tool visibility;
+read-only mode, authentication, and path permissions remain authoritative.
+"""
+
+
 def _load_instructions() -> str:
+    if _tool_profile == "focused":
+        return _FOCUSED_INSTRUCTIONS
     try:
         cfg = get_config()
         instructions_file = cfg.vault_path / "_AI_INSTRUCTIONS.md"
@@ -498,7 +549,7 @@ def _build_auth() -> AuthProvider | None:
 
 
 class _CurrentVaultIndex:
-    """Every existing @mcp.tool()/@mcp.resource() call site passes/uses
+    """Every existing @profiled_tool()/@mcp.resource() call site passes/uses
     `_index` as a single VaultIndex — this proxy lets that keep working
     completely unchanged even though there's now one VaultIndex per
     configured vault. Attribute access is forwarded to whichever vault's
@@ -581,7 +632,7 @@ class VaultResolutionMiddleware(Middleware):
     needing to know multi-vault exists. A no-op pass-through in
     single-vault mode (VAULTS_CONFIG unset).
 
-    Every @mcp.tool() has an optional `vault: str | None = None` parameter
+    Every @profiled_tool() has an optional `vault: str | None = None` parameter
     (mechanical addition, not used by the tool bodies themselves — this
     middleware is the only thing that reads it, from the raw call
     arguments, before the tool function ever runs). Omit it to use the
@@ -644,6 +695,7 @@ _index = _CurrentVaultIndex()
 
 mcp = FastMCP(name="obsidian-mcp", instructions=_load_instructions(), auth=_build_auth())
 mcp.add_middleware(VaultResolutionMiddleware())
+profiled_tool = profile_tool_decorator(mcp, _tool_profile)
 
 
 def _feature_flags_from_env() -> tuple[bool, bool, bool, bool]:
@@ -694,21 +746,23 @@ def daily_note(date: str = "today") -> str:
 
 # ── Read ──────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@profiled_tool()
 def list_notes_tool(folder: str = "", include_meta: bool = False, vault: str | None = None) -> list:
-    """List all Markdown notes in the vault (or a subfolder).
-    Set include_meta=True to get title, tags, status, created per note."""
+    """Discover Markdown notes, optionally with parsed metadata.
+    Prefer list_folder_tool when you need directory structure or non-note
+    files. Set include_meta=True to get title, tags, status, created per note;
+    note bodies are not returned."""
     return list_notes(folder, include_meta=include_meta)
 
 
-@mcp.tool()
+@profiled_tool()
 def read_note_tool(path: str, vault: str | None = None) -> dict:
     """Read a note – returns content, frontmatter, tags, aliases, wikilinks,
     block_refs, callouts, and tasks."""
     return read_note(path)
 
 
-@mcp.tool()
+@profiled_tool()
 def search_notes_tool(
     query: str,
     tag: str | None = None,
@@ -720,6 +774,8 @@ def search_notes_tool(
     vault: str | None = None,
 ) -> list[dict]:
     """Full-text search with snippets and relevance ranking.
+    This scans note text across the selected scope; prefer query_notes_tool
+    when structured metadata filters alone answer the question.
     mode: 'exact' (default) | 'regex' | 'fuzzy'. Returns [{path, score, snippets, tags}].
     frontmatter_filter: combine with the text search in one call — same shape
     as query_notes_tool's (plain value = exact match, or {"$ne": v} /
@@ -734,14 +790,14 @@ def search_notes_tool(
     )
 
 
-@mcp.tool()
+@profiled_tool()
 def render_note_tool(path: str, depth: int = 1, vault: str | None = None) -> str:
     """Read a note with all ![[embed]] transclusions resolved inline.
     depth: 0=raw, 1=one level of embeds (default), 2=nested embeds."""
     return render_note(path, depth=depth)
 
 
-@mcp.tool()
+@profiled_tool()
 def get_note_outline_tool(path: str, vault: str | None = None) -> dict:
     """Return the structural map of a note without its body text.
     Returns {headings, block_refs, frontmatter_keys, tags, word_count, line_count}.
@@ -749,7 +805,7 @@ def get_note_outline_tool(path: str, vault: str | None = None) -> dict:
     return get_note_outline(path)
 
 
-@mcp.tool()
+@profiled_tool()
 def find_similar_notes_tool(
     text: str,
     limit: int = 5,
@@ -771,7 +827,7 @@ def find_similar_notes_tool(
 
 # ── Write ─────────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@profiled_tool()
 def write_note_tool(path: str, content: str, dry_run: bool = False, vault: str | None = None) -> dict:
     """Write (create or overwrite) a note. Respects READ_ONLY and WRITE_PATHS.
     If `content` has no frontmatter of its own and a note already exists at
@@ -786,7 +842,7 @@ def write_note_tool(path: str, content: str, dry_run: bool = False, vault: str |
     return result
 
 
-@mcp.tool()
+@profiled_tool()
 def patch_note_tool(
     path: str,
     section: str,
@@ -795,7 +851,9 @@ def patch_note_tool(
     target_type: str = "heading",
     vault: str | None = None,
 ) -> dict:
-    """Edit a section or block reference inside a note.
+    """Edit a heading section or block reference inside a note.
+    Prefer patch_note_text_tool for literal/regex replacement without a
+    structural anchor; use append_to_note_tool for a simple additive entry.
     mode: 'replace' (default) | 'insert_before' | 'insert_after' | 'append'.
     target_type: 'heading' (default) | 'block_ref' (use section='^block-id')."""
     result = patch_note(path, section, new_content, mode=mode, target_type=target_type, index=_index)
@@ -803,7 +861,7 @@ def patch_note_tool(
     return result
 
 
-@mcp.tool()
+@profiled_tool()
 def patch_note_text_tool(
     path: str,
     find: str,
@@ -826,7 +884,7 @@ def patch_note_text_tool(
     return result
 
 
-@mcp.tool()
+@profiled_tool()
 def delete_note_tool(path: str, trash: bool = True, vault: str | None = None) -> dict:
     """Delete a note from the vault.
     trash=True (default) moves it to .trash/ instead of permanent deletion."""
@@ -835,7 +893,7 @@ def delete_note_tool(path: str, trash: bool = True, vault: str | None = None) ->
     return result
 
 
-@mcp.tool()
+@profiled_tool()
 def restore_note_tool(trashed_name: str, to_path: str, vault: str | None = None) -> dict:
     """Restore a note previously moved to .trash/ (see list_trash_tool for names).
     to_path: where to put it back — the original folder can't be recovered
@@ -846,7 +904,7 @@ def restore_note_tool(trashed_name: str, to_path: str, vault: str | None = None)
     return result
 
 
-@mcp.tool()
+@profiled_tool()
 def find_replace_in_vault_tool(
     search: str,
     replace: str,
@@ -873,7 +931,7 @@ def find_replace_in_vault_tool(
     return result
 
 
-@mcp.tool()
+@profiled_tool()
 def append_to_note_tool(
     path: str,
     content: str,
@@ -881,14 +939,16 @@ def append_to_note_tool(
     create: bool = True,
     vault: str | None = None,
 ) -> dict:
-    """Append content to a note without reading and rewriting the whole file.
-    section: optional heading to append under. create=True creates the note if missing."""
+    """Preferred operation for adding an independent memory or finding.
+    Appends without reading and rewriting the whole file. section optionally
+    targets a heading; create=True can create a missing note. Prefer
+    patch_note_tool when replacing or inserting around existing structure."""
     result = append_to_note(path, content, section=section, create=create, index=_index)
     log_write("append_to_note_tool", path, "appended content" + (f" under {section!r}" if section else ""))
     return result
 
 
-@mcp.tool()
+@profiled_tool()
 def patch_frontmatter_tool(
     path: str,
     updates: dict,
@@ -907,7 +967,7 @@ def patch_frontmatter_tool(
     return result
 
 
-@mcp.tool()
+@profiled_tool()
 def patch_frontmatter_batch_tool(updates: list[dict], vault: str | None = None) -> dict:
     """Patch frontmatter on multiple notes in one call.
     updates: list of {"path": str, "updates": dict, "merge_arrays": bool}
@@ -919,7 +979,7 @@ def patch_frontmatter_batch_tool(updates: list[dict], vault: str | None = None) 
     return result
 
 
-@mcp.tool()
+@profiled_tool()
 def manage_tags_tool(
     path: str,
     add: list[str] | None = None,
@@ -933,7 +993,7 @@ def manage_tags_tool(
     return result
 
 
-@mcp.tool()
+@profiled_tool()
 def move_note_tool(from_path: str, to_path: str, vault: str | None = None) -> dict:
     """Rename or move a note. Automatically rewrites all wikilinks in the vault
     that reference the old path. Returns {from, to, updated_links_in}."""
@@ -944,25 +1004,25 @@ def move_note_tool(from_path: str, to_path: str, vault: str | None = None) -> di
 
 # ── Query / Graph ─────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@profiled_tool()
 def get_backlinks_tool(path: str, vault: str | None = None) -> list[str]:
     """Return all notes that link to the given note (alias-aware)."""
     return get_backlinks(path, _index)
 
 
-@mcp.tool()
+@profiled_tool()
 def get_notes_by_tag_tool(tag: str, vault: str | None = None) -> list[str]:
     """Return all notes that have the given tag."""
     return get_notes_by_tag(tag, _index)
 
 
-@mcp.tool()
+@profiled_tool()
 def get_vault_conventions_tool(vault: str | None = None) -> str:
     """Return the vault's AI instructions / conventions from _AI_INSTRUCTIONS.md."""
     return get_vault_conventions()
 
 
-@mcp.tool()
+@profiled_tool()
 def get_audit_log_tool(
     path: str | None = None,
     tool: str | None = None,
@@ -978,14 +1038,14 @@ def get_audit_log_tool(
     return get_audit_log(path=path, tool=tool, since=since, limit=limit)
 
 
-@mcp.tool()
+@profiled_tool()
 def get_note_history_tool(path: str, limit: int = 20, vault: str | None = None) -> list[dict]:
     """Audit-log entries for one specific note, most recent first —
     what changed and when, without needing to know which tool was used."""
     return get_note_history(path, limit=limit)
 
 
-@mcp.tool()
+@profiled_tool()
 def list_vaults_tool() -> list[dict]:
     """List the vault(s) the current identity (API key or GitHub login) may
     access. Returns [{name, description, is_default}]. Call this at the
@@ -1010,7 +1070,7 @@ def list_vaults_tool() -> list[dict]:
     ]
 
 
-@mcp.tool()
+@profiled_tool()
 def lint_schema_tool(vault: str | None = None) -> dict:
     """Validate every note's frontmatter against the enum fields declared in
     the vault's _AI_INSTRUCTIONS.md (under a "Frontmatter Schema" heading,
@@ -1023,21 +1083,21 @@ def lint_schema_tool(vault: str | None = None) -> dict:
     return lint_schema(_index)
 
 
-@mcp.tool()
+@profiled_tool()
 def get_broken_links_tool(vault: str | None = None) -> list[dict]:
-    """Find all wikilinks in the vault that point to non-existent notes.
+    """Scan the vault graph for wikilinks that point to non-existent notes.
     Returns [{source, link}]."""
     return get_broken_links(_index)
 
 
-@mcp.tool()
+@profiled_tool()
 def get_orphans_tool(exclude_folders: list[str] | None = None, vault: str | None = None) -> list[str]:
-    """Find notes that no other note links to.
+    """Scan the vault graph for notes that no other note links to.
     Excludes Journal and Templates by default."""
     return get_orphans(_index, exclude_folders=exclude_folders or ["Journal", "Templates"])
 
 
-@mcp.tool()
+@profiled_tool()
 def get_link_graph_tool(
     root: str,
     depth: int = 2,
@@ -1050,20 +1110,20 @@ def get_link_graph_tool(
     return get_link_graph(root, _index, depth=depth, direction=direction)
 
 
-@mcp.tool()
+@profiled_tool()
 def get_vault_stats_tool(vault: str | None = None) -> dict:
     """Return vault statistics: note count, link count, orphans, broken links,
     most-linked notes."""
     return get_vault_stats(_index)
 
 
-@mcp.tool()
+@profiled_tool()
 def get_tag_tree_tool(vault: str | None = None) -> dict:
     """Return all tags as a nested tree (e.g. konzept → python, ki → llm)."""
     return get_tag_tree(_index)
 
 
-@mcp.tool()
+@profiled_tool()
 def list_all_tags_tool(sort_by: str = "count", vault: str | None = None) -> list[dict]:
     """Return all tags in the vault with note counts.
     sort_by: 'count' (descending, default) | 'name' (alphabetical).
@@ -1071,7 +1131,7 @@ def list_all_tags_tool(sort_by: str = "count", vault: str | None = None) -> list
     return list_all_tags(_index, sort_by=sort_by)
 
 
-@mcp.tool()
+@profiled_tool()
 def get_tasks_tool(
     status: str = "open",
     folder: str = "",
@@ -1090,7 +1150,7 @@ def get_tasks_tool(
     return get_tasks(_index, status=status, folder=folder, tag=tag, due_before=due_before, due_after=due_after)
 
 
-@mcp.tool()
+@profiled_tool()
 def get_daily_note_tool(date: str = "today", vault: str | None = None) -> dict:
     """Read a daily note from Journal/.
     date: 'today' | 'yesterday' | 'YYYY-MM-DD'.
@@ -1098,7 +1158,7 @@ def get_daily_note_tool(date: str = "today", vault: str | None = None) -> dict:
     return get_daily_note(_index, date_str=date)
 
 
-@mcp.tool()
+@profiled_tool()
 def get_periodic_note_tool(period: str = "daily", date: str = "today", vault: str | None = None) -> dict:
     """Read or preview a periodic note.
     period: 'daily' | 'weekly' | 'monthly' | 'quarterly' | 'yearly'.
@@ -1107,14 +1167,14 @@ def get_periodic_note_tool(period: str = "daily", date: str = "today", vault: st
     return get_periodic_note(_index, period=period, date_str=date)
 
 
-@mcp.tool()
+@profiled_tool()
 def resolve_alias_tool(name: str, vault: str | None = None) -> str | None:
     """Resolve a note alias or stem to its real vault path.
     Returns None if not found."""
     return resolve_alias(name, _index)
 
 
-@mcp.tool()
+@profiled_tool()
 def query_notes_tool(
     tags: list[str] | None = None,
     status: str | None = None,
@@ -1126,7 +1186,8 @@ def query_notes_tool(
     folder: str = "",
     vault: str | None = None,
 ) -> list[dict]:
-    """Dataview-like query: filter notes by tags, status, frontmatter, or inline fields.
+    """Query notes by tags, folder, status, frontmatter, or inline fields.
+    Prefer this over a tag-only query when filters may be combined.
     tags: all must match (AND). sort_by: 'path'|'title'|'created'|'mtime'.
     inline_field_filter: match Dataview inline fields (key:: value syntax).
     Returns [{path, title, tags, status, created, mtime, frontmatter, inline_fields}]."""
@@ -1145,28 +1206,28 @@ def query_notes_tool(
 
 # ── Attachments ───────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@profiled_tool()
 def list_attachments_tool(folder: str = "", vault: str | None = None) -> list[dict]:
     """List all non-Markdown files in the vault: images, PDFs, audio, etc.
     Returns [{path, size_bytes, mime_type, mtime}]."""
     return list_attachments(folder)
 
 
-@mcp.tool()
+@profiled_tool()
 def read_attachment_tool(path: str, vault: str | None = None) -> dict:
     """Read an attachment file. Text files returned as UTF-8 string.
     Binary files (images, PDFs) returned as base64-encoded content with mime_type."""
     return read_attachment(path)
 
 
-@mcp.tool()
+@profiled_tool()
 def add_attachment_tool(path: str, content_base64: str, vault: str | None = None) -> dict:
     """Write a binary attachment (image, PDF, etc.) to the vault from base64-encoded content.
     Returns {path, status, size_bytes, mime_type}."""
     return add_attachment(path, content_base64)
 
 
-@mcp.tool()
+@profiled_tool()
 def create_attachment_token_tool(path: str, method: str = "PUT", expires_in: int = 300, vault: str | None = None) -> dict:
     """Create a short-lived, single-file upload/download token for the
     GET/PUT /attachments/{path} HTTP route, instead of handing out the
@@ -1350,13 +1411,13 @@ async def attachment_route(request: Request) -> Response:
 
 # ── Templates ─────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@profiled_tool()
 def list_templates_tool(vault: str | None = None) -> list[str]:
     """List all template files in the Templates/ folder."""
     return list_templates()
 
 
-@mcp.tool()
+@profiled_tool()
 def create_from_template_tool(
     template_path: str,
     output_path: str,
@@ -1375,18 +1436,18 @@ def create_from_template_tool(
 
 if _feature_flags.enable_canvas:
 
-    @mcp.tool()
+    @profiled_tool()
     def list_canvases_tool(vault: str | None = None) -> list[str]:
         """List all Obsidian Canvas (.canvas) files in the vault."""
         return list_canvases()
 
-    @mcp.tool()
+    @profiled_tool()
     def read_canvas_tool(path: str, vault: str | None = None) -> dict:
         """Read an Obsidian Canvas file.
         Returns {path, nodes: [{id, type, text, file, x, y}], edges: [{from, to, label}]}."""
         return read_canvas(path)
 
-    @mcp.tool()
+    @profiled_tool()
     def write_canvas_tool(
         path: str,
         nodes: list[dict] | None = None,
@@ -1400,7 +1461,7 @@ if _feature_flags.enable_canvas:
         Returns {path, status, nodes, edges}."""
         return write_canvas(path, nodes=nodes, edges=edges)
 
-    @mcp.tool()
+    @profiled_tool()
     def patch_canvas_tool(
         path: str,
         add_nodes: list[dict] | None = None,
@@ -1427,18 +1488,18 @@ if _feature_flags.enable_canvas:
 
 if _feature_flags.enable_excalidraw:
 
-    @mcp.tool()
+    @profiled_tool()
     def list_excalidraw_tool(vault: str | None = None) -> list[str]:
         """List all Obsidian Excalidraw (*.excalidraw.md) files in the vault."""
         return list_excalidraw()
 
-    @mcp.tool()
+    @profiled_tool()
     def read_excalidraw_tool(path: str, vault: str | None = None) -> dict:
         """Read an Obsidian Excalidraw file.
         Returns {path, elements, app_state, files}."""
         return read_excalidraw(path)
 
-    @mcp.tool()
+    @profiled_tool()
     def write_excalidraw_tool(
         path: str,
         elements: list[dict] | None = None,
@@ -1451,7 +1512,7 @@ if _feature_flags.enable_excalidraw:
         Returns {path, status, elements}."""
         return write_excalidraw(path, elements=elements, app_state=app_state, index=_index)
 
-    @mcp.tool()
+    @profiled_tool()
     def patch_excalidraw_tool(
         path: str,
         add_elements: list[dict] | None = None,
@@ -1475,19 +1536,19 @@ if _feature_flags.enable_excalidraw:
 
 if _feature_flags.enable_kanban:
 
-    @mcp.tool()
+    @profiled_tool()
     def read_kanban_tool(path: str, vault: str | None = None) -> dict:
         """Read an Obsidian Kanban board (requires kanban-plugin in frontmatter).
         Returns {path, plugin, columns: [{name, cards: [{text, done}]}], total_cards}."""
         return read_kanban(path)
 
-    @mcp.tool()
+    @profiled_tool()
     def create_kanban_board_tool(path: str, columns: list[str], vault: str | None = None) -> dict:
         """Create a new Kanban board with the given column names.
         Returns {path, status, columns}."""
         return create_kanban_board(path, columns, index=_index)
 
-    @mcp.tool()
+    @profiled_tool()
     def add_kanban_card_tool(
         path: str,
         column: str,
@@ -1499,7 +1560,7 @@ if _feature_flags.enable_kanban:
         Returns {path, status, column, card, done}."""
         return add_kanban_card(path, column, text, done=done, index=_index)
 
-    @mcp.tool()
+    @profiled_tool()
     def move_kanban_card_tool(
         path: str,
         card_text: str,
@@ -1512,7 +1573,7 @@ if _feature_flags.enable_kanban:
         Returns {path, status, card, from, to}."""
         return move_kanban_card(path, card_text, from_column, to_column, done=done, index=_index)
 
-    @mcp.tool()
+    @profiled_tool()
     def delete_kanban_card_tool(
         path: str,
         card_text: str,
@@ -1528,18 +1589,18 @@ if _feature_flags.enable_kanban:
 
 if _feature_flags.enable_bases:
 
-    @mcp.tool()
+    @profiled_tool()
     def list_bases_tool(vault: str | None = None) -> list[str]:
         """List all Obsidian Bases (.base) files in the vault."""
         return list_bases()
 
-    @mcp.tool()
+    @profiled_tool()
     def read_base_tool(path: str, vault: str | None = None) -> dict:
         """Read an Obsidian Bases file.
         Returns {path, filters, formulas, properties, views}."""
         return read_base(path)
 
-    @mcp.tool()
+    @profiled_tool()
     def write_base_tool(
         path: str,
         filters: dict | None = None,
@@ -1558,7 +1619,7 @@ if _feature_flags.enable_bases:
         collected from existing .base files in the vault to keep naming consistent."""
         return write_base(path, filters=filters, formulas=formulas, properties=properties, views=views, index=_index)
 
-    @mcp.tool()
+    @profiled_tool()
     def patch_base_tool(
         path: str,
         update_formulas: dict | None = None,
@@ -1591,9 +1652,10 @@ if _feature_flags.enable_bases:
 
 # ── Folders ───────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@profiled_tool()
 def list_folder_tool(path: str = "", recursive: bool = False, max_depth: int | None = None, vault: str | None = None) -> dict:
-    """List the contents of a vault folder (non-hidden items only).
+    """Inspect vault directory structure and files (non-hidden items only).
+    Prefer list_notes_tool for Markdown discovery and parsed note metadata.
     path='': root of the vault.
     recursive=False (default): immediate contents only — {path, folders, files}.
     recursive=True: full tree dump in one call — {path, tree: {folders: {name: tree}, files: [...]}}.
@@ -1601,7 +1663,7 @@ def list_folder_tool(path: str = "", recursive: bool = False, max_depth: int | N
     return list_folder(path, recursive=recursive, max_depth=max_depth)
 
 
-@mcp.tool()
+@profiled_tool()
 def list_files_tool(folder: str = "", extension: str | None = None, vault: str | None = None) -> list[str]:
     """List every file in the vault (or a subfolder), any type — not just
     notes/attachments/bases/canvases (e.g. .lock files, stray non-Markdown
@@ -1610,7 +1672,7 @@ def list_files_tool(folder: str = "", extension: str | None = None, vault: str |
     return list_files(folder, extension=extension)
 
 
-@mcp.tool()
+@profiled_tool()
 def create_folder_tool(path: str, vault: str | None = None) -> dict:
     """Create a folder (and any missing parents) in the vault.
     Returns {path, status}."""
@@ -1619,7 +1681,7 @@ def create_folder_tool(path: str, vault: str | None = None) -> dict:
     return result
 
 
-@mcp.tool()
+@profiled_tool()
 def delete_folder_tool(path: str, trash: bool = True, vault: str | None = None) -> dict:
     """Delete a vault folder.
     trash=True (default) moves it to .trash/ instead of permanent deletion.
@@ -1629,7 +1691,7 @@ def delete_folder_tool(path: str, trash: bool = True, vault: str | None = None) 
     return result
 
 
-@mcp.tool()
+@profiled_tool()
 def rename_folder_tool(from_path: str, to_path: str, vault: str | None = None) -> dict:
     """Rename or move a vault folder. Rewrites path-based wikilinks in all
     notes that reference notes inside the moved folder.
@@ -1639,7 +1701,7 @@ def rename_folder_tool(from_path: str, to_path: str, vault: str | None = None) -
     return result
 
 
-@mcp.tool()
+@profiled_tool()
 def list_trash_tool(vault: str | None = None) -> dict:
     """List items sitting in .trash/ (from delete_note_tool/delete_folder_tool
     with trash=True). Names here are what restore_note_tool/restore_folder_tool
@@ -1648,7 +1710,7 @@ def list_trash_tool(vault: str | None = None) -> dict:
     return list_trash()
 
 
-@mcp.tool()
+@profiled_tool()
 def restore_folder_tool(trashed_name: str, to_path: str, vault: str | None = None) -> dict:
     """Restore a folder previously moved to .trash/ (see list_trash_tool for names).
     to_path: where to put it back — the original parent path can't be

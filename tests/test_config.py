@@ -8,10 +8,23 @@ import pytest
 from obsidian_mcp.config import (
     Config,
     ConfigError,
+    get_tool_profile,
     load_vaults_file,
     reset_current_vault,
     set_current_vault,
 )
+
+
+def test_tool_profile_defaults_to_full(monkeypatch):
+    monkeypatch.delenv("TOOL_PROFILE", raising=False)
+    assert get_tool_profile() == "full"
+
+
+def test_tool_profile_rejects_unknown_value_without_vault(monkeypatch):
+    monkeypatch.delenv("VAULT_PATH", raising=False)
+    monkeypatch.setenv("TOOL_PROFILE", "wide")
+    with pytest.raises(ConfigError, match="Invalid TOOL_PROFILE.*full.*focused"):
+        get_tool_profile()
 
 
 def _base_env(monkeypatch, tmp_path):

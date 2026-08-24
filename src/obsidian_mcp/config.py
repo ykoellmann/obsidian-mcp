@@ -27,6 +27,16 @@ class ConfigError(Exception):
     pass
 
 
+def get_tool_profile() -> str:
+    """Read and validate TOOL_PROFILE without requiring vault settings."""
+    value = os.environ.get("TOOL_PROFILE", "full").strip().lower()
+    if value not in ("full", "focused"):
+        raise ConfigError(
+            f"Invalid TOOL_PROFILE={value!r}; expected 'full' or 'focused'"
+        )
+    return value
+
+
 @dataclass
 class VaultEntry:
     name: str
@@ -138,6 +148,7 @@ class Config:
     enable_excalidraw: bool
     enable_kanban: bool
     enable_bases: bool
+    tool_profile: str
 
     # Multi-vault state.
     multi_vault: bool
@@ -146,6 +157,7 @@ class Config:
     default_vault_name: str
 
     def __init__(self) -> None:
+        self.tool_profile = get_tool_profile()
         vaults_config_path = os.environ.get("VAULTS_CONFIG", "")
         self.multi_vault = bool(vaults_config_path)
         self._global_read_only = os.environ.get("READ_ONLY", "false").lower() in ("1", "true", "yes")
