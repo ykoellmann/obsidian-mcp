@@ -11,9 +11,11 @@ from fastmcp.server.middleware import MiddlewareContext
 from obsidian_mcp import server as server_mod
 from obsidian_mcp.config import Config
 from obsidian_mcp.server import (
+    _DEFAULT_INSTRUCTIONS,
     VaultResolutionMiddleware,
     _APIKeyAuthProvider,
     _identities_from_env,
+    _load_instructions,
     _resolve_identity,
     _select_vault,
     list_vaults_tool,
@@ -236,8 +238,9 @@ def test_select_vault_requires_explicit_when_no_default():
 # ── VaultResolutionMiddleware: explicit vault= override ─────────────────────
 
 class _FakeMessage:
-    def __init__(self, arguments):
+    def __init__(self, arguments, name=None):
         self.arguments = arguments
+        self.name = name
 
 
 @pytest.mark.asyncio
@@ -316,6 +319,34 @@ async def test_middleware_rejects_vault_argument_outside_allowed_set(tmp_path, m
         await middleware.on_call_tool(context, call_next)
 
 
+@pytest.mark.asyncio
+async def test_middleware_allows_vault_discovery_without_default(tmp_path, monkeypatch):
+    cfg = _cfg_with_vaults(
+        tmp_path, monkeypatch,
+        extra_identities=[
+            {"type": "api_key", "value": "sk-no-default", "vaults": ["private", "monari"]},
+        ],
+    )
+    import obsidian_mcp.config as cfg_mod
+    cfg_mod._config = cfg
+    monkeypatch.setattr(
+        server_mod, "get_access_token",
+        lambda: AccessToken(token="sk-no-default", client_id="sk-no-default", scopes=[]),
+    )
+
+    async def call_next(context):
+        return list_vaults_tool()
+
+    middleware = VaultResolutionMiddleware()
+    context = MiddlewareContext(
+        message=_FakeMessage(arguments={}, name="list_vaults_tool")
+    )
+    result = await middleware.on_call_tool(context, call_next)
+
+    assert {item["name"] for item in result} == {"private", "monari"}
+    assert not any(item["is_default"] for item in result)
+
+
 # ── list_vaults_tool ─────────────────────────────────────────────────────
 
 def test_list_vaults_tool_single_vault_mode(vault_factory):
@@ -342,3 +373,14 @@ def test_list_vaults_tool_multi_vault_mode(tmp_path, monkeypatch):
     result = list_vaults_tool()
     names = {v["name"]: v["is_default"] for v in result}
     assert names == {"private": True, "monari": False}
+
+
+def test_multi_vault_startup_instructions_do_not_read_first_vault(tmp_path, monkeypatch):
+    cfg = _cfg_with_vaults(tmp_path, monkeypatch)
+    (tmp_path / "a" / "_AI_INSTRUCTIONS.md").write_text(
+        "private first-vault instructions", encoding="utf-8"
+    )
+    import obsidian_mcp.config as cfg_mod
+    cfg_mod._config = cfg
+
+    assert _load_instructions() == _DEFAULT_INSTRUCTIONS
