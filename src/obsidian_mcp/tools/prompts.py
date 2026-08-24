@@ -37,7 +37,7 @@ Prepare the daily note for date={date!r}:
    create_from_template_tool with the daily template if one exists —
    otherwise write_note_tool with a minimal structure (heading + empty task
    list) at the conventional path.
-3. Carry over open tasks from the previous day's note (get_periodic_note_tool
-   with period="daily" and the prior date, or get_tasks_tool filtered to that note) into today's
-   note, so nothing open silently falls off.
+3. Call get_periodic_note_tool with period="daily" and the prior date. Copy
+   the entries from its tasks result where done=false into today's note, so
+   nothing open silently falls off.
 """
