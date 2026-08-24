@@ -644,6 +644,11 @@ class VaultResolutionMiddleware(Middleware):
             return await call_next(context)
 
         identity = _resolve_identity(cfg)
+        if getattr(context.message, "name", None) == "list_vaults_tool":
+            # This identity-only discovery call does not touch vault content.
+            # In particular, it must work for identities intentionally
+            # configured with several vaults and no default.
+            return await call_next(context)
         requested = None
         arguments = getattr(context.message, "arguments", None)
         if arguments:

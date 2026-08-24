@@ -350,10 +350,15 @@ def _write_vaults_config(tmp_path):
     return config_path, vault_a, vault_b
 
 
+def _enable_multi_vault_http(monkeypatch, config_path):
+    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
+    monkeypatch.setenv("TRANSPORT", "http")
+
+
 @pytest.mark.asyncio
 async def test_bearer_token_route_scoped_to_identitys_default_vault(tmp_path, monkeypatch):
     config_path, vault_a, vault_b = _write_vaults_config(tmp_path)
-    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
+    _enable_multi_vault_http(monkeypatch, config_path)
     import obsidian_mcp.config as cfg_mod
     cfg_mod._config = None
     # mcp.auth was built once at module-import time, before VAULTS_CONFIG
@@ -378,7 +383,7 @@ async def test_bearer_token_route_scoped_to_identitys_default_vault(tmp_path, mo
 @pytest.mark.asyncio
 async def test_bearer_token_route_honors_vault_query_param(tmp_path, monkeypatch):
     config_path, vault_a, vault_b = _write_vaults_config(tmp_path)
-    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
+    _enable_multi_vault_http(monkeypatch, config_path)
     import obsidian_mcp.config as cfg_mod
     cfg_mod._config = None
     monkeypatch.setattr(server.mcp, "auth", server._build_auth())
@@ -398,7 +403,7 @@ async def test_bearer_token_route_honors_vault_query_param(tmp_path, monkeypatch
 @pytest.mark.asyncio
 async def test_bearer_token_route_rejects_vault_outside_identity(tmp_path, monkeypatch):
     config_path, vault_a, vault_b = _write_vaults_config(tmp_path)
-    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
+    _enable_multi_vault_http(monkeypatch, config_path)
     import obsidian_mcp.config as cfg_mod
     cfg_mod._config = None
     monkeypatch.setattr(server.mcp, "auth", server._build_auth())
@@ -443,6 +448,7 @@ async def test_bearer_token_route_enforces_selected_vault_write_policy(tmp_path,
         encoding="utf-8",
     )
     monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
+    monkeypatch.setenv("TRANSPORT", "sse")
     import obsidian_mcp.config as cfg_mod
 
     cfg_mod._config = None
@@ -469,7 +475,7 @@ async def test_bearer_token_route_enforces_selected_vault_write_policy(tmp_path,
 @pytest.mark.asyncio
 async def test_scoped_token_route_multi_vault_isolates_correctly(tmp_path, monkeypatch):
     config_path, vault_a, vault_b = _write_vaults_config(tmp_path)
-    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
+    _enable_multi_vault_http(monkeypatch, config_path)
     import obsidian_mcp.config as cfg_mod
     cfg_mod._config = None
 

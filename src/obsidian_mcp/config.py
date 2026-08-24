@@ -139,6 +139,19 @@ def load_vaults_file(path_str: str) -> tuple[dict[str, VaultEntry], tuple[Identi
             description=str(raw_entry.get("description", "")),
         )
 
+    vault_items = list(vaults.items())
+    for index, (name, vault) in enumerate(vault_items):
+        for other_name, other_vault in vault_items[index + 1:]:
+            if (
+                vault.path == other_vault.path
+                or vault.path in other_vault.path.parents
+                or other_vault.path in vault.path.parents
+            ):
+                raise ConfigError(
+                    f"Vault paths must not overlap: {name!r} ({vault.path}) and "
+                    f"{other_name!r} ({other_vault.path})"
+                )
+
     identities_raw = data.get("identities") or []
     if not isinstance(identities_raw, list) or not identities_raw:
         raise ConfigError("VAULTS_CONFIG must define at least one identity under 'identities'")
@@ -365,6 +378,11 @@ class Config:
             )
 
         set_value(self, "transport", os.environ.get("TRANSPORT", "stdio"))
+        if self.multi_vault and self.transport == "stdio":
+            raise ConfigError(
+                "VAULTS_CONFIG requires an authenticated network transport; "
+                "TRANSPORT=stdio cannot identify the calling identity"
+            )
         set_value(self, "host", os.environ.get("HOST", "0.0.0.0"))
         set_value(self, "port", int(os.environ.get("PORT", "8000")))
         set_value(self, "public_base_url", os.environ.get("PUBLIC_BASE_URL", "").rstrip("/"))

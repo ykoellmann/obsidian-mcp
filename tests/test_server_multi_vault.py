@@ -257,8 +257,9 @@ def test_select_vault_requires_explicit_when_no_default():
 # ── VaultResolutionMiddleware: explicit vault= override ─────────────────────
 
 class _FakeMessage:
-    def __init__(self, arguments):
+    def __init__(self, arguments, name=None):
         self.arguments = arguments
+        self.name = name
 
 
 @pytest.mark.asyncio
@@ -337,6 +338,34 @@ async def test_middleware_rejects_vault_argument_outside_allowed_set(tmp_path, m
         await middleware.on_call_tool(context, call_next)
 
 
+@pytest.mark.asyncio
+async def test_middleware_allows_vault_discovery_without_default(tmp_path, monkeypatch):
+    cfg = _cfg_with_vaults(
+        tmp_path, monkeypatch,
+        extra_identities=[
+            {"type": "api_key", "value": "sk-no-default", "vaults": ["private", "monari"]},
+        ],
+    )
+    import obsidian_mcp.config as cfg_mod
+    cfg_mod._config = cfg
+    monkeypatch.setattr(
+        server_mod, "get_access_token",
+        lambda: AccessToken(token="sk-no-default", client_id="sk-no-default", scopes=[]),
+    )
+
+    async def call_next(context):
+        return list_vaults_tool()
+
+    middleware = VaultResolutionMiddleware()
+    context = MiddlewareContext(
+        message=_FakeMessage(arguments={}, name="list_vaults_tool")
+    )
+    result = await middleware.on_call_tool(context, call_next)
+
+    assert {item["name"] for item in result} == {"private", "monari"}
+    assert not any(item["is_default"] for item in result)
+
+
 # ── list_vaults_tool ─────────────────────────────────────────────────────
 
 def test_list_vaults_tool_single_vault_mode(vault_factory):
@@ -372,7 +401,7 @@ def test_main_builds_policy_aware_index_and_watcher_per_vault(tmp_path, monkeypa
     data["vaults"]["monari"]["write_paths"] = ["Output/"]
     config_path.write_text(json.dumps(data), encoding="utf-8")
     monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
-    monkeypatch.setenv("TRANSPORT", "stdio")
+    monkeypatch.setenv("TRANSPORT", "sse")
 
     import obsidian_mcp.config as cfg_mod
 
