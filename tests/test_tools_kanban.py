@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+import obsidian_mcp.tools.kanban as kanban_module
 from obsidian_mcp.tools.kanban import (
     add_kanban_card,
     create_kanban_board,
@@ -28,6 +29,23 @@ kanban-plugin: basic
 
 - [x] Task D
 """
+
+
+def test_create_kanban_board_uses_path_lock(vault_factory, monkeypatch):
+    vault_factory({})
+    events: list[str] = []
+
+    class FakeLock:
+        def release(self):
+            events.append("release")
+
+    def fake_acquire(path, **kwargs):
+        events.append(f"acquire:{path}")
+        return FakeLock()
+
+    monkeypatch.setattr(kanban_module, "acquire_lock", fake_acquire)
+    create_kanban_board("board.md", ["Todo"])
+    assert events == ["acquire:board.md", "release"]
 
 
 # ── create_kanban_board ───────────────────────────────────────────────────

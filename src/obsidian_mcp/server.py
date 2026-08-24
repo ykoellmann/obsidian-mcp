@@ -7,12 +7,15 @@ import logging
 import mimetypes
 import os
 import threading
+from dataclasses import dataclass
+from functools import wraps
 
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, AuthProvider, MultiAuth, TokenVerifier
 from fastmcp.server.auth.providers.github import GitHubProvider
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from fastmcp.tools.base import ToolResult
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -25,16 +28,26 @@ from .config import (
     set_current_vault,
 )
 from .domain.index import VaultIndex
-from .storage.filesystem import PathTraversalError, read_file, validate_path
+from .domain.models import PreconditionRequiredError, RevisionConflictError
+from .storage.filesystem import VaultStorage
+from .storage.policy import (
+    InvalidFileTypeError,
+    ReadPermissionError,
+    VaultAccessPolicy,
+    VaultPathError,
+    WritePermissionError,
+)
 from .storage.watcher import VaultWatcher
 from .tool_profiles import (
     profile_tool_decorator,
 )
 from .tools.attachments import (
+    AttachmentTooLargeError,
     add_attachment,
     create_attachment_token,
     list_attachments,
     read_attachment,
+    validate_attachment_path,
     verify_attachment_token,
     write_attachment_bytes,
 )
@@ -106,6 +119,19 @@ logger = logging.getLogger(__name__)
 _tool_profile = get_tool_profile()
 
 
+def _mutation_boundary(function):
+    """Return expected optimistic-concurrency failures as MCP error results."""
+
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        try:
+            return function(*args, **kwargs)
+        except (RevisionConflictError, PreconditionRequiredError) as exc:
+            return ToolResult(structured_content=exc.to_dict(), is_error=True)
+
+    return wrapped
+
+
 _DEFAULT_INSTRUCTIONS = r"""\
 You are connected to **obsidian-mcp**, an MCP server for an Obsidian vault.
 
@@ -130,6 +156,11 @@ If it doesn't exist, explore the vault with `list_folder_tool()` and `list_notes
 to understand the structure before writing anything.
 Always use `search_notes_tool` or `query_notes_tool` before creating notes to avoid duplicates.
 
+Obsidian uses the **filename** (without `.md`) as the note title in the UI, graph,
+and default wikilink text. Do **not** start a note with a level-1 heading that
+repeats the filename. Put the first heading at `##` or below only if the body
+needs structure; many notes need no heading at all.
+
 ## Tool Reference
 
 ### Reading & Search
@@ -145,6 +176,9 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 - `lint_schema_tool()` — validate frontmatter against the enums declared in _AI_INSTRUCTIONS.md
 
 ### Writing
+- Direct reads return an opaque `revision`. Pass it as `expected_revision` to pin a write
+  to those bytes. On a revision conflict, read again before deciding whether to retry.
+  A retried append with an old revision fails safely; a blind retry can append twice.
 - `write_note_tool(path, content, dry_run)` — create or overwrite a note; preserves existing
   frontmatter if the new content has none; dry_run previews {preview, diff} without writing
 - `patch_note_tool(path, section, new_content, mode, target_type)` — edit one section;
@@ -161,6 +195,11 @@ Always use `search_notes_tool` or `query_notes_tool` before creating notes to av
 - `move_note_tool(from_path, to_path)` — rename/move + rewrites all wikilinks vault-wide
 - `find_replace_in_vault_tool(search, replace, mode, folder, dry_run)` — bulk find/replace across
   every note; dry_run=True (default) previews matches before writing anything
+
+High-impact mutation tools are disabled by default and absent from the tool
+list until explicitly enabled: `ENABLE_DELETE` registers note/folder deletion,
+`ENABLE_MOVE` registers note moves, `ENABLE_FOLDER_RENAME` registers folder
+renames, and `ENABLE_BULK_REPLACE` registers bulk replacement.
 
 ### Folders
 - `list_folder_tool(path, recursive, max_depth)` — contents (path="" = vault root); hides dotfiles;
@@ -394,8 +433,9 @@ Choose tools by intention:
 - `write_note_tool` can create or overwrite a full note. Use its dry run when
   replacing content. `patch_frontmatter_tool` updates YAML without replacing
   the body; `manage_tags_tool` also removes matching inline tags.
-- `move_note_tool` and `rename_folder_tool` rewrite affected wikilinks across
-  the vault. Use `create_folder_tool` for missing structure.
+- Use `create_folder_tool` for missing structure. High-impact move, rename,
+  bulk-replace, and delete capabilities appear only when enabled by the
+  operator.
 - Use `get_backlinks_tool`, `get_broken_links_tool`, `get_orphans_tool`, and
   `get_link_graph_tool` for graph questions; these may inspect the whole
   index. Use `get_tasks_tool`, `get_vault_stats_tool`, `list_all_tags_tool`,
@@ -415,16 +455,33 @@ read-only mode, authentication, and path permissions remain authoritative.
 
 
 def _load_instructions() -> str:
+    default = (
+        _FOCUSED_INSTRUCTIONS
+        if _tool_profile == "focused"
+        else _DEFAULT_INSTRUCTIONS
+    )
     try:
         cfg = get_config()
-        instructions_file = cfg.vault_path / "_AI_INSTRUCTIONS.md"
-        if instructions_file.exists():
-            return instructions_file.read_text(encoding="utf-8")
-    except Exception:
-        pass
-    if _tool_profile == "focused":
-        return _FOCUSED_INSTRUCTIONS
-    return _DEFAULT_INSTRUCTIONS
+    except ConfigError:
+        # Importing the module before the process environment is configured
+        # is supported (tests, tooling, and FastMCP discovery).
+        return default
+    if cfg.multi_vault:
+        # FastMCP exposes server instructions before request middleware has
+        # authenticated an identity and selected one of its allowed vaults.
+        # Per-vault conventions remain available through the authorized tool.
+        return default
+    try:
+        vault = VaultStorage.from_config(cfg).read_text("_AI_INSTRUCTIONS.md")
+    except (FileNotFoundError, PermissionError, VaultPathError, OSError):
+        # Missing or unreadable optional instructions do not prevent startup;
+        # descriptor/policy failures are not converted into unrestricted I/O.
+        return default
+    return (
+        default
+        + "\n\n# Vault-specific instructions (_AI_INSTRUCTIONS.md)\n\n"
+        + vault
+    )
 
 
 class _APIKeyAuthProvider(TokenVerifier):
@@ -520,6 +577,8 @@ def _build_auth() -> AuthProvider | None:
             client_id=client_id,
             client_secret=client_secret,
             base_url=base_url,
+            # Otherwise every MCP request waits on GitHub /user and /user/repos.
+            cache_ttl_seconds=300,
         )
         # Relies on OAuthProxy's private _token_validator attribute — the only
         # hook that runs at token-exchange time, before an allowlist check
@@ -659,6 +718,11 @@ class VaultResolutionMiddleware(Middleware):
             return await call_next(context)
 
         identity = _resolve_identity(cfg)
+        if getattr(context.message, "name", None) == "list_vaults_tool":
+            # This identity-only discovery call does not touch vault content.
+            # In particular, it must work for identities intentionally
+            # configured with several vaults and no default.
+            return await call_next(context)
         requested = None
         arguments = getattr(context.message, "arguments", None)
         if arguments:
@@ -698,35 +762,41 @@ mcp.add_middleware(VaultResolutionMiddleware())
 profiled_tool = profile_tool_decorator(mcp, _tool_profile)
 
 
-def _feature_flags_from_env() -> tuple[bool, bool, bool, bool]:
-    """Read the ENABLE_* flags directly from os.environ (not get_config()), so
-    this module can still be imported without VAULT_PATH set (e.g. during
-    testing or linting) — same reasoning as _build_auth() above."""
-    def _flag(name: str) -> bool:
-        return os.environ.get(name, "false").lower() in ("1", "true", "yes")
-
-    return (
-        _flag("ENABLE_CANVAS"),
-        _flag("ENABLE_EXCALIDRAW"),
-        _flag("ENABLE_KANBAN"),
-        _flag("ENABLE_BASES"),
-    )
-
-
-# Gates which optional plugin-format tool groups (Canvas/Excalidraw/Kanban/
-# Bases) get registered below, so disabled tools never appear in the client's
-# tool list. Deliberately not the real Config object (that needs VAULT_PATH,
-# see _build_auth() above) — just the four flags, read straight from the
+# Gates which optional plugin-format and high-impact mutation tool groups get
+# registered below, so disabled tools never appear in the client's tool list.
+# Deliberately not the real Config object (that needs VAULT_PATH,
+# see _build_auth() above) — just the feature flags, read straight from the
 # environment.
+@dataclass(frozen=True)
 class _FeatureFlags:
-    def __init__(self, enable_canvas, enable_excalidraw, enable_kanban, enable_bases):
-        self.enable_canvas = enable_canvas
-        self.enable_excalidraw = enable_excalidraw
-        self.enable_kanban = enable_kanban
-        self.enable_bases = enable_bases
+    enable_canvas: bool
+    enable_excalidraw: bool
+    enable_kanban: bool
+    enable_bases: bool
+    enable_move: bool
+    enable_folder_rename: bool
+    enable_bulk_replace: bool
+    enable_delete: bool
+
+    @classmethod
+    def from_env(cls) -> _FeatureFlags:
+        """Read named flags without constructing the full vault config."""
+        def enabled(name: str) -> bool:
+            return os.environ.get(name, "false").lower() in ("1", "true", "yes")
+
+        return cls(
+            enable_canvas=enabled("ENABLE_CANVAS"),
+            enable_excalidraw=enabled("ENABLE_EXCALIDRAW"),
+            enable_kanban=enabled("ENABLE_KANBAN"),
+            enable_bases=enabled("ENABLE_BASES"),
+            enable_move=enabled("ENABLE_MOVE"),
+            enable_folder_rename=enabled("ENABLE_FOLDER_RENAME"),
+            enable_bulk_replace=enabled("ENABLE_BULK_REPLACE"),
+            enable_delete=enabled("ENABLE_DELETE"),
+        )
 
 
-_feature_flags = _FeatureFlags(*_feature_flags_from_env())
+_feature_flags = _FeatureFlags.from_env()
 
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
@@ -828,7 +898,15 @@ def find_similar_notes_tool(
 # ── Write ─────────────────────────────────────────────────────────────────────
 
 @profiled_tool()
-def write_note_tool(path: str, content: str, dry_run: bool = False, vault: str | None = None) -> dict:
+@_mutation_boundary
+def write_note_tool(
+    path: str,
+    content: str,
+    dry_run: bool = False,
+    expected_revision: str | None = None,
+    create_only: bool = False,
+    vault: str | None = None,
+) -> dict:
     """Write (create or overwrite) a note. Respects READ_ONLY and WRITE_PATHS.
     If `content` has no frontmatter of its own and a note already exists at
     `path`, its existing frontmatter is preserved rather than dropped —
@@ -836,19 +914,28 @@ def write_note_tool(path: str, content: str, dry_run: bool = False, vault: str |
     a `diff` (unified diff against the current file).
     dry_run=True previews {preview, diff, frontmatter_preserved} without
     writing anything — check it, then call again with dry_run=False."""
-    result = write_note(path, content, index=_index, dry_run=dry_run)
+    result = write_note(
+        path,
+        content,
+        index=_index,
+        dry_run=dry_run,
+        expected_revision=expected_revision,
+        create_only=create_only,
+    )
     if result.get("status") != "dry_run":
         log_write("write_note_tool", path, "wrote note")
     return result
 
 
 @profiled_tool()
+@_mutation_boundary
 def patch_note_tool(
     path: str,
     section: str,
     new_content: str,
     mode: str = "replace",
     target_type: str = "heading",
+    expected_revision: str | None = None,
     vault: str | None = None,
 ) -> dict:
     """Edit a heading section or block reference inside a note.
@@ -856,12 +943,21 @@ def patch_note_tool(
     structural anchor; use append_to_note_tool for a simple additive entry.
     mode: 'replace' (default) | 'insert_before' | 'insert_after' | 'append'.
     target_type: 'heading' (default) | 'block_ref' (use section='^block-id')."""
-    result = patch_note(path, section, new_content, mode=mode, target_type=target_type, index=_index)
+    result = patch_note(
+        path,
+        section,
+        new_content,
+        mode=mode,
+        target_type=target_type,
+        index=_index,
+        expected_revision=expected_revision,
+    )
     log_write("patch_note_tool", path, f"patched section {section!r} ({mode})")
     return result
 
 
 @profiled_tool()
+@_mutation_boundary
 def patch_note_text_tool(
     path: str,
     find: str,
@@ -869,6 +965,7 @@ def patch_note_text_tool(
     mode: str = "exact",
     count: int = 1,
     dry_run: bool = False,
+    expected_revision: str | None = None,
     vault: str | None = None,
 ) -> dict:
     """Find and replace text anywhere in one note's body — no heading/block-ref
@@ -878,22 +975,39 @@ def patch_note_text_tool(
     count: max replacements (default 1, first match only); 0 = replace all.
     dry_run=True previews {replacements, preview, diff} without writing.
     Raises ValueError if `find` doesn't match anything."""
-    result = patch_note_text(path, find, replace, mode=mode, count=count, dry_run=dry_run, index=_index)
+    result = patch_note_text(
+        path,
+        find,
+        replace,
+        mode=mode,
+        count=count,
+        dry_run=dry_run,
+        index=_index,
+        expected_revision=expected_revision,
+    )
     if result.get("status") != "dry_run":
         log_write("patch_note_text_tool", path, f"replaced {result.get('replacements')} match(es)")
     return result
 
 
-@profiled_tool()
-def delete_note_tool(path: str, trash: bool = True, vault: str | None = None) -> dict:
+@_mutation_boundary
+def delete_note_tool(
+    path: str,
+    trash: bool = True,
+    expected_revision: str | None = None,
+    vault: str | None = None,
+) -> dict:
     """Delete a note from the vault.
     trash=True (default) moves it to .trash/ instead of permanent deletion."""
-    result = delete_note(path, trash=trash, index=_index)
+    result = delete_note(path, trash=trash, index=_index, expected_revision=expected_revision)
     log_write("delete_note_tool", path, f"deleted (trash={trash})")
     return result
 
 
-@profiled_tool()
+if _feature_flags.enable_delete:
+    profiled_tool()(delete_note_tool)
+
+
 def restore_note_tool(trashed_name: str, to_path: str, vault: str | None = None) -> dict:
     """Restore a note previously moved to .trash/ (see list_trash_tool for names).
     to_path: where to put it back — the original folder can't be recovered
@@ -904,7 +1018,10 @@ def restore_note_tool(trashed_name: str, to_path: str, vault: str | None = None)
     return result
 
 
-@profiled_tool()
+if _feature_flags.enable_delete:
+    profiled_tool()(restore_note_tool)
+
+
 def find_replace_in_vault_tool(
     search: str,
     replace: str,
@@ -931,29 +1048,44 @@ def find_replace_in_vault_tool(
     return result
 
 
+if _feature_flags.enable_bulk_replace:
+    profiled_tool()(find_replace_in_vault_tool)
+
+
 @profiled_tool()
+@_mutation_boundary
 def append_to_note_tool(
     path: str,
     content: str,
     section: str | None = None,
     create: bool = True,
+    expected_revision: str | None = None,
     vault: str | None = None,
 ) -> dict:
     """Preferred operation for adding an independent memory or finding.
     Appends without reading and rewriting the whole file. section optionally
     targets a heading; create=True can create a missing note. Prefer
     patch_note_tool when replacing or inserting around existing structure."""
-    result = append_to_note(path, content, section=section, create=create, index=_index)
+    result = append_to_note(
+        path,
+        content,
+        section=section,
+        create=create,
+        index=_index,
+        expected_revision=expected_revision,
+    )
     log_write("append_to_note_tool", path, "appended content" + (f" under {section!r}" if section else ""))
     return result
 
 
 @profiled_tool()
+@_mutation_boundary
 def patch_frontmatter_tool(
     path: str,
     updates: dict,
     merge_arrays: bool = True,
     dry_run: bool = False,
+    expected_revision: str | None = None,
     vault: str | None = None,
 ) -> dict:
     """Update specific YAML frontmatter keys without touching the note body.
@@ -961,7 +1093,14 @@ def patch_frontmatter_tool(
     Result carries a `diff` (unified diff against the current file).
     dry_run=True previews {preview, diff, updated_keys} without writing —
     check it, then call again with dry_run=False."""
-    result = patch_frontmatter(path, updates, merge_arrays=merge_arrays, index=_index, dry_run=dry_run)
+    result = patch_frontmatter(
+        path,
+        updates,
+        merge_arrays=merge_arrays,
+        index=_index,
+        dry_run=dry_run,
+        expected_revision=expected_revision,
+    )
     if result.get("status") != "dry_run":
         log_write("patch_frontmatter_tool", path, f"updated keys: {list(updates.keys())}")
     return result
@@ -980,26 +1119,33 @@ def patch_frontmatter_batch_tool(updates: list[dict], vault: str | None = None) 
 
 
 @profiled_tool()
+@_mutation_boundary
 def manage_tags_tool(
     path: str,
     add: list[str] | None = None,
     remove: list[str] | None = None,
+    expected_revision: str | None = None,
     vault: str | None = None,
 ) -> dict:
     """Add or remove tags on a note. Updates frontmatter tags array and strips
     inline #tag occurrences from the body. Returns {added, removed}."""
-    result = manage_tags(path, add=add, remove=remove, index=_index)
+    result = manage_tags(
+        path, add=add, remove=remove, index=_index, expected_revision=expected_revision
+    )
     log_write("manage_tags_tool", path, f"+{add or []} -{remove or []}")
     return result
 
 
-@profiled_tool()
 def move_note_tool(from_path: str, to_path: str, vault: str | None = None) -> dict:
     """Rename or move a note. Automatically rewrites all wikilinks in the vault
     that reference the old path. Returns {from, to, updated_links_in}."""
     result = move_note(from_path, to_path, index=_index)
     log_write("move_note_tool", to_path, f"moved from {from_path}")
     return result
+
+
+if _feature_flags.enable_move:
+    profiled_tool()(move_note_tool)
 
 
 # ── Query / Graph ─────────────────────────────────────────────────────────────
@@ -1317,23 +1463,24 @@ async def health_route(request: Request) -> Response:
     """Unauthenticated liveness/readiness check for Docker HEALTHCHECK,
     uptime monitors, etc. Returns no vault content, so no auth is required.
 
-    Returns {status: "starting"|"ok", vault_path, index_ready}. In
-    multi-vault mode, vault_path/index_ready are for Config.default_vault_name
-    (the first configured vault) — this route doesn't go through
-    VaultResolutionMiddleware, so there's no per-identity vault to report on.
-    503 while the server hasn't finished setup yet (main() hasn't run or
-    hasn't populated _indices yet), 200 once ready — index_ready itself may
-    still be False right after startup while the initial index build is in
-    progress.
+    Returns {status: "starting"|"ok", index_ready, reconciliation telemetry}.
+    Returns 503 until the initial index build and vault-wide reconciliation
+    finish, then 200 while the built index remains usable. A later per-note
+    reconciliation error is exposed as telemetry without discarding readiness.
+    In multi-vault mode, telemetry is for Config.default_vault_name because
+    this unauthenticated route exposes no per-identity vault details.
     """
     if _cfg is None or not _indices:
         return JSONResponse({"status": "starting"}, status_code=503)
+    index = _indices[_cfg.default_vault_name]
+    ready = index.is_ready()
     return JSONResponse(
         {
-            "status": "ok",
-            "vault_path": str(_cfg.vault_path),
-            "index_ready": _indices[_cfg.default_vault_name].is_ready(),
-        }
+            "status": "ok" if ready else "starting",
+            "index_ready": ready,
+            **index.reconcile_status(),
+        },
+        status_code=200 if ready else 503,
     )
 
 
@@ -1368,13 +1515,15 @@ async def attachment_route(request: Request) -> Response:
     path = request.path_params["path"]
     method = request.method
 
+    # Authenticate and choose a vault before any path-policy check so callers
+    # cannot probe protected path boundaries through response differences.
     vault_name: str | None = None
     access_token = await _check_bearer_token(request, cfg)
     if access_token is not None:
         if cfg.multi_vault:
-            identity = _identity_for_token(cfg, access_token)
-            requested = request.query_params.get("vault")
             try:
+                identity = _identity_for_token(cfg, access_token)
+                requested = request.query_params.get("vault")
                 vault_name = _select_vault(identity, requested)
             except PermissionError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=403)
@@ -1388,22 +1537,49 @@ async def attachment_route(request: Request) -> Response:
 
     context_token = set_current_vault(vault_name)
     try:
+        storage = VaultStorage.from_config(cfg)
+        try:
+            path = validate_attachment_path(path, write=method == "PUT")
+        except InvalidFileTypeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except (VaultPathError, ReadPermissionError, WritePermissionError):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+
         if method == "GET":
             try:
-                target = validate_path(cfg.vault_path, path)
-                data = target.read_bytes()
+                data = storage.read_bytes(path)
             except FileNotFoundError:
-                return JSONResponse({"error": f"Attachment not found: {path!r}"}, status_code=404)
-            except PathTraversalError as exc:
-                return JSONResponse({"error": str(exc)}, status_code=400)
+                return JSONResponse({"error": "Attachment not found"}, status_code=404)
             mime, _ = mimetypes.guess_type(path)
             return Response(data, media_type=mime or "application/octet-stream")
 
-        data = await request.body()
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except ValueError:
+                return JSONResponse({"error": "Invalid Content-Length"}, status_code=400)
+            if declared_length < 0:
+                return JSONResponse({"error": "Invalid Content-Length"}, status_code=400)
+            if declared_length > cfg.max_attachment_bytes:
+                return JSONResponse({"error": "Attachment too large"}, status_code=413)
+
+        chunks: list[bytes] = []
+        received = 0
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > cfg.max_attachment_bytes:
+                return JSONResponse({"error": "Attachment too large"}, status_code=413)
+            chunks.append(chunk)
+        data = b"".join(chunks)
         try:
             result = write_attachment_bytes(path, data)
-        except (ValueError, PathTraversalError) as exc:
+        except AttachmentTooLargeError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=413)
+        except (ValueError, InvalidFileTypeError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+        except (VaultPathError, WritePermissionError):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
         return JSONResponse(result)
     finally:
         reset_current_vault(context_token)
@@ -1418,10 +1594,13 @@ def list_templates_tool(vault: str | None = None) -> list[str]:
 
 
 @profiled_tool()
+@_mutation_boundary
 def create_from_template_tool(
     template_path: str,
     output_path: str,
     variables: dict | None = None,
+    expected_revision: str | None = None,
+    create_only: bool = False,
     vault: str | None = None,
 ) -> dict:
     """Render a template and write it as a new note.
@@ -1429,7 +1608,14 @@ def create_from_template_tool(
     Supports format specs: {{date:YYYY-MM}} → '2026-07'.
     Custom variables passed in 'variables' dict override built-ins.
     Unknown {{vars}} are preserved as-is."""
-    return create_from_template(template_path, output_path, variables=variables, index=_index)
+    return create_from_template(
+        template_path,
+        output_path,
+        variables=variables,
+        index=_index,
+        expected_revision=expected_revision,
+        create_only=create_only,
+    )
 
 
 # ── Canvas ────────────────────────────────────────────────────────────────────
@@ -1448,10 +1634,13 @@ if _feature_flags.enable_canvas:
         return read_canvas(path)
 
     @profiled_tool()
+    @_mutation_boundary
     def write_canvas_tool(
         path: str,
         nodes: list[dict] | None = None,
         edges: list[dict] | None = None,
+        expected_revision: str | None = None,
+        create_only: bool = False,
         vault: str | None = None,
     ) -> dict:
         """Create or fully overwrite an Obsidian Canvas file.
@@ -1459,9 +1648,16 @@ if _feature_flags.enable_canvas:
         Text nodes: text. File nodes: file (vault path). Link nodes: url.
         Edge fields: fromNode, toNode, label (optional). IDs are auto-generated if omitted.
         Returns {path, status, nodes, edges}."""
-        return write_canvas(path, nodes=nodes, edges=edges)
+        return write_canvas(
+            path,
+            nodes=nodes,
+            edges=edges,
+            expected_revision=expected_revision,
+            create_only=create_only,
+        )
 
     @profiled_tool()
+    @_mutation_boundary
     def patch_canvas_tool(
         path: str,
         add_nodes: list[dict] | None = None,
@@ -1469,6 +1665,7 @@ if _feature_flags.enable_canvas:
         delete_node_ids: list[str] | None = None,
         add_edges: list[dict] | None = None,
         delete_edge_ids: list[str] | None = None,
+        expected_revision: str | None = None,
         vault: str | None = None,
     ) -> dict:
         """Atomically update an existing canvas without rewriting the whole file.
@@ -1481,6 +1678,7 @@ if _feature_flags.enable_canvas:
             delete_node_ids=delete_node_ids,
             add_edges=add_edges,
             delete_edge_ids=delete_edge_ids,
+            expected_revision=expected_revision,
         )
 
 
@@ -1500,24 +1698,36 @@ if _feature_flags.enable_excalidraw:
         return read_excalidraw(path)
 
     @profiled_tool()
+    @_mutation_boundary
     def write_excalidraw_tool(
         path: str,
         elements: list[dict] | None = None,
         app_state: dict | None = None,
+        expected_revision: str | None = None,
+        create_only: bool = False,
         vault: str | None = None,
     ) -> dict:
         """Create or fully overwrite an Excalidraw file.
         Element fields: type ('rectangle'|'ellipse'|'text'|'arrow'|'freedraw'|...), x, y,
         width, height. Element 'id' is auto-generated if omitted.
         Returns {path, status, elements}."""
-        return write_excalidraw(path, elements=elements, app_state=app_state, index=_index)
+        return write_excalidraw(
+            path,
+            elements=elements,
+            app_state=app_state,
+            index=_index,
+            expected_revision=expected_revision,
+            create_only=create_only,
+        )
 
     @profiled_tool()
+    @_mutation_boundary
     def patch_excalidraw_tool(
         path: str,
         add_elements: list[dict] | None = None,
         update_elements: list[dict] | None = None,
         delete_element_ids: list[str] | None = None,
+        expected_revision: str | None = None,
         vault: str | None = None,
     ) -> dict:
         """Atomically update an existing Excalidraw file without rewriting the whole file.
@@ -1529,6 +1739,7 @@ if _feature_flags.enable_excalidraw:
             update_elements=update_elements,
             delete_element_ids=delete_element_ids,
             index=_index,
+            expected_revision=expected_revision,
         )
 
 
@@ -1543,46 +1754,86 @@ if _feature_flags.enable_kanban:
         return read_kanban(path)
 
     @profiled_tool()
-    def create_kanban_board_tool(path: str, columns: list[str], vault: str | None = None) -> dict:
+    @_mutation_boundary
+    def create_kanban_board_tool(
+        path: str,
+        columns: list[str],
+        expected_revision: str | None = None,
+        create_only: bool = False,
+        vault: str | None = None,
+    ) -> dict:
         """Create a new Kanban board with the given column names.
         Returns {path, status, columns}."""
-        return create_kanban_board(path, columns, index=_index)
+        return create_kanban_board(
+            path,
+            columns,
+            index=_index,
+            expected_revision=expected_revision,
+            create_only=create_only,
+        )
 
     @profiled_tool()
+    @_mutation_boundary
     def add_kanban_card_tool(
         path: str,
         column: str,
         text: str,
         done: bool = False,
+        expected_revision: str | None = None,
         vault: str | None = None,
     ) -> dict:
         """Add a card to a Kanban column. Card is inserted at the top of the column.
         Returns {path, status, column, card, done}."""
-        return add_kanban_card(path, column, text, done=done, index=_index)
+        return add_kanban_card(
+            path,
+            column,
+            text,
+            done=done,
+            index=_index,
+            expected_revision=expected_revision,
+        )
 
     @profiled_tool()
+    @_mutation_boundary
     def move_kanban_card_tool(
         path: str,
         card_text: str,
         from_column: str,
         to_column: str,
         done: bool | None = None,
+        expected_revision: str | None = None,
         vault: str | None = None,
     ) -> dict:
         """Move a card from one column to another. done=true/false updates the tick state.
         Returns {path, status, card, from, to}."""
-        return move_kanban_card(path, card_text, from_column, to_column, done=done, index=_index)
+        return move_kanban_card(
+            path,
+            card_text,
+            from_column,
+            to_column,
+            done=done,
+            index=_index,
+            expected_revision=expected_revision,
+        )
 
     @profiled_tool()
+    @_mutation_boundary
     def delete_kanban_card_tool(
         path: str,
         card_text: str,
         column: str | None = None,
+        expected_revision: str | None = None,
         vault: str | None = None,
     ) -> dict:
         """Delete a card from the Kanban board. column limits the search to one column.
         Returns {path, status, card}."""
-        return delete_kanban_card(path, card_text, column=column, index=_index)
+        return delete_kanban_card(
+            path,
+            card_text,
+            column=column,
+            index=_index,
+            expected_revision=expected_revision,
+        )
 
 
 # ── Bases ─────────────────────────────────────────────────────────────────────
@@ -1601,12 +1852,15 @@ if _feature_flags.enable_bases:
         return read_base(path)
 
     @profiled_tool()
+    @_mutation_boundary
     def write_base_tool(
         path: str,
         filters: dict | None = None,
         formulas: dict | None = None,
         properties: dict | None = None,
         views: list[dict] | None = None,
+        expected_revision: str | None = None,
+        create_only: bool = False,
         vault: str | None = None,
     ) -> dict:
         """Create or fully overwrite a .base file.
@@ -1617,9 +1871,19 @@ if _feature_flags.enable_bases:
         'type' (e.g. 'table'|'cards'|'list') is required per view.
         Returns {path, status, views, known_properties} — known_properties is
         collected from existing .base files in the vault to keep naming consistent."""
-        return write_base(path, filters=filters, formulas=formulas, properties=properties, views=views, index=_index)
+        return write_base(
+            path,
+            filters=filters,
+            formulas=formulas,
+            properties=properties,
+            views=views,
+            index=_index,
+            expected_revision=expected_revision,
+            create_only=create_only,
+        )
 
     @profiled_tool()
+    @_mutation_boundary
     def patch_base_tool(
         path: str,
         update_formulas: dict | None = None,
@@ -1630,6 +1894,7 @@ if _feature_flags.enable_bases:
         add_views: list[dict] | None = None,
         update_views: list[dict] | None = None,
         delete_view_names: list[str] | None = None,
+        expected_revision: str | None = None,
         vault: str | None = None,
     ) -> dict:
         """Atomically update an existing .base file without rewriting it wholesale.
@@ -1647,6 +1912,7 @@ if _feature_flags.enable_bases:
             update_views=update_views,
             delete_view_names=delete_view_names,
             index=_index,
+            expected_revision=expected_revision,
         )
 
 
@@ -1681,7 +1947,6 @@ def create_folder_tool(path: str, vault: str | None = None) -> dict:
     return result
 
 
-@profiled_tool()
 def delete_folder_tool(path: str, trash: bool = True, vault: str | None = None) -> dict:
     """Delete a vault folder.
     trash=True (default) moves it to .trash/ instead of permanent deletion.
@@ -1691,7 +1956,10 @@ def delete_folder_tool(path: str, trash: bool = True, vault: str | None = None) 
     return result
 
 
-@profiled_tool()
+if _feature_flags.enable_delete:
+    profiled_tool()(delete_folder_tool)
+
+
 def rename_folder_tool(from_path: str, to_path: str, vault: str | None = None) -> dict:
     """Rename or move a vault folder. Rewrites path-based wikilinks in all
     notes that reference notes inside the moved folder.
@@ -1701,7 +1969,10 @@ def rename_folder_tool(from_path: str, to_path: str, vault: str | None = None) -
     return result
 
 
-@profiled_tool()
+if _feature_flags.enable_folder_rename:
+    profiled_tool()(rename_folder_tool)
+
+
 def list_trash_tool(vault: str | None = None) -> dict:
     """List items sitting in .trash/ (from delete_note_tool/delete_folder_tool
     with trash=True). Names here are what restore_note_tool/restore_folder_tool
@@ -1710,7 +1981,10 @@ def list_trash_tool(vault: str | None = None) -> dict:
     return list_trash()
 
 
-@profiled_tool()
+if _feature_flags.enable_delete:
+    profiled_tool()(list_trash_tool)
+
+
 def restore_folder_tool(trashed_name: str, to_path: str, vault: str | None = None) -> dict:
     """Restore a folder previously moved to .trash/ (see list_trash_tool for names).
     to_path: where to put it back — the original parent path can't be
@@ -1721,14 +1995,18 @@ def restore_folder_tool(trashed_name: str, to_path: str, vault: str | None = Non
     return result
 
 
+if _feature_flags.enable_delete:
+    profiled_tool()(restore_folder_tool)
+
+
 # ── MCP Resources ─────────────────────────────────────────────────────────────
 
 @mcp.resource("vault://notes/{path}")
 def vault_note_resource(path: str) -> str:
     """Raw content of a vault note — use as context without calling a tool."""
     try:
-        return read_file(get_config().vault_path, path)
-    except Exception:
+        return VaultStorage.from_config().read_text(path)
+    except (ConfigError, FileNotFoundError, PermissionError, VaultPathError, OSError):
         return ""
 
 
@@ -1750,12 +2028,36 @@ def main() -> None:
     global _cfg
     _cfg = get_config()
     for name, vault in _cfg.vaults.items():
-        index = VaultIndex(vault.path, exclude_paths=vault.exclude_paths)
-        watcher = VaultWatcher(vault.path)
+        context_token = set_current_vault(name)
+        try:
+            policy = VaultAccessPolicy.from_config(_cfg)
+        finally:
+            reset_current_vault(context_token)
+        VaultStorage(policy).probe_create_only_support()
+        index = VaultIndex(vault.path, exclude_paths=vault.exclude_paths, policy=policy)
+        watcher = VaultWatcher(
+            vault.path,
+            debounce_ms=_cfg.watcher_debounce_ms,
+            reconcile_interval=_cfg.index_reconcile_interval,
+            policy=policy,
+        )
         _indices[name] = index
         _watchers[name] = watcher
-        threading.Thread(target=index.build, daemon=True).start()
-        watcher.start(on_change=index.update)
+
+        def initialize_index(
+            index: VaultIndex = index,
+            watcher: VaultWatcher = watcher,
+            name: str = name,
+        ) -> None:
+            try:
+                index.build(publish_ready=False)
+                watcher.start(on_change=index.update, on_reconcile=index.reconcile)
+                index.reconcile()
+                index.mark_ready()
+            except Exception:
+                logger.exception("Initial index build/reconciliation failed for vault %s", name)
+
+        threading.Thread(target=initialize_index, daemon=True).start()
     if _cfg.multi_vault:
         logger.info("Multi-vault mode: %d vault(s) configured (%s)", len(_cfg.vaults), ", ".join(_cfg.vaults))
     if _cfg.transport == "stdio":

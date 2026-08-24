@@ -48,7 +48,24 @@ OPTIONAL_GROUPS = {
     "bases": {"list_bases_tool", "read_base_tool", "write_base_tool", "patch_base_tool"},
 }
 
-_PROFILE_ENV = ("TOOL_PROFILE", "ENABLE_CANVAS", "ENABLE_EXCALIDRAW", "ENABLE_KANBAN", "ENABLE_BASES")
+HIGH_RISK_GROUPS = {
+    "move": {"move_note_tool"},
+    "folder_rename": {"rename_folder_tool"},
+    "bulk_replace": {"find_replace_in_vault_tool"},
+    "delete": {
+        "delete_note_tool", "delete_folder_tool", "list_trash_tool",
+        "restore_note_tool", "restore_folder_tool",
+    },
+}
+HIGH_RISK_TOOL_NAMES = set().union(*HIGH_RISK_GROUPS.values())
+DEFAULT_FULL_TOOL_NAMES = BASE_FULL_TOOL_NAMES - HIGH_RISK_TOOL_NAMES
+DEFAULT_FOCUSED_TOOL_NAMES = FOCUSED_TOOL_NAMES - HIGH_RISK_TOOL_NAMES
+
+_PROFILE_ENV = (
+    "TOOL_PROFILE", "ENABLE_CANVAS", "ENABLE_EXCALIDRAW", "ENABLE_KANBAN",
+    "ENABLE_BASES", "ENABLE_MOVE", "ENABLE_FOLDER_RENAME",
+    "ENABLE_BULK_REPLACE", "ENABLE_DELETE",
+)
 _SCHEMA_SNAPSHOT = Path(__file__).parent / "snapshots" / "tool_profile_input_schemas.json"
 
 
@@ -67,18 +84,19 @@ async def _tool_names(server) -> set[str]:
 
 
 @pytest.mark.asyncio
-async def test_default_full_profile_has_exact_legacy_surface(monkeypatch):
+async def test_default_full_profile_has_exact_surface(monkeypatch):
     monkeypatch.delenv("TOOL_PROFILE", raising=False)
-    for group in OPTIONAL_GROUPS:
-        monkeypatch.delenv(f"ENABLE_{group.upper()}", raising=False)
+    for name in _PROFILE_ENV:
+        if name != "TOOL_PROFILE":
+            monkeypatch.delenv(name, raising=False)
     server = importlib.reload(server_mod)
-    assert await _tool_names(server) == BASE_FULL_TOOL_NAMES
+    assert await _tool_names(server) == DEFAULT_FULL_TOOL_NAMES
 
 
 @pytest.mark.asyncio
 async def test_focused_profile_has_exact_documented_surface(monkeypatch):
     server = _reload_server(monkeypatch, "focused")
-    assert await _tool_names(server) == FOCUSED_TOOL_NAMES
+    assert await _tool_names(server) == DEFAULT_FOCUSED_TOOL_NAMES
 
 
 @pytest.mark.asyncio
@@ -107,8 +125,24 @@ async def test_aliases_are_hidden_only_in_focused(monkeypatch):
 @pytest.mark.parametrize("group", sorted(OPTIONAL_GROUPS))
 async def test_optional_groups_compose_with_both_profiles(monkeypatch, profile, group):
     server = _reload_server(monkeypatch, profile, **{group: True})
-    expected_base = BASE_FULL_TOOL_NAMES if profile == "full" else FOCUSED_TOOL_NAMES
+    expected_base = (
+        DEFAULT_FULL_TOOL_NAMES if profile == "full" else DEFAULT_FOCUSED_TOOL_NAMES
+    )
     assert await _tool_names(server) == expected_base | OPTIONAL_GROUPS[group]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["full", "focused"])
+@pytest.mark.parametrize("group", sorted(HIGH_RISK_GROUPS))
+async def test_high_risk_groups_are_also_filtered_by_profile(monkeypatch, profile, group):
+    server = _reload_server(monkeypatch, profile, **{group: True})
+    expected_base = (
+        DEFAULT_FULL_TOOL_NAMES if profile == "full" else DEFAULT_FOCUSED_TOOL_NAMES
+    )
+    expected_group = set(HIGH_RISK_GROUPS[group])
+    if profile == "focused":
+        expected_group &= FOCUSED_TOOL_NAMES
+    assert await _tool_names(server) == expected_base | expected_group
 
 
 def test_unknown_profile_fails_during_server_import(monkeypatch):
@@ -132,7 +166,8 @@ def test_focused_profile_preserves_vault_instructions(monkeypatch, tmp_path):
 
     server = _reload_server(monkeypatch, "focused")
 
-    assert server.mcp.instructions == instructions
+    assert server.mcp.instructions.startswith(server._FOCUSED_INSTRUCTIONS)
+    assert server.mcp.instructions.endswith(instructions)
 
 
 @pytest.mark.asyncio

@@ -8,12 +8,12 @@ from typing import Any
 from ..config import get_config
 from ..domain.index import VaultIndex
 from ..domain.parser import parse_note
-from ..storage.filesystem import read_file
+from ..storage.filesystem import VaultStorage
 
 
 def _load_note(vault_path, note_path: str):
     """Read and parse a single note. Thin helper to avoid repetition."""
-    return parse_note(read_file(vault_path, note_path), path=note_path)
+    return parse_note(VaultStorage.from_config().read_text(note_path), path=note_path)
 
 
 def get_backlinks(path: str, index: VaultIndex) -> list[str]:
@@ -26,10 +26,12 @@ def get_notes_by_tag(tag: str, index: VaultIndex) -> list[str]:
 
 def get_vault_conventions() -> str:
     cfg = get_config()
-    conventions_file = cfg.vault_path / "_AI_INSTRUCTIONS.md"
-    if not conventions_file.exists():
+    storage = VaultStorage.from_config(cfg)
+    try:
+        raw = storage.read_text("_AI_INSTRUCTIONS.md")
+    except (FileNotFoundError, PermissionError):
         return ""
-    return conventions_file.read_text(encoding="utf-8")
+    return raw
 
 
 def get_broken_links(index: VaultIndex) -> list[dict]:
@@ -242,9 +244,10 @@ def get_periodic_note(index: VaultIndex, period: str = "daily", date_str: str = 
     else:
         raise ValueError(f"Unknown period {period!r}. Use: daily|weekly|monthly|quarterly|yearly")
 
-    full_path = cfg.vault_path / rel_path
-    if full_path.exists():
-        raw = full_path.read_text(encoding="utf-8")
+    storage = VaultStorage.from_config(cfg)
+    target = storage.resolve_read(rel_path)
+    if storage.exists(target.relative):
+        raw = storage.read_text(target.relative)
         note = parse_note(raw, path=rel_path)
         return {
             "path": rel_path,
@@ -257,21 +260,29 @@ def get_periodic_note(index: VaultIndex, period: str = "daily", date_str: str = 
         }
 
     # Preview from template if available
-    template_path = cfg.vault_path / "Templates" / template_name
     content = ""
-    if template_path.exists():
-        raw_tpl = template_path.read_text(encoding="utf-8")
+    template_rel = f"Templates/{template_name}"
+    try:
+        raw_tpl = storage.read_text(template_rel)
         content = raw_tpl.replace("{{date}}", note_id).replace("{{title}}", note_id)
+    except (FileNotFoundError, PermissionError):
+        pass
 
     return {"path": rel_path, "period": period, "date": note_id, "exists": False,
             "content": content, "frontmatter": {}, "tasks": []}
 
 
+def _membership(actual, expected, *, negate: bool) -> bool:
+    if not isinstance(expected, (list, tuple, set, frozenset)):
+        raise ValueError("frontmatter_filter '$in'/'$nin' requires a list value")
+    return (actual not in expected) if negate else (actual in expected)
+
+
 _FM_OPERATORS = {
     "$ne": lambda actual, expected: actual != expected,
     "$eq": lambda actual, expected: actual == expected,
-    "$in": lambda actual, expected: actual in expected,
-    "$nin": lambda actual, expected: actual not in expected,
+    "$in": lambda actual, expected: _membership(actual, expected, negate=False),
+    "$nin": lambda actual, expected: _membership(actual, expected, negate=True),
     "$exists": lambda actual, expected: (actual is not None) == bool(expected),
 }
 
@@ -316,6 +327,7 @@ def query_notes(
     operator dict: {"$ne": v}, {"$eq": v}, {"$in": [...]}, {"$nin": [...]},
     {"$exists": True|False}."""
     cfg = get_config()
+    storage = VaultStorage.from_config(cfg)
     all_notes = index.get_all_notes()
     results: list[dict] = []
 
@@ -343,14 +355,14 @@ def query_notes(
             ):
                 continue
 
-            full = cfg.vault_path / note_path
+            full = storage.resolve_read(note_path)
             results.append({
                 "path": note_path,
                 "title": note.frontmatter.get("title", Path(note_path).stem),
                 "tags": note.tags,
                 "status": note_status,
                 "created": str(note.frontmatter.get("created", "")),
-                "mtime": full.stat().st_mtime if full.exists() else 0.0,
+                "mtime": storage.stat(full.relative).st_mtime if storage.exists(full.relative) else 0.0,
                 "frontmatter": note.frontmatter,
                 "inline_fields": note.inline_fields,
             })

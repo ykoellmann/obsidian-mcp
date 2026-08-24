@@ -6,8 +6,9 @@ from pathlib import Path
 
 from ..config import get_config
 from ..domain.index import VaultIndex
-from ..storage.filesystem import read_file, write_file_atomic
-from .write import _check_write_permission
+from ..storage.filesystem import VaultStorage
+from ..storage.locking import acquire_lock
+from ..storage.revisions import prepare_full_write, revision_result
 
 # Matches {{variable}} and {{variable:format}}
 _VAR_RE = re.compile(r"\{\{(\w+)(?::([^}]*))?\}\}")
@@ -18,6 +19,8 @@ def create_from_template(
     output_path: str,
     variables: dict | None = None,
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
+    create_only: bool = False,
 ) -> dict:
     """Render a template and write the result as a new note.
 
@@ -25,11 +28,22 @@ def create_from_template(
     Custom variables in the `variables` dict override built-ins.
     Supports date format specs: {{date:YYYY-MM}} → formatted date string.
     Preserves {{unknown_var}} as-is if not provided.
+
+    expected_revision: pin replacement to a prior read of output_path; strict
+    mode requires it when output_path already exists.
+    create_only: require output_path to be absent and never overwrite it.
     """
     cfg = get_config()
-    _check_write_permission(output_path)
+    storage = VaultStorage.from_config(cfg)
+    if not output_path.lower().endswith(".md"):
+        raise ValueError("Template output paths must end in .md")
+    output = storage.resolve_write(output_path)
+    output_path = output.relative
+    expected, effective_create_only = prepare_full_write(
+        storage, output_path, expected_revision, create_only
+    )
 
-    raw_template = read_file(cfg.vault_path, template_path)
+    raw_template = storage.read_text(template_path)
 
     now = datetime.now()
     today = date.today()
@@ -69,26 +83,37 @@ def create_from_template(
         return val
 
     rendered = _VAR_RE.sub(_replace, raw_template)
-    write_file_atomic(cfg.vault_path, output_path, rendered)
+    lock = acquire_lock(output_path, lock_path=cfg.lock_path)
+    try:
+        revision = storage.write_text_atomic(
+            output_path,
+            rendered,
+            expected_revision=expected,
+            create_only=effective_create_only,
+        )
+    finally:
+        lock.release()
 
     if index is not None:
         index.update(output_path)
 
-    return {
+    return revision_result({
         "template": template_path,
         "output": output_path,
         "status": "created",
         "variables": merged,
-    }
+    }, revision)
 
 
 def list_templates() -> list[str]:
     """List all template files in the Templates/ folder."""
     cfg = get_config()
-    templates_dir = cfg.vault_path / "Templates"
-    if not templates_dir.exists():
+    storage = VaultStorage.from_config(cfg)
+    try:
+        return sorted(
+            p.relative
+            for p in storage.list_files("Templates")
+            if p.relative.lower().endswith(".md")
+        )
+    except (FileNotFoundError, NotADirectoryError):
         return []
-    return sorted(
-        str(p.relative_to(cfg.vault_path))
-        for p in templates_dir.rglob("*.md")
-    )

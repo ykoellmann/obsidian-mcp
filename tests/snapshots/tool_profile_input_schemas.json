@@ -37,6 +37,17 @@
           "default": true,
           "type": "boolean"
         },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "path": {
           "type": "string"
         },
@@ -126,6 +137,21 @@
     "create_from_template_tool": {
       "additionalProperties": false,
       "properties": {
+        "create_only": {
+          "default": false,
+          "type": "boolean"
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "output_path": {
           "type": "string"
         },
@@ -605,6 +631,17 @@
           ],
           "default": null
         },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "path": {
           "type": "string"
         },
@@ -639,16 +676,14 @@
       ],
       "type": "object"
     },
-    "move_note_tool": {
+    "patch_frontmatter_tool": {
       "additionalProperties": false,
       "properties": {
-        "from_path": {
-          "type": "string"
+        "dry_run": {
+          "default": false,
+          "type": "boolean"
         },
-        "to_path": {
-          "type": "string"
-        },
-        "vault": {
+        "expected_revision": {
           "anyOf": [
             {
               "type": "string"
@@ -658,20 +693,6 @@
             }
           ],
           "default": null
-        }
-      },
-      "required": [
-        "from_path",
-        "to_path"
-      ],
-      "type": "object"
-    },
-    "patch_frontmatter_tool": {
-      "additionalProperties": false,
-      "properties": {
-        "dry_run": {
-          "default": false,
-          "type": "boolean"
         },
         "merge_arrays": {
           "default": true,
@@ -713,6 +734,17 @@
           "default": false,
           "type": "boolean"
         },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "find": {
           "type": "string"
         },
@@ -748,6 +780,17 @@
     "patch_note_tool": {
       "additionalProperties": false,
       "properties": {
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "mode": {
           "default": "replace",
           "type": "string"
@@ -912,33 +955,6 @@
       ],
       "type": "object"
     },
-    "rename_folder_tool": {
-      "additionalProperties": false,
-      "properties": {
-        "from_path": {
-          "type": "string"
-        },
-        "to_path": {
-          "type": "string"
-        },
-        "vault": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "from_path",
-        "to_path"
-      ],
-      "type": "object"
-    },
     "search_notes_tool": {
       "additionalProperties": false,
       "properties": {
@@ -1014,9 +1030,24 @@
         "content": {
           "type": "string"
         },
+        "create_only": {
+          "default": false,
+          "type": "boolean"
+        },
         "dry_run": {
           "default": false,
           "type": "boolean"
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "path": {
           "type": "string"
@@ -1077,6 +1108,17 @@
         "create": {
           "default": true,
           "type": "boolean"
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "path": {
           "type": "string"
@@ -1167,6 +1209,21 @@
     "create_from_template_tool": {
       "additionalProperties": false,
       "properties": {
+        "create_only": {
+          "default": false,
+          "type": "boolean"
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "output_path": {
           "type": "string"
         },
@@ -1200,99 +1257,6 @@
       "required": [
         "template_path",
         "output_path"
-      ],
-      "type": "object"
-    },
-    "delete_folder_tool": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "type": "string"
-        },
-        "trash": {
-          "default": true,
-          "type": "boolean"
-        },
-        "vault": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "path"
-      ],
-      "type": "object"
-    },
-    "delete_note_tool": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "type": "string"
-        },
-        "trash": {
-          "default": true,
-          "type": "boolean"
-        },
-        "vault": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "path"
-      ],
-      "type": "object"
-    },
-    "find_replace_in_vault_tool": {
-      "additionalProperties": false,
-      "properties": {
-        "dry_run": {
-          "default": true,
-          "type": "boolean"
-        },
-        "folder": {
-          "default": "",
-          "type": "string"
-        },
-        "mode": {
-          "default": "exact",
-          "type": "string"
-        },
-        "replace": {
-          "type": "string"
-        },
-        "search": {
-          "type": "string"
-        },
-        "vault": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "search",
-        "replace"
       ],
       "type": "object"
     },
@@ -1891,23 +1855,6 @@
       },
       "type": "object"
     },
-    "list_trash_tool": {
-      "additionalProperties": false,
-      "properties": {
-        "vault": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "type": "object"
-    },
     "list_vaults_tool": {
       "additionalProperties": false,
       "properties": {},
@@ -1923,6 +1870,17 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
             },
             {
               "type": "null"
@@ -1964,33 +1922,6 @@
       ],
       "type": "object"
     },
-    "move_note_tool": {
-      "additionalProperties": false,
-      "properties": {
-        "from_path": {
-          "type": "string"
-        },
-        "to_path": {
-          "type": "string"
-        },
-        "vault": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "from_path",
-        "to_path"
-      ],
-      "type": "object"
-    },
     "patch_frontmatter_batch_tool": {
       "additionalProperties": false,
       "properties": {
@@ -2024,6 +1955,17 @@
         "dry_run": {
           "default": false,
           "type": "boolean"
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "merge_arrays": {
           "default": true,
@@ -2065,6 +2007,17 @@
           "default": false,
           "type": "boolean"
         },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "find": {
           "type": "string"
         },
@@ -2100,6 +2053,17 @@
     "patch_note_tool": {
       "additionalProperties": false,
       "properties": {
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "mode": {
           "default": "replace",
           "type": "string"
@@ -2264,33 +2228,6 @@
       ],
       "type": "object"
     },
-    "rename_folder_tool": {
-      "additionalProperties": false,
-      "properties": {
-        "from_path": {
-          "type": "string"
-        },
-        "to_path": {
-          "type": "string"
-        },
-        "vault": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "from_path",
-        "to_path"
-      ],
-      "type": "object"
-    },
     "render_note_tool": {
       "additionalProperties": false,
       "properties": {
@@ -2338,60 +2275,6 @@
       },
       "required": [
         "name"
-      ],
-      "type": "object"
-    },
-    "restore_folder_tool": {
-      "additionalProperties": false,
-      "properties": {
-        "to_path": {
-          "type": "string"
-        },
-        "trashed_name": {
-          "type": "string"
-        },
-        "vault": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "trashed_name",
-        "to_path"
-      ],
-      "type": "object"
-    },
-    "restore_note_tool": {
-      "additionalProperties": false,
-      "properties": {
-        "to_path": {
-          "type": "string"
-        },
-        "trashed_name": {
-          "type": "string"
-        },
-        "vault": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "trashed_name",
-        "to_path"
       ],
       "type": "object"
     },
@@ -2470,9 +2353,24 @@
         "content": {
           "type": "string"
         },
+        "create_only": {
+          "default": false,
+          "type": "boolean"
+        },
         "dry_run": {
           "default": false,
           "type": "boolean"
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "path": {
           "type": "string"

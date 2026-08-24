@@ -8,12 +8,15 @@ import pytest
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.middleware import MiddlewareContext
 
+import obsidian_mcp.config as cfg_mod
 from obsidian_mcp import server as server_mod
 from obsidian_mcp.config import Config
 from obsidian_mcp.server import (
+    _DEFAULT_INSTRUCTIONS,
     VaultResolutionMiddleware,
     _APIKeyAuthProvider,
     _identities_from_env,
+    _load_instructions,
     _resolve_identity,
     _select_vault,
     list_vaults_tool,
@@ -67,6 +70,24 @@ def test_identities_from_env_bad_vaults_config_returns_empty(tmp_path, monkeypat
     monkeypatch.setenv("VAULTS_CONFIG", str(tmp_path / "nonexistent.json"))
 
     assert _identities_from_env() == ([], [])
+
+
+def test_shared_server_instructions_do_not_expose_default_vault_conventions(
+    tmp_path, monkeypatch
+):
+    config_path = _write_vaults_config(tmp_path)
+    (tmp_path / "a" / "_AI_INSTRUCTIONS.md").write_text(
+        "private default-vault instructions", encoding="utf-8"
+    )
+    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
+    monkeypatch.setenv("TRANSPORT", "sse")
+    monkeypatch.delenv("VAULT_PATH", raising=False)
+    monkeypatch.setattr(cfg_mod, "_config", None)
+
+    instructions = _load_instructions()
+
+    assert instructions == _DEFAULT_INSTRUCTIONS
+    assert "private default-vault instructions" not in instructions
 
 
 # ── _APIKeyAuthProvider (multi-key) ─────────────────────────────────────────
@@ -236,8 +257,9 @@ def test_select_vault_requires_explicit_when_no_default():
 # ── VaultResolutionMiddleware: explicit vault= override ─────────────────────
 
 class _FakeMessage:
-    def __init__(self, arguments):
+    def __init__(self, arguments, name=None):
         self.arguments = arguments
+        self.name = name
 
 
 @pytest.mark.asyncio
@@ -316,6 +338,34 @@ async def test_middleware_rejects_vault_argument_outside_allowed_set(tmp_path, m
         await middleware.on_call_tool(context, call_next)
 
 
+@pytest.mark.asyncio
+async def test_middleware_allows_vault_discovery_without_default(tmp_path, monkeypatch):
+    cfg = _cfg_with_vaults(
+        tmp_path, monkeypatch,
+        extra_identities=[
+            {"type": "api_key", "value": "sk-no-default", "vaults": ["private", "monari"]},
+        ],
+    )
+    import obsidian_mcp.config as cfg_mod
+    cfg_mod._config = cfg
+    monkeypatch.setattr(
+        server_mod, "get_access_token",
+        lambda: AccessToken(token="sk-no-default", client_id="sk-no-default", scopes=[]),
+    )
+
+    async def call_next(context):
+        return list_vaults_tool()
+
+    middleware = VaultResolutionMiddleware()
+    context = MiddlewareContext(
+        message=_FakeMessage(arguments={}, name="list_vaults_tool")
+    )
+    result = await middleware.on_call_tool(context, call_next)
+
+    assert {item["name"] for item in result} == {"private", "monari"}
+    assert not any(item["is_default"] for item in result)
+
+
 # ── list_vaults_tool ─────────────────────────────────────────────────────
 
 def test_list_vaults_tool_single_vault_mode(vault_factory):
@@ -342,3 +392,83 @@ def test_list_vaults_tool_multi_vault_mode(tmp_path, monkeypatch):
     result = list_vaults_tool()
     names = {v["name"]: v["is_default"] for v in result}
     assert names == {"private": True, "monari": False}
+
+
+def test_main_builds_policy_aware_index_and_watcher_per_vault(tmp_path, monkeypatch):
+    config_path = _write_vaults_config(tmp_path)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["vaults"]["private"]["read_paths"] = ["Memory/"]
+    data["vaults"]["monari"]["write_paths"] = ["Output/"]
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    (tmp_path / "b" / "Output").mkdir()
+    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
+    monkeypatch.setenv("TRANSPORT", "sse")
+
+    import obsidian_mcp.config as cfg_mod
+
+    cfg_mod._config = None
+    created_indices = {}
+    created_watchers = {}
+
+    class FakeIndex:
+        def __init__(self, path, *, exclude_paths, policy):
+            self.path = path
+            self.exclude_paths = exclude_paths
+            self.policy = policy
+            created_indices[path.name] = self
+
+        def build(self, *, publish_ready=True):
+            self.publish_ready = publish_ready
+            return None
+
+        def update(self, _path):
+            return None
+
+        def reconcile(self):
+            self.reconciled = True
+
+        def mark_ready(self):
+            self.ready = True
+
+    class FakeWatcher:
+        def __init__(self, path, *, debounce_ms, reconcile_interval, policy):
+            self.path = path
+            self.debounce_ms = debounce_ms
+            self.reconcile_interval = reconcile_interval
+            self.policy = policy
+            self.callback = None
+            self.reconcile_callback = None
+            created_watchers[path.name] = self
+
+        def start(self, *, on_change, on_reconcile):
+            self.callback = on_change
+            self.reconcile_callback = on_reconcile
+
+    class FakeThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(server_mod, "VaultIndex", FakeIndex)
+    monkeypatch.setattr(server_mod, "VaultWatcher", FakeWatcher)
+    monkeypatch.setattr(server_mod.threading, "Thread", FakeThread)
+    monkeypatch.setattr(server_mod.mcp, "run", lambda **_kwargs: None)
+    monkeypatch.setattr(server_mod, "_indices", {})
+    monkeypatch.setattr(server_mod, "_watchers", {})
+
+    server_mod.main()
+
+    assert set(created_indices) == {"a", "b"}
+    assert created_indices["a"].policy.root == (tmp_path / "a").resolve()
+    assert created_indices["a"].policy.read_paths == ("Memory/",)
+    assert created_indices["b"].policy.root == (tmp_path / "b").resolve()
+    assert created_indices["b"].policy.write_paths == ("Output/",)
+    assert created_watchers["a"].policy is created_indices["a"].policy
+    assert created_watchers["b"].policy is created_indices["b"].policy
+    assert created_indices["a"].publish_ready is False
+    assert created_indices["a"].reconciled is True
+    assert created_indices["a"].ready is True
+    assert created_watchers["a"].reconcile_callback == created_indices["a"].reconcile

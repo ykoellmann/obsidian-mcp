@@ -6,6 +6,7 @@ import time
 import pytest
 
 from obsidian_mcp.tools.attachments import (
+    AttachmentTooLargeError,
     _sign_attachment_token,
     add_attachment,
     create_attachment_token,
@@ -68,10 +69,27 @@ def test_add_attachment_rejects_md(vault_factory):
         add_attachment("note.md", base64.b64encode(b"text").decode())
 
 
+@pytest.mark.parametrize(
+    "path",
+    [".env", ".hidden/file.png", "extensionless", "script.py", "script.sh", "config.yaml"],
+)
+def test_add_attachment_positive_policy_rejects_hidden_or_unsafe_names(path, vault_factory):
+    vault_factory({})
+    with pytest.raises(ValueError):
+        add_attachment(path, base64.b64encode(b"not-an-attachment").decode())
+
+
 def test_add_attachment_invalid_base64(vault_factory):
     vault_factory({})
     with pytest.raises(ValueError):
         add_attachment("file.png", "not-valid-base64!!!")
+
+
+def test_add_attachment_enforces_configured_size_limit(vault_factory, monkeypatch):
+    monkeypatch.setenv("MAX_ATTACHMENT_BYTES", "3")
+    vault_factory({})
+    with pytest.raises(AttachmentTooLargeError):
+        add_attachment("file.png", base64.b64encode(b"1234").decode())
 
 
 # ── attachment tokens ─────────────────────────────────────────────────────
@@ -163,6 +181,18 @@ def test_verify_attachment_token_rejects_wrong_vault(vault_factory):
     )
 
 
+def test_attachment_token_payload_has_no_path_vault_delimiter_collision():
+    expires_at = 1_800_000_000
+    first = _sign_attachment_token(
+        "secret", "GET", "report.pdf:team", "private", expires_at
+    )
+    second = _sign_attachment_token(
+        "secret", "GET", "report.pdf", "team:private", expires_at
+    )
+
+    assert first != second
+
+
 def test_verify_attachment_token_rejects_expired(vault_factory):
     vault_factory({})
     expired_at = int(time.time()) - 10
@@ -180,3 +210,14 @@ def test_create_attachment_token_caps_ttl(vault_factory):
     vault_factory({})
     token = create_attachment_token("file.png", signing_key="secret", vault="default", expires_in=999999)
     assert token["expires_at"] <= int(time.time()) + 3600 + 1
+
+
+@pytest.mark.parametrize(
+    "path",
+    [".env", ".hidden/file.png", "extensionless", "script.py", "script.sh", "config.yaml"],
+)
+def test_put_attachment_token_positive_policy_rejects_unsafe_names(path, vault_factory, monkeypatch):
+    monkeypatch.setenv("API_KEY", "secret")
+    vault_factory({})
+    with pytest.raises(ValueError):
+        create_attachment_token(path, signing_key="secret", vault="default", method="PUT")

@@ -57,3 +57,8 @@ def test_list_templates(vault_factory):
     templates = list_templates()
     assert len(templates) == 2
     assert all("Templates/" in t for t in templates)
+
+
+def test_list_templates_returns_empty_when_directory_is_absent(vault_factory):
+    vault_factory({"Notes/note.md": "Note"})
+    assert list_templates() == []

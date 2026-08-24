@@ -1,0 +1,72 @@
+# Hardened home-server example for a Cloudflare Tunnel sidecar.
+#
+# Prepare the two writable directories in the vault first and set
+# HOST_VAULT_PATH, AI_MEMORY_PATH, AI_OUTPUT_PATH, PUID, PGID, and
+# CLOUDFLARE_TUNNEL_TOKEN in .env.  The complete vault remains read-only in
+# the container; Docker's nested bind mounts provide the only writable
+# locations for the AI memory/output layer. Prepare MCP_DATA_PATH and make it
+# writable by PUID:PGID before starting the stack (it stores locks and state).
+services:
+  obsidian-mcp:
+    build:
+      context: .
+    # The locally built image supplies the /health HEALTHCHECK.
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      VAULT_PATH: /vault
+      TRANSPORT: http
+      # The service is not published on the host.  cloudflared reaches it on
+      # the private Compose network at http://obsidian-mcp:8000.
+      HOST: 0.0.0.0
+      PORT: 8000
+      READ_ONLY: "false"
+      READ_PATHS: "${READ_PATHS:-}"
+      WRITE_PATHS: "${AI_MEMORY_PATH:-AI-Memory}/,${AI_OUTPUT_PATH:-AI-Output}/"
+      DENY_READ_PATHS: ".obsidian/,.trash/"
+      DENY_WRITE_PATHS: ".obsidian/,.trash/,_AI_INSTRUCTIONS.md"
+      ALLOW_PERMANENT_DELETE: "false"
+      MAX_ATTACHMENT_BYTES: "${MAX_ATTACHMENT_BYTES:-26214400}"
+      REQUIRE_WRITE_PRECONDITIONS: "${REQUIRE_WRITE_PRECONDITIONS:-true}"
+      WATCHER_DEBOUNCE_MS: "${WATCHER_DEBOUNCE_MS:-100}"
+      INDEX_RECONCILE_INTERVAL: "${INDEX_RECONCILE_INTERVAL:-900}"
+      LOCK_PATH: /data/locks
+      AUDIT_LOG_PATH: /data/audit.jsonl
+      EXCLUDE_PATHS: "private/,.obsidian/,.trash/"
+      API_KEY: "${API_KEY:?set API_KEY in .env}"
+      ENABLE_CANVAS: "${ENABLE_CANVAS:-false}"
+      ENABLE_EXCALIDRAW: "${ENABLE_EXCALIDRAW:-false}"
+      ENABLE_KANBAN: "${ENABLE_KANBAN:-false}"
+      ENABLE_BASES: "${ENABLE_BASES:-false}"
+      ENABLE_MOVE: "${ENABLE_MOVE:-false}"
+      ENABLE_FOLDER_RENAME: "${ENABLE_FOLDER_RENAME:-false}"
+      ENABLE_BULK_REPLACE: "${ENABLE_BULK_REPLACE:-false}"
+      # Trash requires a cross-mount rename into the read-only parent vault.
+      # It is deliberately unavailable in this nested-bind profile.
+      ENABLE_DELETE: "false"
+    volumes:
+      - "${HOST_VAULT_PATH:?set HOST_VAULT_PATH in .env}:/vault:ro"
+      - "${HOST_VAULT_PATH:?}/${AI_MEMORY_PATH:-AI-Memory}:/vault/${AI_MEMORY_PATH:-AI-Memory}:rw"
+      - "${HOST_VAULT_PATH:?}/${AI_OUTPUT_PATH:-AI-Output}:/vault/${AI_OUTPUT_PATH:-AI-Output}:rw"
+      - "${MCP_DATA_PATH:?set MCP_DATA_PATH in .env}:/data:rw"
+    # Deliberately no ports: only the Cloudflare Tunnel service below can
+    # reach the MCP endpoint.
+    networks:
+      - mcp-private
+
+  cloudflared:
+    image: "${CLOUDFLARED_IMAGE:?set CLOUDFLARED_IMAGE to a digest-pinned cloudflare/cloudflared image}"
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:?set CLOUDFLARE_TUNNEL_TOKEN in .env}"
+    depends_on:
+      - obsidian-mcp
+    networks:
+      - mcp-private
+      - egress
+
+networks:
+  mcp-private:
+    internal: true
+  egress:

@@ -6,6 +6,9 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+from .filesystem import VaultStorage
+from .policy import VaultAccessPolicy
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,25 +20,84 @@ class VaultWatcher:
     Set WATCH_MODE=poll to force polling.
     """
 
-    def __init__(self, vault_root: Path, poll_interval: float = 2.0) -> None:
+    def __init__(
+        self,
+        vault_root: Path,
+        poll_interval: float = 2.0,
+        debounce_ms: int = 100,
+        reconcile_interval: float = 900.0,
+        policy: VaultAccessPolicy | None = None,
+    ) -> None:
         self._vault_root = vault_root
+        self._policy = policy or VaultAccessPolicy(vault_root)
+        self._storage = VaultStorage(self._policy)
         self._poll_interval = poll_interval
+        self._debounce_seconds = debounce_ms / 1000
+        self._reconcile_interval = reconcile_interval
         self._observer = None
         self._poll_thread: threading.Thread | None = None
+        self._reconcile_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._debounce_lock = threading.Lock()
+        self._pending: dict[str, threading.Timer] = {}
 
-    def start(self, on_change: Callable[[str], None]) -> None:
+    def start(
+        self,
+        on_change: Callable[[str], None],
+        *,
+        on_reconcile: Callable[[], None] | None = None,
+    ) -> None:
+        def debounced(path: str) -> None:
+            if self._debounce_seconds == 0:
+                on_change(path)
+                return
+            with self._debounce_lock:
+                previous = self._pending.pop(path, None)
+                if previous is not None:
+                    previous.cancel()
+
+                def deliver() -> None:
+                    with self._debounce_lock:
+                        self._pending.pop(path, None)
+                    if not self._stop_event.is_set():
+                        on_change(path)
+
+                timer = threading.Timer(self._debounce_seconds, deliver)
+                timer.daemon = True
+                self._pending[path] = timer
+                timer.start()
+
         watch_mode = os.environ.get("WATCH_MODE", "auto").lower()
-        if watch_mode == "poll" or not self._try_watchdog(on_change):
-            self._start_polling(on_change)
+        if watch_mode == "poll" or not self._try_watchdog(debounced):
+            self._start_polling(debounced)
+        if on_reconcile is not None:
+            self._start_reconciliation(on_reconcile)
 
     def stop(self) -> None:
         self._stop_event.set()
+        with self._debounce_lock:
+            timers = list(self._pending.values())
+            self._pending.clear()
+        for timer in timers:
+            timer.cancel()
         if self._observer is not None:
             self._observer.stop()
             self._observer.join()
         if self._poll_thread is not None:
             self._poll_thread.join(timeout=self._poll_interval + 1)
+        if self._reconcile_thread is not None:
+            self._reconcile_thread.join(timeout=1)
+
+    def _start_reconciliation(self, on_reconcile: Callable[[], None]) -> None:
+        def run() -> None:
+            while not self._stop_event.wait(self._reconcile_interval):
+                try:
+                    on_reconcile()
+                except Exception:
+                    logger.exception("Periodic index reconciliation failed")
+
+        self._reconcile_thread = threading.Thread(target=run, daemon=True)
+        self._reconcile_thread.start()
 
     def _try_watchdog(self, on_change: Callable[[str], None]) -> bool:
         try:
@@ -43,20 +105,48 @@ class VaultWatcher:
             from watchdog.observers import Observer
 
             vault_root = self._vault_root
+            policy = self._policy
 
             class _Handler(FileSystemEventHandler):
+                @staticmethod
+                def _relative(path: str) -> str | None:
+                    try:
+                        return Path(path).relative_to(vault_root).as_posix()
+                    except (ValueError, OSError):
+                        return None
+
                 def on_modified(self, event):
-                    if not event.is_directory and event.src_path.endswith(".md"):
-                        rel = str(Path(event.src_path).relative_to(vault_root))
+                    if event.is_directory:
+                        return
+                    rel = self._relative(event.src_path)
+                    if rel and rel.lower().endswith(".md") and policy.can_read(rel):
                         on_change(rel)
 
                 def on_created(self, event):
                     self.on_modified(event)
 
                 def on_deleted(self, event):
-                    if not event.is_directory and event.src_path.endswith(".md"):
-                        rel = str(Path(event.src_path).relative_to(vault_root))
+                    rel = self._relative(event.src_path)
+                    if not rel:
+                        return
+                    # Directory deletion/move events are passed through too;
+                    # VaultIndex.update removes all indexed descendants when
+                    # the path no longer exists.
+                    if event.is_directory or rel.lower().endswith(".md"):
                         on_change(rel)
+
+                def on_moved(self, event):
+                    old_rel = self._relative(event.src_path)
+                    new_rel = self._relative(event.dest_path)
+                    if old_rel and (event.is_directory or old_rel.lower().endswith(".md")):
+                        on_change(old_rel)
+                    if not new_rel:
+                        return
+                    if event.is_directory:
+                        if policy.can_read(new_rel):
+                            on_change(new_rel)
+                    elif new_rel.lower().endswith(".md") and policy.can_read(new_rel):
+                        on_change(new_rel)
 
             self._observer = Observer()
             self._observer.schedule(_Handler(), str(self._vault_root), recursive=True)
@@ -75,15 +165,17 @@ class VaultWatcher:
             while not self._stop_event.is_set():
                 try:
                     current: dict[str, float] = {}
-                    for p in self._vault_root.rglob("*.md"):
-                        rel = str(p.relative_to(self._vault_root))
-                        current[rel] = p.stat().st_mtime
+                    for path in self._storage.list_files():
+                        if path.relative.lower().endswith(".md"):
+                            current[path.relative] = path.stat_result.st_mtime
 
                     for rel, mtime in current.items():
                         if mtimes.get(rel) != mtime:
                             on_change(rel)
 
                     for rel in set(mtimes) - set(current):
+                        # Always invalidate previously visible entries. The
+                        # index applies current read policy before re-adding.
                         on_change(rel)
 
                     mtimes.clear()

@@ -13,9 +13,10 @@ import re
 from ..config import get_config
 from ..domain.index import VaultIndex
 from ..domain.parser import parse_note
-from ..storage.filesystem import validate_path, write_file_atomic
+from ..storage.filesystem import VaultStorage
 from ..storage.locking import acquire_lock
-from .write import _check_write_permission
+from ..storage.policy import InvalidFileTypeError
+from ..storage.revisions import prepare_full_write, read_text_for_update, revision_result
 
 # Matches - [ ] text  or  - [x] / - [X] text
 _CARD_RE = re.compile(r"^- \[([ xX])\] (.+)$", re.MULTILINE)
@@ -32,11 +33,15 @@ def read_kanban(path: str) -> dict:
     Returns {path, plugin, columns: [{name, cards: [{text, done}]}], total_cards}.
     """
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-    if not target.exists():
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".md"):
+        raise InvalidFileTypeError("Kanban paths must end in .md")
+    target = storage.resolve_read(path)
+    path = target.relative
+    if not storage.exists(path, read=True):
         raise FileNotFoundError(f"Kanban board not found: {path!r}")
 
-    raw = target.read_text(encoding="utf-8")
+    raw, revision = storage.read_text_with_revision(path)
     note = parse_note(raw, path=path)
 
     if "kanban-plugin" not in note.frontmatter:
@@ -49,6 +54,7 @@ def read_kanban(path: str) -> dict:
         "plugin": note.frontmatter.get("kanban-plugin", "basic"),
         "columns": columns,
         "total_cards": sum(len(c["cards"]) for c in columns),
+        "revision": revision.token,
     }
 
 
@@ -56,22 +62,41 @@ def create_kanban_board(
     path: str,
     columns: list[str],
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
+    create_only: bool = False,
 ) -> dict:
     """Create a new Kanban board with the given column names."""
     cfg = get_config()
-    validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".md"):
+        raise InvalidFileTypeError("Kanban paths must end in .md")
+    target = storage.resolve_write(path)
+    path = target.relative
+    expected, effective_create_only = prepare_full_write(
+        storage, path, expected_revision, create_only
+    )
 
     lines = ["---", "kanban-plugin: basic", "---", ""]
     for col in columns:
         lines += [f"## {col}", ""]
     content = "\n".join(lines)
 
-    write_file_atomic(cfg.vault_path, path, content)
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
+    try:
+        revision = storage.write_text_atomic(
+            path,
+            content,
+            expected_revision=expected,
+            create_only=effective_create_only,
+        )
+    finally:
+        lock.release()
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "created", "columns": columns}
+    return revision_result(
+        {"path": path, "status": "created", "columns": columns}, revision
+    )
 
 
 def add_kanban_card(
@@ -80,28 +105,36 @@ def add_kanban_card(
     text: str,
     done: bool = False,
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Add a new card to a column. New cards are inserted at the top of the column."""
     cfg = get_config()
-    validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".md"):
+        raise InvalidFileTypeError("Kanban paths must end in .md")
+    target = storage.resolve_write(path)
+    path = target.relative
 
-    target = cfg.vault_path / path
-    if not target.exists():
+    if not storage.exists(path, read=False):
         raise FileNotFoundError(f"Kanban board not found: {path!r}")
 
-    lock = acquire_lock(str(target))
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
-        raw = target.read_text(encoding="utf-8")
+        raw, current_revision = read_text_for_update(storage, path, expected_revision)
         patched = _add_card(raw, column, text, done)
-        write_file_atomic(cfg.vault_path, path, patched)
+        revision = storage.write_text_atomic(
+            path, patched, expected_revision=current_revision
+        )
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "added", "column": column, "card": text, "done": done}
+    return revision_result(
+        {"path": path, "status": "added", "column": column, "card": text, "done": done},
+        revision,
+    )
 
 
 def move_kanban_card(
@@ -111,36 +144,41 @@ def move_kanban_card(
     to_column: str,
     done: bool | None = None,
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Move a card between columns. done=True/False overwrites the card's tick state."""
     cfg = get_config()
-    validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".md"):
+        raise InvalidFileTypeError("Kanban paths must end in .md")
+    target = storage.resolve_write(path)
+    path = target.relative
 
-    target = cfg.vault_path / path
-    if not target.exists():
+    if not storage.exists(path, read=False):
         raise FileNotFoundError(f"Kanban board not found: {path!r}")
 
-    lock = acquire_lock(str(target))
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
-        raw = target.read_text(encoding="utf-8")
+        raw, current_revision = read_text_for_update(storage, path, expected_revision)
         patched, moved = _move_card(raw, card_text, from_column, to_column, done)
         if not moved:
             raise ValueError(f"Card {card_text!r} not found in column {from_column!r}")
-        write_file_atomic(cfg.vault_path, path, patched)
+        revision = storage.write_text_atomic(
+            path, patched, expected_revision=current_revision
+        )
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {
+    return revision_result({
         "path": path,
         "status": "moved",
         "card": card_text,
         "from": from_column,
         "to": to_column,
-    }
+    }, revision)
 
 
 def delete_kanban_card(
@@ -148,31 +186,38 @@ def delete_kanban_card(
     card_text: str,
     column: str | None = None,
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Remove a card from the board. If column is given, only search there."""
     cfg = get_config()
-    validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".md"):
+        raise InvalidFileTypeError("Kanban paths must end in .md")
+    target = storage.resolve_write(path)
+    path = target.relative
 
-    target = cfg.vault_path / path
-    if not target.exists():
+    if not storage.exists(path, read=False):
         raise FileNotFoundError(f"Kanban board not found: {path!r}")
 
-    lock = acquire_lock(str(target))
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
-        raw = target.read_text(encoding="utf-8")
+        raw, current_revision = read_text_for_update(storage, path, expected_revision)
         patched, deleted = _delete_card(raw, card_text, column)
         if not deleted:
             col_info = f" in column {column!r}" if column else ""
             raise ValueError(f"Card {card_text!r} not found{col_info}")
-        write_file_atomic(cfg.vault_path, path, patched)
+        revision = storage.write_text_atomic(
+            path, patched, expected_revision=current_revision
+        )
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "deleted", "card": card_text}
+    return revision_result(
+        {"path": path, "status": "deleted", "card": card_text}, revision
+    )
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

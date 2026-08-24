@@ -25,6 +25,9 @@ def vault_factory(tmp_path: Path, monkeypatch):
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
         monkeypatch.setenv("VAULT_PATH", str(tmp_path))
+        # Keep the configured lock domain explicit and outside the temporary
+        # vault so the fail-closed LOCK_PATH contract is exercised.
+        monkeypatch.setenv("LOCK_PATH", str(tmp_path.parent / f"{tmp_path.name}-locks"))
         cfg_mod._config = None
         idx = VaultIndex(tmp_path)
         idx.build()

@@ -1,30 +1,36 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
 
 from ..config import get_config
-from ..storage.filesystem import validate_path
+from ..storage.filesystem import VaultStorage
 from ..storage.locking import acquire_lock
+from ..storage.policy import InvalidFileTypeError
+from ..storage.revisions import prepare_full_write, read_text_for_update, revision_result
 
 
 def list_canvases() -> list[str]:
     cfg = get_config()
-    root = cfg.vault_path
+    storage = VaultStorage.from_config(cfg)
     return sorted(
-        str(p.relative_to(root))
-        for p in root.rglob("*.canvas")
+        p.relative
+        for p in storage.list_files()
+        if p.relative.lower().endswith(".canvas")
     )
 
 
 def read_canvas(path: str) -> dict:
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-    if not target.exists():
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".canvas"):
+        raise InvalidFileTypeError("Canvas paths must end in .canvas")
+    target = storage.resolve_read(path)
+    path = target.relative
+    if not storage.exists(path, read=True):
         raise FileNotFoundError(f"Canvas not found: {path!r}")
     try:
-        raw = target.read_text(encoding="utf-8")
+        raw, revision = storage.read_text_with_revision(path)
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid canvas JSON in {path!r}: {exc}") from exc
@@ -51,13 +57,15 @@ def read_canvas(path: str) -> dict:
             "label": edge.get("label"),
         })
 
-    return {"path": path, "nodes": nodes, "edges": edges}
+    return {"path": path, "nodes": nodes, "edges": edges, "revision": revision.token}
 
 
 def write_canvas(
     path: str,
     nodes: list[dict] | None = None,
     edges: list[dict] | None = None,
+    expected_revision: str | None = None,
+    create_only: bool = False,
 ) -> dict:
     """Create or fully overwrite a canvas file.
 
@@ -67,25 +75,36 @@ def write_canvas(
     Each edge must have fromNode and toNode. Edge 'id' is auto-generated if omitted.
     """
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".canvas"):
+        raise InvalidFileTypeError("Canvas paths must end in .canvas")
+    target = storage.resolve_write(path)
+    path = target.relative
+    expected, effective_create_only = prepare_full_write(
+        storage, path, expected_revision, create_only
+    )
 
     built_nodes = [_normalize_node(n) for n in (nodes or [])]
     built_edges = [_normalize_edge(e) for e in (edges or [])]
     data = {"nodes": built_nodes, "edges": built_edges}
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    lock = acquire_lock(str(target))
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
-        _write_canvas_atomic(target, data)
+        revision = storage.write_text_atomic(
+            path,
+            json.dumps(data, indent=2, ensure_ascii=False),
+            expected_revision=expected,
+            create_only=effective_create_only,
+        )
     finally:
         lock.release()
 
-    return {
+    return revision_result({
         "path": path,
         "status": "written",
         "nodes": len(built_nodes),
         "edges": len(built_edges),
-    }
+    }, revision)
 
 
 def patch_canvas(
@@ -95,6 +114,7 @@ def patch_canvas(
     delete_node_ids: list[str] | None = None,
     add_edges: list[dict] | None = None,
     delete_edge_ids: list[str] | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Atomically update an existing canvas: add/update/delete nodes and edges.
 
@@ -102,14 +122,19 @@ def patch_canvas(
     delete_node_ids: also removes all edges connected to those nodes.
     """
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-    if not target.exists():
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".canvas"):
+        raise InvalidFileTypeError("Canvas paths must end in .canvas")
+    target = storage.resolve_write(path)
+    path = target.relative
+    if not storage.exists(path, read=False):
         raise FileNotFoundError(f"Canvas not found: {path!r}")
 
-    lock = acquire_lock(str(target))
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
         try:
-            data = json.loads(target.read_text(encoding="utf-8"))
+            raw, current_revision = read_text_for_update(storage, path, expected_revision)
+            data = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid canvas JSON in {path!r}: {exc}") from exc
 
@@ -145,16 +170,20 @@ def patch_canvas(
         if add_edges:
             edges.extend(_normalize_edge(e) for e in add_edges)
 
-        _write_canvas_atomic(target, {"nodes": nodes, "edges": edges})
+        revision = storage.write_text_atomic(
+            path,
+            json.dumps({"nodes": nodes, "edges": edges}, indent=2, ensure_ascii=False),
+            expected_revision=current_revision,
+        )
     finally:
         lock.release()
 
-    return {
+    return revision_result({
         "path": path,
         "status": "patched",
         "nodes": len(nodes),
         "edges": len(edges),
-    }
+    }, revision)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -181,13 +210,3 @@ def _normalize_edge(e: dict) -> dict:
     if "to" in result and "toNode" not in result:
         result["toNode"] = result.pop("to")
     return result
-
-
-def _write_canvas_atomic(target, data: dict) -> None:
-    tmp = target.parent / f".tmp-{uuid.uuid4().hex}.canvas"
-    try:
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, target)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise

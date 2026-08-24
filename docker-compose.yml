@@ -1,6 +1,8 @@
 services:
   obsidian-mcp:
     image: ghcr.io/ykoellmann/obsidian-mcp:latest
+    # Inherits the image's /health HEALTHCHECK (including its startup grace
+    # period); duplicating it here would create two sources of truth.
     # To build locally instead: comment out 'image' and uncomment 'build'
     # build: .
     restart: unless-stopped
@@ -9,9 +11,21 @@ services:
       - TRANSPORT=http
       - HOST=${HOST:-0.0.0.0}
       - PORT=${PORT:-8000}
-      - READ_ONLY=${READ_ONLY:-false}
+      # Network deployments default to read-only. Opt into writes explicitly,
+      # preferably together with a narrow slash-suffixed WRITE_PATHS scope.
+      - READ_ONLY=${READ_ONLY:-true}
+      - READ_PATHS=${READ_PATHS:-}
       - WRITE_PATHS=${WRITE_PATHS:-}
-      - EXCLUDE_PATHS=${EXCLUDE_PATHS:-private,.obsidian}
+      - DENY_READ_PATHS=${DENY_READ_PATHS:-.obsidian/,.trash/}
+      - DENY_WRITE_PATHS=${DENY_WRITE_PATHS:-.obsidian/,.trash/,_AI_INSTRUCTIONS.md}
+      - ALLOW_PERMANENT_DELETE=${ALLOW_PERMANENT_DELETE:-false}
+      - MAX_ATTACHMENT_BYTES=${MAX_ATTACHMENT_BYTES:-26214400}
+      - REQUIRE_WRITE_PRECONDITIONS=${REQUIRE_WRITE_PRECONDITIONS:-true}
+      - WATCHER_DEBOUNCE_MS=${WATCHER_DEBOUNCE_MS:-100}
+      - INDEX_RECONCILE_INTERVAL=${INDEX_RECONCILE_INTERVAL:-900}
+      - LOCK_PATH=${LOCK_PATH:-/data/locks}
+      - AUDIT_LOG_PATH=${AUDIT_LOG_PATH:-/data/audit.jsonl}
+      - EXCLUDE_PATHS=${EXCLUDE_PATHS:-private/,.obsidian/,.trash/}
       - TOOL_PROFILE=${TOOL_PROFILE:-full}
       # Optional plugin-format tool groups — each disabled by default (opt-in).
       # See .env.example for details.
@@ -19,6 +33,10 @@ services:
       - ENABLE_EXCALIDRAW=${ENABLE_EXCALIDRAW:-false}
       - ENABLE_KANBAN=${ENABLE_KANBAN:-false}
       - ENABLE_BASES=${ENABLE_BASES:-false}
+      - ENABLE_MOVE=${ENABLE_MOVE:-false}
+      - ENABLE_FOLDER_RENAME=${ENABLE_FOLDER_RENAME:-false}
+      - ENABLE_BULK_REPLACE=${ENABLE_BULK_REPLACE:-false}
+      - ENABLE_DELETE=${ENABLE_DELETE:-false}
       - API_KEY=${API_KEY:-}
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
       # Optional second auth variant for the claude.ai Custom Connector (OAuth-only).
@@ -26,21 +44,19 @@ services:
       - OAUTH_GITHUB_CLIENT_ID=${OAUTH_GITHUB_CLIENT_ID:-}
       - OAUTH_GITHUB_CLIENT_SECRET=${OAUTH_GITHUB_CLIENT_SECRET:-}
       - OAUTH_GITHUB_ALLOWED_LOGINS=${OAUTH_GITHUB_ALLOWED_LOGINS:-}
-      # Only needed if OAUTH_GITHUB_* above is set: persists OAuth logins
-      # across container restarts (mount fastmcp-data below to use it).
-      - FASTMCP_HOME=${FASTMCP_HOME:-}
+      # OAuth state persists inside the /data volume mounted below.
+      - FASTMCP_HOME=${FASTMCP_HOME:-/data/fastmcp}
       # Multiple isolated vaults instead of one: set this (and mount both
       # the config file and every vault path it references below), which
-      # makes VAULT_PATH/WRITE_PATHS/EXCLUDE_PATHS/API_KEY/
-      # OAUTH_GITHUB_ALLOWED_LOGINS above unused. See README "Multi-Vault
+      # makes the path-policy and identity settings above come from that
+      # file. See README "Multi-Vault
       # Setup" and vaults.json.example. Leave unset for the single-vault
       # setup this file uses by default.
       - VAULTS_CONFIG=${VAULTS_CONFIG:-}
     volumes:
       - ${HOST_VAULT_PATH}:/vault
-      # Uncomment if OAUTH_GITHUB_* is configured, to keep claude.ai logged in
-      # across container restarts:
-      # - fastmcp-data:/data/fastmcp
+      # Keep application state and locks outside the synced vault.
+      - mcp-data:/data
       # Multi-vault (see VAULTS_CONFIG above): mount the config file itself
       # plus every vault path it references, e.g.:
       # - ./vaults.json:/data/vaults.json:ro
@@ -49,6 +65,5 @@ services:
     ports:
       - "8000:8000"
 
-# Uncomment alongside the volume above:
-# volumes:
-#   fastmcp-data:
+volumes:
+  mcp-data:
