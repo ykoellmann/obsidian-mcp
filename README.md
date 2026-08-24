@@ -78,7 +78,7 @@ VAULT_PATH=/path/to/your/obsidian/vault
 # REQUIRE_WRITE_PRECONDITIONS=true # require read revision before full overwrite
 # INDEX_RECONCILE_INTERVAL=900     # full Markdown hash sweep every 15 minutes
 # TRANSPORT=stdio           # stdio (default), http (recommended for network use), or sse (legacy)
-# TOOL_PROFILE=focused      # smaller tool list for common agent workflows
+# TOOL_PROFILE=full         # opt into the larger compatibility surface
 ```
 
 Slash-suffixed policy entries such as `Notes/` cover that directory and its
@@ -147,10 +147,7 @@ for the two auth variants in detail.
 
 ### Tool profiles
 
-`TOOL_PROFILE=full` is the default and permits all 48 base tools. The separate
-high-impact mutation gates described below leave 40 registered by default.
-For a headless Markdown memory or writing deployment, `TOOL_PROFILE=focused`
-is the recommended starting point. It permits these 33 base tools (31 are
+`TOOL_PROFILE=focused` is the default. It permits these 33 base tools (31 are
 registered by default; move and folder rename still require their flags):
 
 ```text
@@ -165,6 +162,10 @@ get_vault_stats_tool, list_all_tags_tool, list_templates_tool,
 create_from_template_tool, list_attachments_tool, read_attachment_tool,
 add_attachment_tool, create_attachment_token_tool
 ```
+
+Set `TOOL_PROFILE=full` to opt into the larger compatibility surface. It
+permits all 48 base tools; the separate high-impact mutation gates described
+below leave 40 registered unless explicitly enabled.
 
 The focused profile hides uncommon administrative, destructive, batch, audit,
 rendered-read, and alias convenience tools; their Python implementations and

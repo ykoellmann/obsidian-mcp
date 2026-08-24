@@ -84,19 +84,19 @@ async def _tool_names(server) -> set[str]:
 
 
 @pytest.mark.asyncio
-async def test_default_full_profile_has_exact_surface(monkeypatch):
+async def test_default_focused_profile_has_exact_surface(monkeypatch):
     monkeypatch.delenv("TOOL_PROFILE", raising=False)
     for name in _PROFILE_ENV:
         if name != "TOOL_PROFILE":
             monkeypatch.delenv(name, raising=False)
     server = importlib.reload(server_mod)
-    assert await _tool_names(server) == DEFAULT_FULL_TOOL_NAMES
+    assert await _tool_names(server) == DEFAULT_FOCUSED_TOOL_NAMES
 
 
 @pytest.mark.asyncio
-async def test_focused_profile_has_exact_documented_surface(monkeypatch):
-    server = _reload_server(monkeypatch, "focused")
-    assert await _tool_names(server) == DEFAULT_FOCUSED_TOOL_NAMES
+async def test_explicit_full_profile_has_exact_documented_surface(monkeypatch):
+    server = _reload_server(monkeypatch, "full")
+    assert await _tool_names(server) == DEFAULT_FULL_TOOL_NAMES
 
 
 @pytest.mark.asyncio

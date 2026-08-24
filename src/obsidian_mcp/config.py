@@ -27,7 +27,7 @@ class ConfigError(Exception):
 
 def get_tool_profile() -> str:
     """Read and validate TOOL_PROFILE without requiring vault settings."""
-    value = os.environ.get("TOOL_PROFILE", "full").strip().lower()
+    value = os.environ.get("TOOL_PROFILE", "focused").strip().lower()
     if value not in ("full", "focused"):
         raise ConfigError(
             f"Invalid TOOL_PROFILE={value!r}; expected 'full' or 'focused'"

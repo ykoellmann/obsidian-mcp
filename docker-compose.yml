@@ -26,7 +26,7 @@ services:
       - LOCK_PATH=${LOCK_PATH:-/data/locks}
       - AUDIT_LOG_PATH=${AUDIT_LOG_PATH:-/data/audit.jsonl}
       - EXCLUDE_PATHS=${EXCLUDE_PATHS:-private/,.obsidian/,.trash/}
-      - TOOL_PROFILE=${TOOL_PROFILE:-full}
+      - TOOL_PROFILE=${TOOL_PROFILE:-focused}
       # Optional plugin-format tool groups — each disabled by default (opt-in).
       # See .env.example for details.
       - ENABLE_CANVAS=${ENABLE_CANVAS:-false}

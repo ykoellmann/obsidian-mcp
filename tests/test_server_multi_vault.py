@@ -12,7 +12,7 @@ import obsidian_mcp.config as cfg_mod
 from obsidian_mcp import server as server_mod
 from obsidian_mcp.config import Config
 from obsidian_mcp.server import (
-    _DEFAULT_INSTRUCTIONS,
+    _FOCUSED_INSTRUCTIONS,
     VaultResolutionMiddleware,
     _APIKeyAuthProvider,
     _identities_from_env,
@@ -86,7 +86,7 @@ def test_shared_server_instructions_do_not_expose_default_vault_conventions(
 
     instructions = _load_instructions()
 
-    assert instructions == _DEFAULT_INSTRUCTIONS
+    assert instructions == _FOCUSED_INSTRUCTIONS
     assert "private default-vault instructions" not in instructions
 
 

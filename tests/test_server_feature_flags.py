@@ -45,6 +45,8 @@ _HIGH_RISK_TOOLS = {
 def _reload_server(monkeypatch, **flags: bool):
     for name in _FLAG_ENV:
         monkeypatch.delenv(name, raising=False)
+    # These tests isolate feature-gate behavior from profile filtering.
+    monkeypatch.setenv("TOOL_PROFILE", "full")
     for group, enabled in flags.items():
         monkeypatch.setenv(f"ENABLE_{group.upper()}", "true" if enabled else "false")
     cfg_mod._config = None

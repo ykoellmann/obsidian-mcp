@@ -25,16 +25,13 @@ The first change should reduce what the model sees without rewriting the
 underlying, tested capabilities or replacing several clear tools with one
 large schema full of conditionally valid arguments.
 
-The recommended first implementation is an opt-in `focused` tool profile
-containing a deliberately selected set of existing, intent-oriented tools.
-The existing 48-tool surface remains the default `full` profile for backward
-compatibility. Operators can therefore evaluate the smaller surface without
-breaking existing clients, and the internal Python functions remain available
-for later consolidation.
+The implementation uses a default `focused` tool profile containing a
+deliberately selected set of existing, intent-oriented tools. Operators can
+set `TOOL_PROFILE=full` for the larger compatibility surface, and the internal
+Python functions remain available for later consolidation.
 
-This is deliberately narrower than a v2 API redesign. A subsequent major
-version may make the focused profile the default and remove true aliases, but
-only after the smaller surface has been exercised with real agents.
+This is deliberately narrower than a v2 API redesign: it changes advertised
+defaults without removing underlying implementations or true aliases.
 
 ## Goals
 
@@ -113,13 +110,13 @@ file primitives:
 Add one setting:
 
 ```dotenv
-TOOL_PROFILE=full
+TOOL_PROFILE=focused
 ```
 
 Accepted values:
 
-- `full` (default): preserve the current registered surface exactly.
-- `focused`: register the intentionally curated core below.
+- `focused` (default): register the intentionally curated core below.
+- `full`: permit the larger compatibility surface.
 
 Unknown values must fail at startup with a clear configuration error. There
 should not be a growing collection of per-tool environment flags. The four
@@ -127,9 +124,8 @@ existing optional format flags remain independent: if enabled, their tools
 are added to either profile because an operator explicitly requested those
 formats.
 
-Keeping `full` as the default makes this a backward-compatible release. The
-home-server deployment can explicitly choose `focused`; a future major
-version can consider changing the default after field experience.
+Changing the default is a public tool-discovery migration. Existing clients
+that require the larger surface can explicitly set `TOOL_PROFILE=full`.
 
 ### Proposed focused profile
 
@@ -278,8 +274,8 @@ that contradicts the advertised tool list.
 
 Add tests that verify:
 
-1. The default remains `full` and has the exact pre-change base tool set.
-2. `focused` has exactly the documented expected base tool set.
+1. The default is `focused` and has the exact documented base tool set.
+2. Explicit `full` has the documented compatibility tool set.
 3. The three true aliases are absent from `focused` and present in `full`.
 4. Unknown profiles fail clearly at startup/import.
 5. Each optional format flag adds only its own group under both profiles.
@@ -348,9 +344,8 @@ branch prototype actual consolidation:
 
 ## Documentation and migration
 
-- Document the current default explicitly: `TOOL_PROFILE=full`.
-- Show `TOOL_PROFILE=focused` as the recommended starting point for a
-  headless Markdown memory/output deployment.
+- Document the current default explicitly: `TOOL_PROFILE=focused`.
+- Show `TOOL_PROFILE=full` as the opt-in compatibility surface.
 - Include the exact focused tool list and explain how optional format flags
   add to it.
 - State that profiles reduce model-visible tools but do not grant or revoke
@@ -358,13 +353,12 @@ branch prototype actual consolidation:
 - Add a short troubleshooting note: if a documented capability is missing,
   inspect `TOOL_PROFILE` and the relevant optional-format flag, then reconnect
   the MCP client so it refreshes `tools/list`.
-- If a future major version changes the default, announce it as a public API
-  migration rather than silently altering the tool list.
+- Announce the changed default as a public tool-discovery migration.
 
 ## Acceptance criteria
 
-- A clean install with no new setting exposes the same base tools as v1.2.0.
-- `TOOL_PROFILE=focused` exposes exactly the documented base tool set.
+- A clean install exposes exactly the documented focused base tool set.
+- `TOOL_PROFILE=full` exposes the documented compatibility base tool set.
 - No underlying capability or existing full-profile tool schema changes in
   the first implementation.
 - Focused instructions and prompts reference only tools the client can see.
