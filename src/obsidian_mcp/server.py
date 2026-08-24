@@ -415,8 +415,6 @@ read-only mode, authentication, and path permissions remain authoritative.
 
 
 def _load_instructions() -> str:
-    if _tool_profile == "focused":
-        return _FOCUSED_INSTRUCTIONS
     try:
         cfg = get_config()
         instructions_file = cfg.vault_path / "_AI_INSTRUCTIONS.md"
@@ -424,6 +422,8 @@ def _load_instructions() -> str:
             return instructions_file.read_text(encoding="utf-8")
     except Exception:
         pass
+    if _tool_profile == "focused":
+        return _FOCUSED_INSTRUCTIONS
     return _DEFAULT_INSTRUCTIONS
 
 

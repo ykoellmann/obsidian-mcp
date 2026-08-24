@@ -125,6 +125,16 @@ async def test_focused_instructions_only_reference_visible_tools(monkeypatch):
     assert referenced <= names
 
 
+def test_focused_profile_preserves_vault_instructions(monkeypatch, tmp_path):
+    instructions = "Vault-specific instructions"
+    (tmp_path / "_AI_INSTRUCTIONS.md").write_text(instructions, encoding="utf-8")
+    monkeypatch.setenv("VAULT_PATH", str(tmp_path))
+
+    server = _reload_server(monkeypatch, "focused")
+
+    assert server.mcp.instructions == instructions
+
+
 @pytest.mark.asyncio
 async def test_focused_tool_descriptions_only_reference_visible_tools(monkeypatch):
     server = _reload_server(monkeypatch, "focused")
@@ -167,8 +177,12 @@ def test_hidden_tools_remain_directly_callable(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _restore_default_server():
+    saved = {name: os.environ.get(name) for name in _PROFILE_ENV}
     yield
-    for name in _PROFILE_ENV:
-        os.environ.pop(name, None)
+    for name, value in saved.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
     cfg_mod._config = None
     importlib.reload(server_mod)
