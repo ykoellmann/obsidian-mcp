@@ -294,6 +294,10 @@ VAULTS_CONFIG=/data/vaults.json
 TRANSPORT=http
 ```
 
+Multi-vault mode requires an authenticated network transport (`http`, `sse`,
+or `streamable-http`). It cannot be used with `stdio`, because stdio has no
+authenticated request identity to map to a vault.
+
 Each `identities` entry is either an **API key** (`Authorization: Bearer
 <value>`, same as [Option A](#option-a-api-key-claude-code-claude-desktop-curl-mcp-remote)
 above) or a **GitHub login** (same allowlist mechanism as
@@ -351,7 +355,14 @@ Create `_AI_INSTRUCTIONS.md` in your vault root to teach the AI how your specifi
 - Every note needs a created: date in frontmatter
 ```
 
-The server loads this file at startup and sends it to the AI as system instructions. Without it, built-in generic Obsidian syntax guidance is used. The `_AI_INSTRUCTIONS.md` is the right place for everything vault-specific — folder layout, tag schema, naming conventions, and any workflow rules.
+In single-vault mode, the server loads this file at startup and sends it to
+the AI as system instructions. Without it, built-in generic Obsidian syntax
+guidance is used. Multi-vault servers always use the generic startup
+instructions because MCP server instructions are shared by every identity;
+use `get_vault_conventions_tool(vault=...)` to load the selected vault's
+conventions after authorization. The `_AI_INSTRUCTIONS.md` is the right place
+for everything vault-specific — folder layout, tag schema, naming conventions,
+and any workflow rules.
 
 ## Tool Reference
 
