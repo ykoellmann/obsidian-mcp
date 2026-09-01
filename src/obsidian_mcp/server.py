@@ -10,6 +10,7 @@ import threading
 from dataclasses import dataclass
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ResourceError
 from fastmcp.server.auth import AccessToken, AuthProvider, MultiAuth, TokenVerifier
 from fastmcp.server.auth.providers.github import GitHubProvider
 from fastmcp.server.dependencies import get_access_token
@@ -1764,8 +1765,14 @@ def vault_note_resource(path: str) -> str:
     """Raw content of a vault note — use as context without calling a tool."""
     try:
         return VaultStorage.from_config().read_text(path)
-    except (ConfigError, FileNotFoundError, PermissionError, VaultPathError, OSError):
-        return ""
+    except FileNotFoundError as exc:
+        raise ResourceError("Vault note not found") from exc
+    except (ReadPermissionError, PermissionError) as exc:
+        raise ResourceError("Access denied for vault note") from exc
+    except VaultPathError as exc:
+        raise ResourceError("Invalid vault note path") from exc
+    except (ConfigError, OSError) as exc:
+        raise ResourceError("Unable to read vault note") from exc
 
 
 @mcp.resource("vault://stats")

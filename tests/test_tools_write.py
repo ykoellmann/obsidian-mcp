@@ -236,8 +236,15 @@ def test_patch_note_text_missing_note_raises(vault_factory):
 
 # ── delete_note ───────────────────────────────────────────────────────────
 
-def test_delete_note_to_trash(tmp_path, vault_factory):
+def test_delete_note_to_trash_is_narrow_exception_to_denied_write(
+    tmp_path, vault_factory, monkeypatch
+):
+    monkeypatch.setenv("DENY_WRITE_PATHS", ".trash/")
     vault_factory({"note.md": "content"})
+
+    with pytest.raises(WritePermissionError, match="protected"):
+        write_note(".trash/direct.md", "blocked")
+
     result = delete_note("note.md", trash=True)
     assert result["status"] == "deleted"
     assert not (tmp_path / "note.md").exists()

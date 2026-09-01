@@ -6,6 +6,7 @@ import base64
 
 import httpx
 import pytest
+from fastmcp.exceptions import ResourceError
 
 import obsidian_mcp.config as cfg_mod
 from obsidian_mcp import server
@@ -136,11 +137,21 @@ def test_every_read_group_rejects_denied_path(name, operation, tmp_path, vault_f
 
 
 def test_list_notes_and_resources_never_expose_denied_content(tmp_path, vault_factory, monkeypatch):
-    vault_factory({"denied/secret.md": "secret", "allowed/public.md": "public"})
+    vault_factory(
+        {
+            "denied/secret.md": "secret",
+            "allowed/public.md": "public",
+            "allowed/empty.md": "",
+        }
+    )
     _configure_scoped_policy(monkeypatch, tmp_path.parent / f"{tmp_path.name}-locks")
 
-    assert list_notes() == ["allowed/public.md"]
-    assert server.vault_note_resource("denied/secret.md") == ""
+    assert list_notes() == ["allowed/empty.md", "allowed/public.md"]
+    assert server.vault_note_resource("allowed/empty.md") == ""
+    with pytest.raises(ResourceError, match="Access denied"):
+        server.vault_note_resource("denied/secret.md")
+    with pytest.raises(ResourceError, match="not found"):
+        server.vault_note_resource("allowed/missing.md")
 
 
 @pytest.mark.asyncio
