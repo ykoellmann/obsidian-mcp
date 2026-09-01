@@ -78,7 +78,7 @@ VAULT_PATH=/path/to/your/obsidian/vault
 # REQUIRE_WRITE_PRECONDITIONS=true # require read revision before full overwrite
 # INDEX_RECONCILE_INTERVAL=900     # full Markdown hash sweep every 15 minutes
 # TRANSPORT=stdio           # stdio (default), http (recommended for network use), or sse (legacy)
-# TOOL_PROFILE=full         # opt into the larger compatibility surface
+# TOOL_PROFILE=focused      # opt into the smaller curated tool surface
 ```
 
 Slash-suffixed policy entries such as `Notes/` cover that directory and its
@@ -149,8 +149,14 @@ for the two auth variants in detail.
 
 ### Tool profiles
 
-`TOOL_PROFILE=focused` is the default. It permits these 33 base tools (31 are
-registered by default; move and folder rename still require their flags):
+`TOOL_PROFILE=full` is the compatibility default. It permits all 48 base tools;
+the separate high-impact mutation gates described below leave 40 registered
+unless explicitly enabled. Existing name-based clients therefore keep helpers
+such as `get_daily_note_tool` without an additional profile setting.
+
+Set `TOOL_PROFILE=focused` to opt into the smaller curated surface. It permits
+these 33 base tools (31 are registered by default; move and folder rename still
+require their flags):
 
 ```text
 list_vaults_tool, get_vault_conventions_tool, list_notes_tool,
@@ -165,17 +171,20 @@ create_from_template_tool, list_attachments_tool, read_attachment_tool,
 add_attachment_tool, create_attachment_token_tool
 ```
 
-Set `TOOL_PROFILE=full` to opt into the larger compatibility surface. It
-permits all 48 base tools; the separate high-impact mutation gates described
-below leave 40 registered unless explicitly enabled.
-
 The focused profile hides uncommon administrative, destructive, batch, audit,
 rendered-read, and alias convenience tools; their Python implementations and
 the full profile remain available. Profiles only reduce what the model sees:
 `READ_ONLY`, authentication, `WRITE_PATHS`, and `EXCLUDE_PATHS` still control
 access. Each explicitly enabled optional format group is added to either
 profile. High-impact feature gates and profiles intersect: enabling a tool
-does not expose it if the selected profile also hides it.
+does not expose it if the selected profile also hides it. In particular,
+`ENABLE_DELETE` and `ENABLE_BULK_REPLACE` require `TOOL_PROFILE=full`, while
+move and folder rename are permitted by either profile when enabled.
+
+Clients intentionally switching to focused should replace
+`get_daily_note_tool(date=...)` with
+`get_periodic_note_tool(period="daily", date=...)` and migrate any other hidden
+compatibility helpers before reconnecting.
 
 If a documented capability is missing, check `TOOL_PROFILE` and the relevant
 `ENABLE_*` flag, then reconnect the MCP client so it refreshes
@@ -198,8 +207,8 @@ If a documented capability is missing, check `TOOL_PROFILE` and the relevant
 # High-impact mutations are absent from the MCP tool list unless enabled.
 # ENABLE_MOVE=true             # move_note_tool
 # ENABLE_FOLDER_RENAME=true    # rename_folder_tool
-# ENABLE_BULK_REPLACE=true     # find_replace_in_vault_tool
-# ENABLE_DELETE=true           # delete_note_tool and delete_folder_tool
+# ENABLE_BULK_REPLACE=true     # find_replace_in_vault_tool (full profile only)
+# ENABLE_DELETE=true           # delete/trash tools (full profile only)
 ```
 
 Each defaults to `false`. A disabled group's tools aren't just refused at
@@ -207,9 +216,10 @@ call time — they're never registered, so they don't appear in the tool list
 at all.
 
 The high-impact mutation groups are similarly opt-in: set `ENABLE_MOVE`,
-`ENABLE_FOLDER_RENAME`, `ENABLE_BULK_REPLACE`, or `ENABLE_DELETE` to register
-the corresponding tools. Their underlying Python functions remain available
-for local/unit-test use and future transactional implementations.
+`ENABLE_FOLDER_RENAME`, `ENABLE_BULK_REPLACE`, or `ENABLE_DELETE` to permit
+registration of the corresponding tools. Bulk replacement and delete/trash
+also require the full profile. Their underlying Python functions remain
+available for local/unit-test use and future transactional implementations.
 
 ## Usage with Claude Code
 

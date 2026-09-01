@@ -85,9 +85,9 @@ async def _tool_names(server) -> set[str]:
 
 
 @pytest.mark.asyncio
-async def test_default_focused_profile_has_exact_surface(monkeypatch):
+async def test_default_profile_has_exact_full_surface(monkeypatch):
     server = _reload_server(monkeypatch, profile=None)
-    assert await _tool_names(server) == DEFAULT_FOCUSED_TOOL_NAMES
+    assert await _tool_names(server) == DEFAULT_FULL_TOOL_NAMES
 
 
 @pytest.mark.asyncio

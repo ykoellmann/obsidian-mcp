@@ -20,9 +20,9 @@ from obsidian_mcp.storage.locking import acquire_lock
 from obsidian_mcp.storage.policy import VaultAccessPolicy
 
 
-def test_tool_profile_defaults_to_focused(monkeypatch):
+def test_tool_profile_defaults_to_full(monkeypatch):
     monkeypatch.delenv("TOOL_PROFILE", raising=False)
-    assert get_tool_profile() == "focused"
+    assert get_tool_profile() == "full"
 
 
 def test_tool_profile_rejects_unknown_value_without_vault(monkeypatch):

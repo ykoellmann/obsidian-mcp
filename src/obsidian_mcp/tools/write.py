@@ -531,14 +531,14 @@ def move_note(from_path: str, to_path: str, index: VaultIndex | None = None) -> 
 
     # Collect and lock all files we'll touch
     locks = []
-    files_to_rewrite: list[tuple[str, str]] = []
+    files_to_rewrite: list[tuple[str, str, str]] = []
 
     for candidate in all_md:
         rel = candidate.relative
         if rel == from_path:
             continue
         try:
-            raw = _storage().read_text(rel)
+            raw, revision = storage.read_text_with_revision(rel)
         except Exception:
             continue
         if link_re.search(raw):
@@ -546,17 +546,23 @@ def move_note(from_path: str, to_path: str, index: VaultIndex | None = None) -> 
             # path so a restricted move cannot partially mutate the vault
             # before discovering an out-of-scope note.
             _check_write_permission(rel)
-            files_to_rewrite.append((rel, raw))
+            files_to_rewrite.append((rel, raw, revision.token))
 
     try:
-        for rel, _ in files_to_rewrite:
+        for rel, _, _ in files_to_rewrite:
             locks.append(acquire_lock(rel, lock_path=cfg.lock_path))
         locks.append(acquire_lock(from_path, lock_path=cfg.lock_path))
 
+        _require_current_revisions(
+            storage, [(rel, revision) for rel, _, revision in files_to_rewrite]
+        )
+
         # Rewrite links
-        for rel, raw in files_to_rewrite:
+        for rel, raw, expected_revision in files_to_rewrite:
             rewritten = link_re.sub(lambda m: f"[[{to_stem}{m.group(2)}]]", raw)
-            storage.write_text_atomic(rel, rewritten)
+            storage.write_text_atomic(
+                rel, rewritten, expected_revision=expected_revision
+            )
             updated_files.append(rel)
 
         # Move the file through the same policy gateway.
@@ -572,6 +578,19 @@ def move_note(from_path: str, to_path: str, index: VaultIndex | None = None) -> 
             index.update(rel)
 
     return {"from": from_path, "to": to_path, "updated_links_in": updated_files}
+
+
+def _require_current_revisions(
+    storage: VaultStorage, expected_revisions: list[tuple[str, str]]
+) -> None:
+    """Reject a multi-file plan if any scanned note changed before mutation."""
+    for path, expected_revision in expected_revisions:
+        try:
+            current = storage.revision(path)
+        except FileNotFoundError:
+            raise RevisionConflictError(path, expected_revision, None) from None
+        if current.token != expected_revision:
+            raise RevisionConflictError(path, expected_revision, current)
 
 
 def _is_writable(rel_path: str) -> bool:
@@ -695,7 +714,7 @@ def find_replace_in_vault(
     else:
         pattern = re.compile(re.escape(search))
 
-    candidates: list[tuple[str, str, int]] = []
+    candidates: list[tuple[str, str, int, str]] = []
     skipped_write_protected: list[str] = []
     for candidate in storage.list_files(folder):
         rel = candidate.relative
@@ -704,7 +723,7 @@ def find_replace_in_vault(
         if _is_excluded(rel, cfg.exclude_paths) or Path(rel).parts[0] == ".trash":
             continue
         try:
-            raw = storage.read_text(rel)
+            raw, revision = storage.read_text_with_revision(rel)
         except Exception:
             continue
         count = len(pattern.findall(raw))
@@ -713,16 +732,16 @@ def find_replace_in_vault(
         if not _is_writable(rel):
             skipped_write_protected.append(rel)
             continue
-        candidates.append((rel, raw, count))
+        candidates.append((rel, raw, count, revision.token))
 
     if dry_run:
         return {
             "dry_run": True,
             "matches": [
                 {"path": rel, "match_count": count, "preview": _match_snippets(raw, pattern)}
-                for rel, raw, count in candidates
+                for rel, raw, count, _ in candidates
             ],
-            "total_matches": sum(count for *_, count in candidates),
+            "total_matches": sum(count for _, _, count, _ in candidates),
             "skipped_write_protected": skipped_write_protected,
         }
 
@@ -736,12 +755,19 @@ def find_replace_in_vault(
 
     locks = []
     try:
-        for rel, _, _ in candidates:
+        for rel, _, _, _ in candidates:
             locks.append(acquire_lock(rel, lock_path=cfg.lock_path))
+        _require_current_revisions(
+            storage, [(rel, revision) for rel, _, _, revision in candidates]
+        )
         replaced_in: list[str] = []
         total = 0
-        for rel, raw, count in candidates:
-            storage.write_text_atomic(rel, pattern.sub(replace, raw))
+        for rel, raw, count, expected_revision in candidates:
+            storage.write_text_atomic(
+                rel,
+                pattern.sub(replace, raw),
+                expected_revision=expected_revision,
+            )
             replaced_in.append(rel)
             total += count
     finally:

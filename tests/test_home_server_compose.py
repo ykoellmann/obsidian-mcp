@@ -22,6 +22,7 @@ def test_home_server_compose_has_read_only_vault_and_nested_write_overlays():
     assert service["environment"]["WRITE_PATHS"] == "${AI_MEMORY_PATH:-AI-Memory}/,${AI_OUTPUT_PATH:-AI-Output}/"
     assert service["environment"]["DENY_WRITE_PATHS"] == ".obsidian/,.trash/,_AI_INSTRUCTIONS.md"
     assert service["environment"]["EXCLUDE_PATHS"] == "private/,.obsidian/,.trash/"
+    assert service["environment"]["TOOL_PROFILE"] == "focused"
     for flag in ("ENABLE_MOVE", "ENABLE_FOLDER_RENAME", "ENABLE_BULK_REPLACE"):
         assert service["environment"][flag] == "${" + flag + ":-false}"
     assert service["environment"]["ENABLE_DELETE"] == "false"
@@ -49,6 +50,7 @@ def test_generic_compose_defaults_to_read_only_and_persistent_fastmcp_home():
     assert "READ_ONLY=${READ_ONLY:-true}" in environment
     assert "FASTMCP_HOME=${FASTMCP_HOME:-/data/fastmcp}" in environment
     assert "REQUIRE_WRITE_PRECONDITIONS=${REQUIRE_WRITE_PRECONDITIONS:-true}" in environment
+    assert "TOOL_PROFILE=${TOOL_PROFILE:-full}" in environment
 
 
 def test_compose_services_inherit_image_healthcheck_with_startup_grace():
