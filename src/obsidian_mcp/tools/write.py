@@ -1,37 +1,37 @@
 from __future__ import annotations
 
 import difflib
-import os
 import re
-import uuid
 from pathlib import Path
 
 import yaml
 
 from ..config import get_config
 from ..domain.index import VaultIndex
-from ..storage.filesystem import validate_path, write_file_atomic
+from ..domain.models import (
+    PreconditionRequiredError,
+    RevisionConflictError,
+    normalize_revision_token,
+)
+from ..storage.filesystem import VaultStorage
 from ..storage.locking import acquire_lock
+from ..storage.policy import ReadPermissionError, WritePermissionError
+from ..storage.revisions import read_text_for_update, revision_result
 from .read import _is_excluded
 
 
-class WritePermissionError(Exception):
-    pass
+def _storage() -> VaultStorage:
+    return VaultStorage.from_config()
 
 
 def _check_write_permission(relative_path: str) -> None:
-    cfg = get_config()
-    if cfg.read_only:
-        raise WritePermissionError("Server is in read-only mode")
-    if cfg.write_paths:
-        allowed = any(
-            relative_path.startswith(wp.rstrip("/") + "/") or relative_path == wp
-            for wp in cfg.write_paths
-        )
-        if not allowed:
-            raise WritePermissionError(
-                f"Path {relative_path!r} is not in WRITE_PATHS: {cfg.write_paths}"
-            )
+    _storage().resolve_write(relative_path)
+
+
+def _require_note_path(path: str) -> str:
+    if not path.lower().endswith(".md"):
+        raise ValueError("Note paths must end in .md")
+    return path
 
 
 def _unified_diff(before: str, after: str, path: str) -> str:
@@ -53,6 +53,8 @@ def write_note(
     content: str,
     index: VaultIndex | None = None,
     dry_run: bool = False,
+    expected_revision: str | None = None,
+    create_only: bool = False,
 ) -> dict:
     """Write (create or overwrite) a note.
 
@@ -65,18 +67,28 @@ def write_note(
     unified diff against the current file) without writing anything —
     check the preview before setting dry_run=False.
     """
-    cfg = get_config()
-    validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
+    _require_note_path(path)
+    storage = _storage()
+    target = storage.resolve_write(path)
+    path = target.relative
+    if not storage.policy.can_read(path):
+        raise ReadPermissionError(
+            "write_note requires read access to determine whether the target exists, "
+            "preserve frontmatter, and calculate its diff"
+        )
 
-    full_path_obj = cfg.vault_path / path
-    full_path = str(full_path_obj)
-    lock = acquire_lock(full_path)
+    lock = acquire_lock(path, lock_path=get_config().lock_path)
     try:
-        before = full_path_obj.read_text(encoding="utf-8") if full_path_obj.exists() else ""
+        exists = storage.exists(path, read=True)
+        if exists:
+            before, current_revision = read_text_for_update(storage, path, expected_revision)
+        else:
+            if expected_revision is not None:
+                raise RevisionConflictError(path, expected_revision, None)
+            before, current_revision = "", None
 
         frontmatter_preserved = False
-        if not _FM_RE.match(content) and full_path_obj.exists():
+        if not _FM_RE.match(content) and before:
             existing_fm, _ = _parse_frontmatter(before)
             if existing_fm:
                 content = _serialize_frontmatter(existing_fm, content)
@@ -91,21 +103,34 @@ def write_note(
                 "frontmatter_preserved": frontmatter_preserved,
                 "preview": content,
                 "diff": diff,
+                "revision": current_revision,
             }
 
-        write_file_atomic(cfg.vault_path, path, content)
+        if (
+            exists
+            and not create_only
+            and get_config().require_write_preconditions
+            and expected_revision is None
+        ):
+            raise PreconditionRequiredError(path)
+        revision = storage.write_text_atomic(
+            path,
+            content,
+            expected_revision=current_revision,
+            create_only=create_only or not exists,
+        )
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {
+    return revision_result({
         "path": path,
         "status": "written",
         "frontmatter_preserved": frontmatter_preserved,
         "diff": diff,
-    }
+    }, revision)
 
 
 def patch_note(
@@ -115,32 +140,36 @@ def patch_note(
     mode: str = "replace",
     target_type: str = "heading",
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Edit a note section or block reference.
 
     mode: 'replace' | 'insert_before' | 'insert_after' | 'append'
     target_type: 'heading' | 'block_ref'
     """
-    cfg = get_config()
-    validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
+    _require_note_path(path)
+    target = _storage().resolve_write(path)
+    path = target.relative
 
-    full_path = str(cfg.vault_path / path)
-    lock = acquire_lock(full_path)
+    lock = acquire_lock(path, lock_path=get_config().lock_path)
     try:
-        raw = (cfg.vault_path / path).read_text(encoding="utf-8")
+        storage = _storage()
+        raw, current_revision = read_text_for_update(storage, path, expected_revision)
         if target_type == "block_ref":
             patched = _patch_block_ref(raw, section, new_content, mode)
         else:
             patched = _patch_section(raw, section, new_content, mode)
-        write_file_atomic(cfg.vault_path, path, patched)
+        revision = storage.write_text_atomic(path, patched, expected_revision=current_revision)
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "patched", "mode": mode, "target_type": target_type}
+    return revision_result(
+        {"path": path, "status": "patched", "mode": mode, "target_type": target_type},
+        revision,
+    )
 
 
 def _find_section_bounds(content: str, heading: str) -> tuple[int, int, int, int]:
@@ -186,27 +215,29 @@ def _patch_block_ref(content: str, block_id: str, new_content: str, mode: str) -
     raise ValueError(f"Unknown mode: {mode!r}")
 
 
-def delete_note(path: str, trash: bool = True, index: VaultIndex | None = None) -> dict:
+def delete_note(
+    path: str,
+    trash: bool = True,
+    index: VaultIndex | None = None,
+    expected_revision: str | None = None,
+) -> dict:
     """Delete a note. trash=True moves it to .trash/ in the vault root."""
     cfg = get_config()
-    validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
-
-    full_path = cfg.vault_path / path
-    if not full_path.exists():
-        raise FileNotFoundError(f"Note not found: {path!r}")
-
-    lock = acquire_lock(str(full_path))
+    _require_note_path(path)
+    target = _storage().resolve_delete(path, permanent=not trash)
+    path = target.relative
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
+        storage = _storage()
+        current = storage.revision(path, read=False)
+        if expected_revision is not None and current.token != normalize_revision_token(expected_revision):
+            raise RevisionConflictError(path, expected_revision, current)
+        if cfg.require_write_preconditions and expected_revision is None:
+            raise PreconditionRequiredError(path)
         if trash:
-            trash_dir = cfg.vault_path / ".trash"
-            trash_dir.mkdir(exist_ok=True)
-            dest = trash_dir / Path(path).name
-            if dest.exists():
-                dest = trash_dir / f"{dest.stem}-{uuid.uuid4().hex[:8]}{dest.suffix}"
-            os.rename(full_path, dest)
+            storage.trash(path)
         else:
-            full_path.unlink()
+            storage.delete(path)
     finally:
         lock.release()
 
@@ -229,28 +260,29 @@ def restore_note(trashed_name: str, to_path: str, index: VaultIndex | None = Non
         raise ValueError(f"trashed_name must be a bare filename, not a path: {trashed_name!r}")
 
     cfg = get_config()
-    validate_path(cfg.vault_path, to_path)
-    _check_write_permission(to_path)
+    if not to_path.lower().endswith(".md"):
+        raise ValueError("Note paths must end in .md")
+    storage = _storage()
+    storage.resolve_write(to_path)
+    info = storage.trash_info(trashed_name)
+    if info.is_dir:
+        raise ValueError("The trashed item is a folder, not a note")
 
-    trash_src = cfg.vault_path / ".trash" / trashed_name
-    if not trash_src.exists() or not trash_src.is_file():
-        raise FileNotFoundError(f"No trashed note named {trashed_name!r} in .trash/")
-
-    dest = cfg.vault_path / to_path
-    if dest.exists():
-        raise FileExistsError(f"Target already exists: {to_path!r}")
-
-    lock = acquire_lock(str(trash_src))
+    lock = acquire_lock(f".trash/{trashed_name}", lock_path=cfg.lock_path)
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        os.rename(trash_src, dest)
+        destination = storage.restore(trashed_name, to_path)
+        to_path = destination.relative
     finally:
         lock.release()
 
     if index is not None:
         index.update(to_path)
 
-    return {"from": f".trash/{trashed_name}", "to": to_path, "status": "restored"}
+    revision = storage.revision(to_path, read=False)
+    return revision_result(
+        {"from": f".trash/{trashed_name}", "to": to_path, "status": "restored"},
+        revision,
+    )
 
 
 def append_to_note(
@@ -259,33 +291,41 @@ def append_to_note(
     section: str | None = None,
     create: bool = True,
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Append content to a note (or a specific section). Creates the note if it doesn't exist."""
-    cfg = get_config()
-    validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
-
-    full_path = cfg.vault_path / path
-    lock = acquire_lock(str(full_path))
+    _require_note_path(path)
+    target = _storage().resolve_write(path)
+    path = target.relative
+    lock = acquire_lock(path, lock_path=get_config().lock_path)
     try:
-        if full_path.exists():
-            raw = full_path.read_text(encoding="utf-8")
+        storage = _storage()
+        if storage.exists(path, read=True):
+            raw, current_revision = read_text_for_update(storage, path, expected_revision)
             if section:
                 patched = _patch_section(raw, section, content, mode="append")
             else:
                 patched = raw.rstrip("\n") + "\n\n" + content.strip() + "\n"
         elif create:
+            if expected_revision is not None:
+                raise RevisionConflictError(path, expected_revision, None)
             patched = content
+            current_revision = None
         else:
             raise FileNotFoundError(f"Note not found: {path!r}")
-        write_file_atomic(cfg.vault_path, path, patched)
+        revision = storage.write_text_atomic(
+            path,
+            patched,
+            expected_revision=current_revision,
+            create_only=current_revision is None,
+        )
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "appended"}
+    return revision_result({"path": path, "status": "appended"}, revision)
 
 
 def patch_frontmatter(
@@ -294,24 +334,20 @@ def patch_frontmatter(
     merge_arrays: bool = True,
     index: VaultIndex | None = None,
     dry_run: bool = False,
+    expected_revision: str | None = None,
 ) -> dict:
-    """Update specific YAML frontmatter keys. Arrays are merged by default.
+    """Update YAML frontmatter, optionally returning a write-free preview."""
+    _require_note_path(path)
+    target = _storage().resolve_write(path)
+    path = target.relative
 
-    dry_run=True previews the resulting frontmatter and a unified diff
-    without writing anything — check the preview before setting
-    dry_run=False.
-    """
-    cfg = get_config()
-    validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
-
-    full_path = cfg.vault_path / path
-    if not full_path.exists():
+    if not _storage().exists(path, read=True):
         raise FileNotFoundError(f"Note not found: {path!r}")
 
-    lock = acquire_lock(str(full_path))
+    lock = acquire_lock(path, lock_path=get_config().lock_path)
     try:
-        raw = full_path.read_text(encoding="utf-8")
+        storage = _storage()
+        raw, current_revision = read_text_for_update(storage, path, expected_revision)
         patched = _apply_frontmatter_updates(raw, updates, merge_arrays)
         diff = _unified_diff(raw, patched, path)
 
@@ -322,21 +358,22 @@ def patch_frontmatter(
                 "updated_keys": list(updates.keys()),
                 "preview": patched,
                 "diff": diff,
+                "revision": current_revision,
             }
 
-        write_file_atomic(cfg.vault_path, path, patched)
+        revision = storage.write_text_atomic(path, patched, expected_revision=current_revision)
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {
+    return revision_result({
         "path": path,
         "status": "frontmatter_patched",
         "updated_keys": list(updates.keys()),
         "diff": diff,
-    }
+    }, revision)
 
 
 def patch_frontmatter_batch(
@@ -361,6 +398,7 @@ def patch_frontmatter_batch(
                 entry.get("updates", {}),
                 merge_arrays=entry.get("merge_arrays", True),
                 index=index,
+                expected_revision=entry.get("expected_revision"),
             )
             succeeded.append(result)
         except Exception as exc:
@@ -396,31 +434,34 @@ def manage_tags(
     add: list[str] | None = None,
     remove: list[str] | None = None,
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Add or remove tags on a note. Updates frontmatter tags array and strips inline #tags."""
-    cfg = get_config()
-    validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
+    _require_note_path(path)
+    target = _storage().resolve_write(path)
+    path = target.relative
 
-    full_path = cfg.vault_path / path
-    if not full_path.exists():
+    if not _storage().exists(path, read=True):
         raise FileNotFoundError(f"Note not found: {path!r}")
 
     add = list(add or [])
     remove = list(remove or [])
 
-    lock = acquire_lock(str(full_path))
+    lock = acquire_lock(path, lock_path=get_config().lock_path)
     try:
-        raw = full_path.read_text(encoding="utf-8")
+        storage = _storage()
+        raw, current_revision = read_text_for_update(storage, path, expected_revision)
         patched = _apply_tag_changes(raw, add, remove)
-        write_file_atomic(cfg.vault_path, path, patched)
+        revision = storage.write_text_atomic(path, patched, expected_revision=current_revision)
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "tags_updated", "added": add, "removed": remove}
+    return revision_result(
+        {"path": path, "status": "tags_updated", "added": add, "removed": remove}, revision
+    )
 
 
 def _apply_tag_changes(raw: str, add: list[str], remove: list[str]) -> str:
@@ -461,17 +502,16 @@ def _apply_frontmatter_updates(raw: str, updates: dict, merge_arrays: bool) -> s
 
 def move_note(from_path: str, to_path: str, index: VaultIndex | None = None) -> dict:
     cfg = get_config()
-    validate_path(cfg.vault_path, from_path)
-    validate_path(cfg.vault_path, to_path)
-    _check_write_permission(from_path)
-    _check_write_permission(to_path)
+    if not from_path.lower().endswith(".md") or not to_path.lower().endswith(".md"):
+        raise ValueError("Note paths must end in .md")
+    source = _storage().resolve_delete(from_path)
+    destination = _storage().resolve_write(to_path)
+    from_path, to_path = source.relative, destination.relative
+    storage = _storage()
 
-    from_full = cfg.vault_path / from_path
-    to_full = cfg.vault_path / to_path
-
-    if not from_full.exists():
+    if not storage.exists(from_path, read=False):
         raise FileNotFoundError(f"Source note not found: {from_path!r}")
-    if to_full.exists():
+    if storage.exists(to_path, read=False):
         raise FileExistsError(f"Target already exists: {to_path!r}")
 
     from_stem = Path(from_path).stem
@@ -487,37 +527,46 @@ def move_note(from_path: str, to_path: str, index: VaultIndex | None = None) -> 
     link_re = re.compile(rf"\[\[({combined})((?:[|#][^\]]*)?)\]\]", re.IGNORECASE)
 
     updated_files: list[str] = []
-    all_md = list(cfg.vault_path.rglob("*.md"))
+    all_md = [candidate for candidate in storage.list_files() if candidate.relative.lower().endswith(".md")]
 
     # Collect and lock all files we'll touch
     locks = []
-    files_to_rewrite: list[tuple[Path, str]] = []
+    files_to_rewrite: list[tuple[str, str, str]] = []
 
-    for md_file in all_md:
-        rel = str(md_file.relative_to(cfg.vault_path))
+    for candidate in all_md:
+        rel = candidate.relative
         if rel == from_path:
             continue
         try:
-            raw = md_file.read_text(encoding="utf-8", errors="replace")
-            if link_re.search(raw):
-                files_to_rewrite.append((md_file, raw))
+            raw, revision = storage.read_text_with_revision(rel)
         except Exception:
-            pass
+            continue
+        if link_re.search(raw):
+            # Link rewriting is a second mutation. Preflight every affected
+            # path so a restricted move cannot partially mutate the vault
+            # before discovering an out-of-scope note.
+            _check_write_permission(rel)
+            files_to_rewrite.append((rel, raw, revision.token))
 
     try:
-        for md_file, _ in files_to_rewrite:
-            locks.append(acquire_lock(str(md_file)))
-        locks.append(acquire_lock(str(from_full)))
+        for rel, _, _ in files_to_rewrite:
+            locks.append(acquire_lock(rel, lock_path=cfg.lock_path))
+        locks.append(acquire_lock(from_path, lock_path=cfg.lock_path))
+
+        _require_current_revisions(
+            storage, [(rel, revision) for rel, _, revision in files_to_rewrite]
+        )
 
         # Rewrite links
-        for md_file, raw in files_to_rewrite:
+        for rel, raw, expected_revision in files_to_rewrite:
             rewritten = link_re.sub(lambda m: f"[[{to_stem}{m.group(2)}]]", raw)
-            write_file_atomic(cfg.vault_path, str(md_file.relative_to(cfg.vault_path)), rewritten)
-            updated_files.append(str(md_file.relative_to(cfg.vault_path)))
+            storage.write_text_atomic(
+                rel, rewritten, expected_revision=expected_revision
+            )
+            updated_files.append(rel)
 
-        # Move the file
-        to_full.parent.mkdir(parents=True, exist_ok=True)
-        os.rename(from_full, to_full)
+        # Move the file through the same policy gateway.
+        _storage().move(from_path, to_path)
     finally:
         for lock in reversed(locks):
             lock.release()
@@ -529,6 +578,19 @@ def move_note(from_path: str, to_path: str, index: VaultIndex | None = None) -> 
             index.update(rel)
 
     return {"from": from_path, "to": to_path, "updated_links_in": updated_files}
+
+
+def _require_current_revisions(
+    storage: VaultStorage, expected_revisions: list[tuple[str, str]]
+) -> None:
+    """Reject a multi-file plan if any scanned note changed before mutation."""
+    for path, expected_revision in expected_revisions:
+        try:
+            current = storage.revision(path)
+        except FileNotFoundError:
+            raise RevisionConflictError(path, expected_revision, None) from None
+        if current.token != expected_revision:
+            raise RevisionConflictError(path, expected_revision, current)
 
 
 def _is_writable(rel_path: str) -> bool:
@@ -563,6 +625,7 @@ def patch_note_text(
     count: int = 1,
     dry_run: bool = False,
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Find and replace text anywhere in a note's body — no heading/block-ref
     anchor required, unlike patch_note_tool. For a handful of scattered
@@ -576,12 +639,11 @@ def patch_note_text(
     without writing anything.
     Raises ValueError if `find` doesn't match anything in the note.
     """
-    cfg = get_config()
-    validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
-
-    full_path = cfg.vault_path / path
-    if not full_path.exists():
+    _require_note_path(path)
+    storage = _storage()
+    target = storage.resolve_write(path)
+    path = target.relative
+    if not storage.exists(path, read=True):
         raise FileNotFoundError(f"Note not found: {path!r}")
 
     if mode == "regex":
@@ -592,9 +654,9 @@ def patch_note_text(
     else:
         pattern = re.compile(re.escape(find))
 
-    lock = acquire_lock(str(full_path))
+    lock = acquire_lock(path, lock_path=get_config().lock_path)
     try:
-        raw = full_path.read_text(encoding="utf-8")
+        raw, current_revision = read_text_for_update(storage, path, expected_revision)
         replace_count = count if count > 0 else 0
         patched, n = pattern.subn(replace, raw, count=replace_count)
         if n == 0:
@@ -608,16 +670,19 @@ def patch_note_text(
                 "replacements": n,
                 "preview": _match_snippets(raw, pattern, limit=5),
                 "diff": diff,
+                "revision": current_revision,
             }
 
-        write_file_atomic(cfg.vault_path, path, patched)
+        revision = storage.write_text_atomic(path, patched, expected_revision=current_revision)
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "patched", "replacements": n, "diff": diff}
+    return revision_result(
+        {"path": path, "status": "patched", "replacements": n, "diff": diff}, revision
+    )
 
 
 def find_replace_in_vault(
@@ -639,7 +704,7 @@ def find_replace_in_vault(
     under "skipped_write_protected".
     """
     cfg = get_config()
-    base = validate_path(cfg.vault_path, folder) if folder else cfg.vault_path
+    storage = _storage()
 
     if mode == "regex":
         try:
@@ -649,14 +714,16 @@ def find_replace_in_vault(
     else:
         pattern = re.compile(re.escape(search))
 
-    candidates: list[tuple[Path, str, str, int]] = []
+    candidates: list[tuple[str, str, int, str]] = []
     skipped_write_protected: list[str] = []
-    for md_file in sorted(base.rglob("*.md")):
-        rel = str(md_file.relative_to(cfg.vault_path))
+    for candidate in storage.list_files(folder):
+        rel = candidate.relative
+        if not rel.lower().endswith(".md"):
+            continue
         if _is_excluded(rel, cfg.exclude_paths) or Path(rel).parts[0] == ".trash":
             continue
         try:
-            raw = md_file.read_text(encoding="utf-8", errors="replace")
+            raw, revision = storage.read_text_with_revision(rel)
         except Exception:
             continue
         count = len(pattern.findall(raw))
@@ -665,16 +732,16 @@ def find_replace_in_vault(
         if not _is_writable(rel):
             skipped_write_protected.append(rel)
             continue
-        candidates.append((md_file, rel, raw, count))
+        candidates.append((rel, raw, count, revision.token))
 
     if dry_run:
         return {
             "dry_run": True,
             "matches": [
                 {"path": rel, "match_count": count, "preview": _match_snippets(raw, pattern)}
-                for _, rel, raw, count in candidates
+                for rel, raw, count, _ in candidates
             ],
-            "total_matches": sum(count for *_, count in candidates),
+            "total_matches": sum(count for _, _, count, _ in candidates),
             "skipped_write_protected": skipped_write_protected,
         }
 
@@ -686,12 +753,21 @@ def find_replace_in_vault(
             "skipped_write_protected": skipped_write_protected,
         }
 
-    locks = [acquire_lock(str(md_file)) for md_file, _, _, _ in candidates]
+    locks = []
     try:
+        for rel, _, _, _ in candidates:
+            locks.append(acquire_lock(rel, lock_path=cfg.lock_path))
+        _require_current_revisions(
+            storage, [(rel, revision) for rel, _, _, revision in candidates]
+        )
         replaced_in: list[str] = []
         total = 0
-        for _md_file, rel, raw, count in candidates:
-            write_file_atomic(cfg.vault_path, rel, pattern.sub(replace, raw))
+        for rel, raw, count, expected_revision in candidates:
+            storage.write_text_atomic(
+                rel,
+                pattern.sub(replace, raw),
+                expected_revision=expected_revision,
+            )
             replaced_in.append(rel)
             total += count
     finally:

@@ -32,7 +32,10 @@ async def test_daily_note_prompt_uses_date_arg():
 
     text = result.messages[0].content.text
     assert "2026-01-01" in text
-    assert "get_daily_note_tool" in text
+    assert "get_periodic_note_tool" in text
+    assert "get_daily_note_tool" not in text
+    assert "get_tasks_tool" not in text
+    assert "done=false" in text
 
 
 @pytest.mark.asyncio

@@ -71,6 +71,63 @@ async def test_upload_route_rejects_markdown(tmp_path, vault_factory, monkeypatc
     assert resp.status_code == 400
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [".env", ".hidden/file.png", "extensionless", "script.py", "script.sh", "config.yaml"],
+)
+async def test_upload_route_rejects_unsafe_attachment_names(path, vault_factory, monkeypatch):
+    vault_factory({})
+    monkeypatch.setenv("API_KEY", "test-key")
+
+    async with _client() as client:
+        resp = await client.put(
+            f"/attachments/{path}",
+            content=b"unsafe",
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_upload_route_rejects_declared_oversize(tmp_path, vault_factory, monkeypatch):
+    vault_factory({})
+    monkeypatch.setenv("API_KEY", "test-key")
+    monkeypatch.setenv("MAX_ATTACHMENT_BYTES", "3")
+
+    async with _client() as client:
+        resp = await client.put(
+            "/attachments/file.png",
+            content=b"1234",
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+    assert resp.status_code == 413
+    assert not (tmp_path / "file.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_upload_route_rejects_streamed_oversize(tmp_path, vault_factory, monkeypatch):
+    vault_factory({})
+    monkeypatch.setenv("API_KEY", "test-key")
+    monkeypatch.setenv("MAX_ATTACHMENT_BYTES", "3")
+
+    async def body():
+        yield b"12"
+        yield b"34"
+
+    async with _client() as client:
+        resp = await client.put(
+            "/attachments/file.png",
+            content=body(),
+            headers={"Authorization": "Bearer test-key"},
+        )
+
+    assert resp.status_code == 413
+    assert not (tmp_path / "file.png").exists()
+
+
 # ── GET (download) ───────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -361,6 +418,58 @@ async def test_bearer_token_route_rejects_vault_outside_identity(tmp_path, monke
     assert resp.status_code == 403
     assert not (vault_a / "file.png").exists()
     assert not (vault_b / "file.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_bearer_token_route_enforces_selected_vault_write_policy(tmp_path, monkeypatch):
+    vault_a, vault_b = tmp_path / "a", tmp_path / "b"
+    vault_a.mkdir()
+    vault_b.mkdir()
+    import json
+
+    config_path = tmp_path / "vaults.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "vaults": {
+                    "private": {"path": str(vault_a)},
+                    "monari": {"path": str(vault_b), "write_paths": ["allowed/"]},
+                },
+                "identities": [
+                    {
+                        "type": "api_key",
+                        "value": "sk-both",
+                        "vaults": ["private", "monari"],
+                        "default": "private",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
+    monkeypatch.setenv("TRANSPORT", "sse")
+    import obsidian_mcp.config as cfg_mod
+
+    cfg_mod._config = None
+    monkeypatch.setattr(server.mcp, "auth", server._build_auth())
+
+    async with _client() as client:
+        denied = await client.put(
+            "/attachments/file.png?vault=monari",
+            content=b"denied",
+            headers={"Authorization": "Bearer sk-both"},
+        )
+        allowed = await client.put(
+            "/attachments/allowed/file.png?vault=monari",
+            content=b"allowed",
+            headers={"Authorization": "Bearer sk-both"},
+        )
+
+    assert denied.status_code == 403
+    assert allowed.status_code == 200
+    assert not (vault_b / "file.png").exists()
+    assert (vault_b / "allowed" / "file.png").read_bytes() == b"allowed"
 
 
 @pytest.mark.asyncio

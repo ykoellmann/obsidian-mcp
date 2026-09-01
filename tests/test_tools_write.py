@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 import yaml
 
+import obsidian_mcp.tools.write as write_module
+from obsidian_mcp.domain.models import RevisionConflictError
 from obsidian_mcp.tools.write import (
     WritePermissionError,
     append_to_note,
@@ -245,8 +247,9 @@ def test_delete_note_to_trash(tmp_path, vault_factory):
 
 def test_delete_note_permanent(tmp_path, vault_factory):
     vault_factory({"note.md": "content"})
-    delete_note("note.md", trash=False)
-    assert not (tmp_path / "note.md").exists()
+    with pytest.raises(Exception, match="Permanent deletion is disabled"):
+        delete_note("note.md", trash=False)
+    assert (tmp_path / "note.md").exists()
     assert not (tmp_path / ".trash").exists()
 
 
@@ -528,6 +531,32 @@ def test_move_note_into_subfolder(tmp_path, vault_factory):
     assert "[[note]]" in rewritten  # stem unchanged, link stays valid
 
 
+def test_move_note_preserves_external_edit_between_preflight_and_write(
+    tmp_path, vault_factory, monkeypatch
+):
+    vault_factory({"old.md": "Content", "linker.md": "See [[old]]."})
+    original_write = write_module.VaultStorage.write_text_atomic
+    injected = False
+
+    def edit_then_write(storage, path, content, **kwargs):
+        nonlocal injected
+        if path == "linker.md" and not injected:
+            injected = True
+            (tmp_path / path).write_text("External edit with [[old]].")
+        return original_write(storage, path, content, **kwargs)
+
+    monkeypatch.setattr(
+        write_module.VaultStorage, "write_text_atomic", edit_then_write
+    )
+
+    with pytest.raises(RevisionConflictError):
+        move_note("old.md", "new.md")
+
+    assert (tmp_path / "old.md").exists()
+    assert not (tmp_path / "new.md").exists()
+    assert (tmp_path / "linker.md").read_text() == "External edit with [[old]]."
+
+
 # ── find_replace_in_vault ─────────────────────────────────────────────────
 
 def test_find_replace_dry_run_previews_without_writing(tmp_path, vault_factory):
@@ -591,3 +620,52 @@ def test_find_replace_updates_index(vault_factory):
     find_replace_in_vault("old", "new", dry_run=False, index=idx)
     assert "a.md" in idx.get_notes_by_tag("new")
     assert "a.md" not in idx.get_notes_by_tag("old")
+
+
+def test_find_replace_preserves_external_edit_between_preflight_and_write(
+    tmp_path, vault_factory, monkeypatch
+):
+    vault_factory({"a.md": "foo bar"})
+    original_write = write_module.VaultStorage.write_text_atomic
+    injected = False
+
+    def edit_then_write(storage, path, content, **kwargs):
+        nonlocal injected
+        if path == "a.md" and not injected:
+            injected = True
+            (tmp_path / path).write_text("external foo edit")
+        return original_write(storage, path, content, **kwargs)
+
+    monkeypatch.setattr(
+        write_module.VaultStorage, "write_text_atomic", edit_then_write
+    )
+
+    with pytest.raises(RevisionConflictError):
+        find_replace_in_vault("foo", "baz", dry_run=False)
+
+    assert (tmp_path / "a.md").read_text() == "external foo edit"
+
+
+def test_find_replace_releases_partial_lock_set(vault_factory, monkeypatch):
+    vault_factory({"a.md": "needle", "b.md": "needle"})
+
+    class FakeLock:
+        released = False
+
+        def release(self):
+            self.released = True
+
+    first = FakeLock()
+    calls = 0
+
+    def acquire_then_fail(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return first
+        raise RuntimeError("injected lock failure")
+
+    monkeypatch.setattr(write_module, "acquire_lock", acquire_then_fail)
+    with pytest.raises(RuntimeError, match="injected"):
+        find_replace_in_vault("needle", "changed", dry_run=False)
+    assert first.released is True

@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from obsidian_mcp.domain.index import IndexBuildingError, VaultIndex
+from obsidian_mcp.storage.policy import VaultAccessPolicy
 
 FIXTURES = Path(__file__).parent / "fixtures" / "sample_vault"
 
@@ -62,10 +63,75 @@ def test_exclude_paths(tmp_path):
     private.mkdir()
     (private / "secret.md").write_text("secret links to [[other]]")
     (tmp_path / "other.md").write_text("other")
-    idx = VaultIndex(tmp_path, exclude_paths=["private"])
+    idx = VaultIndex(tmp_path, exclude_paths=["private/"])
     idx.build()
     # secret.md should not appear as a backlink because it was excluded
     assert "private/secret.md" not in idx.get_backlinks("other")
+
+
+def test_exclude_path_is_rooted_not_a_nested_component(tmp_path):
+    nested = tmp_path / "Notes" / "private"
+    nested.mkdir(parents=True)
+    (nested / "secret.md").write_text("secret")
+    (tmp_path / "public.md").write_text("public")
+    idx = VaultIndex(tmp_path, exclude_paths=["private/"])
+    idx.build()
+    assert idx.get_all_notes() == {"Notes/private/secret.md", "public.md"}
+
+
+def test_multisegment_exclude_path_uses_exact_or_recursive_semantics(tmp_path):
+    old = tmp_path / "Archive" / "Old"
+    old.mkdir(parents=True)
+    (old / "nested.md").write_text("nested")
+    (tmp_path / "Archive" / "Old.md").write_text("exact")
+
+    exact = VaultIndex(tmp_path, exclude_paths=["Archive/Old.md"])
+    exact.build()
+    assert exact.get_all_notes() == {"Archive/Old/nested.md"}
+
+    recursive = VaultIndex(tmp_path, exclude_paths=["Archive/Old/"])
+    recursive.build()
+    assert recursive.get_all_notes() == {"Archive/Old.md"}
+
+
+def test_index_does_not_discover_denied_subtree(tmp_path):
+    (tmp_path / "private").mkdir()
+    (tmp_path / "private" / "secret.md").write_text("secret")
+    (tmp_path / "public.md").write_text("public")
+    policy = VaultAccessPolicy(tmp_path, deny_read_paths=["private/"])
+    idx = VaultIndex(tmp_path, policy=policy)
+    idx.build()
+
+    assert idx.get_all_notes() == {"public.md"}
+
+
+def test_index_purges_readable_note_renamed_into_denied_subtree(tmp_path):
+    (tmp_path / "private").mkdir()
+    note = tmp_path / "public.md"
+    note.write_text("public")
+    policy = VaultAccessPolicy(tmp_path, deny_read_paths=["private/"])
+    idx = VaultIndex(tmp_path, policy=policy)
+    idx.build()
+    assert idx.get_all_notes() == {"public.md"}
+
+    note.rename(tmp_path / "private" / "secret.md")
+    idx.update("private/secret.md")
+    idx.update("public.md")
+
+    assert idx.get_all_notes() == set()
+
+
+def test_index_update_handles_directory_move(tmp_path):
+    (tmp_path / "old").mkdir()
+    (tmp_path / "old" / "note.md").write_text("note")
+    idx = VaultIndex(tmp_path)
+    idx.build()
+
+    (tmp_path / "old").rename(tmp_path / "new")
+    idx.update("old")
+    idx.update("new")
+
+    assert idx.get_all_notes() == {"new/note.md"}
 
 
 def test_excalidraw_files_excluded_from_build(tmp_path):
@@ -145,7 +211,7 @@ def test_get_all_notes_excludes_excluded(tmp_path):
     private = tmp_path / "private"
     private.mkdir()
     (private / "secret.md").write_text("S")
-    idx = VaultIndex(tmp_path, exclude_paths=["private"])
+    idx = VaultIndex(tmp_path, exclude_paths=["private/"])
     idx.build()
     assert "a.md" in idx.get_all_notes()
     assert "private/secret.md" not in idx.get_all_notes()

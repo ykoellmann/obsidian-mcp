@@ -2,20 +2,20 @@
 identity resolution, and VaultResolutionMiddleware."""
 from __future__ import annotations
 
+import importlib
 import json
 
 import pytest
 from fastmcp.server.auth import AccessToken
 from fastmcp.server.middleware import MiddlewareContext
 
+import obsidian_mcp.config as cfg_mod
 from obsidian_mcp import server as server_mod
 from obsidian_mcp.config import Config
 from obsidian_mcp.server import (
-    _DEFAULT_INSTRUCTIONS,
     VaultResolutionMiddleware,
     _APIKeyAuthProvider,
     _identities_from_env,
-    _load_instructions,
     _resolve_identity,
     _select_vault,
     list_vaults_tool,
@@ -69,6 +69,30 @@ def test_identities_from_env_bad_vaults_config_returns_empty(tmp_path, monkeypat
     monkeypatch.setenv("VAULTS_CONFIG", str(tmp_path / "nonexistent.json"))
 
     assert _identities_from_env() == ([], [])
+
+
+def test_shared_server_instructions_do_not_expose_default_vault_conventions(
+    tmp_path, monkeypatch
+):
+    config_path = _write_vaults_config(tmp_path)
+    (tmp_path / "a" / "_AI_INSTRUCTIONS.md").write_text(
+        "private default-vault instructions", encoding="utf-8"
+    )
+    with monkeypatch.context() as profile_env:
+        profile_env.setenv("VAULTS_CONFIG", str(config_path))
+        profile_env.setenv("TRANSPORT", "sse")
+        profile_env.setenv("TOOL_PROFILE", "focused")
+        profile_env.delenv("VAULT_PATH", raising=False)
+        profile_env.setattr(cfg_mod, "_config", None)
+        server = importlib.reload(server_mod)
+
+        instructions = server._load_instructions()
+
+        assert instructions == server._FOCUSED_INSTRUCTIONS
+        assert "private default-vault instructions" not in instructions
+
+    cfg_mod._config = None
+    importlib.reload(server_mod)
 
 
 # ── _APIKeyAuthProvider (multi-key) ─────────────────────────────────────────
@@ -375,12 +399,81 @@ def test_list_vaults_tool_multi_vault_mode(tmp_path, monkeypatch):
     assert names == {"private": True, "monari": False}
 
 
-def test_multi_vault_startup_instructions_do_not_read_first_vault(tmp_path, monkeypatch):
-    cfg = _cfg_with_vaults(tmp_path, monkeypatch)
-    (tmp_path / "a" / "_AI_INSTRUCTIONS.md").write_text(
-        "private first-vault instructions", encoding="utf-8"
-    )
-    import obsidian_mcp.config as cfg_mod
-    cfg_mod._config = cfg
+def test_main_builds_policy_aware_index_and_watcher_per_vault(tmp_path, monkeypatch):
+    config_path = _write_vaults_config(tmp_path)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["vaults"]["private"]["read_paths"] = ["Memory/"]
+    data["vaults"]["monari"]["write_paths"] = ["Output/"]
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    (tmp_path / "b" / "Output").mkdir()
+    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
+    monkeypatch.setenv("TRANSPORT", "sse")
 
-    assert _load_instructions() == _DEFAULT_INSTRUCTIONS
+    import obsidian_mcp.config as cfg_mod
+
+    cfg_mod._config = None
+    created_indices = {}
+    created_watchers = {}
+
+    class FakeIndex:
+        def __init__(self, path, *, exclude_paths, policy):
+            self.path = path
+            self.exclude_paths = exclude_paths
+            self.policy = policy
+            created_indices[path.name] = self
+
+        def build(self, *, publish_ready=True):
+            self.publish_ready = publish_ready
+            return None
+
+        def update(self, _path):
+            return None
+
+        def reconcile(self):
+            self.reconciled = True
+
+        def mark_ready(self):
+            self.ready = True
+
+    class FakeWatcher:
+        def __init__(self, path, *, debounce_ms, reconcile_interval, policy):
+            self.path = path
+            self.debounce_ms = debounce_ms
+            self.reconcile_interval = reconcile_interval
+            self.policy = policy
+            self.callback = None
+            self.reconcile_callback = None
+            created_watchers[path.name] = self
+
+        def start(self, *, on_change, on_reconcile):
+            self.callback = on_change
+            self.reconcile_callback = on_reconcile
+
+    class FakeThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(server_mod, "VaultIndex", FakeIndex)
+    monkeypatch.setattr(server_mod, "VaultWatcher", FakeWatcher)
+    monkeypatch.setattr(server_mod.threading, "Thread", FakeThread)
+    monkeypatch.setattr(server_mod.mcp, "run", lambda **_kwargs: None)
+    monkeypatch.setattr(server_mod, "_indices", {})
+    monkeypatch.setattr(server_mod, "_watchers", {})
+
+    server_mod.main()
+
+    assert set(created_indices) == {"a", "b"}
+    assert created_indices["a"].policy.root == (tmp_path / "a").resolve()
+    assert created_indices["a"].policy.read_paths == ("Memory/",)
+    assert created_indices["b"].policy.root == (tmp_path / "b").resolve()
+    assert created_indices["b"].policy.write_paths == ("Output/",)
+    assert created_watchers["a"].policy is created_indices["a"].policy
+    assert created_watchers["b"].policy is created_indices["b"].policy
+    assert created_indices["a"].publish_ready is False
+    assert created_indices["a"].reconciled is True
+    assert created_indices["a"].ready is True
+    assert created_watchers["a"].reconcile_callback == created_indices["a"].reconcile

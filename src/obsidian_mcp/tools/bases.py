@@ -19,18 +19,18 @@ import yaml
 
 from ..config import get_config
 from ..domain.index import VaultIndex
-from ..storage.filesystem import validate_path, write_file_atomic
+from ..storage.filesystem import VaultStorage
 from ..storage.locking import acquire_lock
-from .write import _check_write_permission
+from ..storage.policy import InvalidFileTypeError
+from ..storage.revisions import prepare_full_write, read_text_for_update, revision_result
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def list_bases() -> list[str]:
     cfg = get_config()
-    root = cfg.vault_path
+    storage = VaultStorage.from_config(cfg)
     return sorted(
-        str(p.relative_to(root))
-        for p in root.rglob("*.base")
+        p.relative for p in storage.list_files() if p.relative.lower().endswith(".base")
     )
 
 
@@ -38,17 +38,23 @@ def read_base(path: str) -> dict:
     """Parse a .base file.
     Returns {path, filters, formulas, properties, views}."""
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-    if not target.exists():
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".base"):
+        raise InvalidFileTypeError("Bases paths must end in .base")
+    target = storage.resolve_read(path)
+    path = target.relative
+    if not storage.exists(path, read=True):
         raise FileNotFoundError(f"Base not found: {path!r}")
 
-    data = _load_yaml(target, path)
+    raw, revision = storage.read_text_with_revision(path)
+    data = _parse_yaml(raw, path)
     return {
         "path": path,
         "filters": data.get("filters", {}),
         "formulas": data.get("formulas", {}),
         "properties": data.get("properties", {}),
         "views": data.get("views", []),
+        "revision": revision.token,
     }
 
 
@@ -59,6 +65,8 @@ def write_base(
     properties: dict | None = None,
     views: list[dict] | None = None,
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
+    create_only: bool = False,
 ) -> dict:
     """Create or fully overwrite a .base file.
 
@@ -72,8 +80,14 @@ def write_base(
     keep new bases consistent with established conventions.
     """
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".base"):
+        raise InvalidFileTypeError("Bases paths must end in .base")
+    target = storage.resolve_write(path)
+    path = target.relative
+    expected, effective_create_only = prepare_full_write(
+        storage, path, expected_revision, create_only
+    )
 
     data = {
         k: v
@@ -89,22 +103,27 @@ def write_base(
 
     known_properties = _known_properties(exclude_path=path)
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    lock = acquire_lock(str(target))
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
-        _write_base_atomic(path, data)
+        revision = _write_base_atomic(
+            storage,
+            path,
+            data,
+            expected_revision=expected,
+            create_only=effective_create_only,
+        )
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {
+    return revision_result({
         "path": path,
         "status": "written",
         "views": len(data.get("views", [])),
         "known_properties": known_properties,
-    }
+    }, revision)
 
 
 def patch_base(
@@ -118,6 +137,7 @@ def patch_base(
     update_views: list[dict] | None = None,
     delete_view_names: list[str] | None = None,
     index: VaultIndex | None = None,
+    expected_revision: str | None = None,
 ) -> dict:
     """Atomically update an existing .base file without rewriting it wholesale.
 
@@ -127,14 +147,18 @@ def patch_base(
     are merged into the matching view. delete_view_names removes views by name.
     """
     cfg = get_config()
-    target = validate_path(cfg.vault_path, path)
-    _check_write_permission(path)
-    if not target.exists():
+    storage = VaultStorage.from_config(cfg)
+    if not path.lower().endswith(".base"):
+        raise InvalidFileTypeError("Bases paths must end in .base")
+    target = storage.resolve_write(path)
+    path = target.relative
+    if not storage.exists(path, read=False):
         raise FileNotFoundError(f"Base not found: {path!r}")
 
-    lock = acquire_lock(str(target))
+    lock = acquire_lock(path, lock_path=cfg.lock_path)
     try:
-        data = _load_yaml(target, path)
+        raw, current_revision = read_text_for_update(storage, path, expected_revision)
+        data = _parse_yaml(raw, path)
 
         formulas: dict = dict(data.get("formulas", {}))
         if delete_formula_keys:
@@ -180,20 +204,28 @@ def patch_base(
             del data["views"]
 
         _validate_base_structure(data, path)
-        _write_base_atomic(path, data)
+        revision = _write_base_atomic(
+            storage, path, data, expected_revision=current_revision
+        )
     finally:
         lock.release()
 
     if index is not None:
         index.update(path)
 
-    return {"path": path, "status": "patched", "views": len(data.get("views", []))}
+    return revision_result(
+        {"path": path, "status": "patched", "views": len(data.get("views", []))}, revision
+    )
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _load_yaml(target, path: str) -> dict:
-    raw = target.read_text(encoding="utf-8")
+def _load_yaml(storage: VaultStorage, path: str) -> dict:
+    raw = storage.read_text(path)
+    return _parse_yaml(raw, path)
+
+
+def _parse_yaml(raw: str, path: str) -> dict:
     try:
         data = yaml.safe_load(raw) or {}
     except yaml.YAMLError as exc:
@@ -232,8 +264,7 @@ def _known_properties(exclude_path: str | None = None) -> dict:
         if rel == exclude_path:
             continue
         try:
-            target = validate_path(cfg.vault_path, rel)
-            data = _load_yaml(target, rel)
+            data = _load_yaml(VaultStorage.from_config(cfg), rel)
         except (ValueError, OSError):
             continue
         for name, conf in (data.get("properties") or {}).items():
@@ -243,12 +274,23 @@ def _known_properties(exclude_path: str | None = None) -> dict:
     return known
 
 
-def _write_base_atomic(path: str, data: dict) -> None:
-    cfg = get_config()
+def _write_base_atomic(
+    storage: VaultStorage,
+    path: str,
+    data: dict,
+    *,
+    expected_revision: str | None = None,
+    create_only: bool = False,
+):
     content = yaml.safe_dump(
         data,
         sort_keys=False,
         allow_unicode=True,
         default_flow_style=False,
     )
-    write_file_atomic(cfg.vault_path, path, content)
+    return storage.write_text_atomic(
+        path,
+        content,
+        expected_revision=expected_revision,
+        create_only=create_only,
+    )
