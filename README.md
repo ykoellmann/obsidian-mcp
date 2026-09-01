@@ -69,10 +69,51 @@ Copy `.env.example` to `.env` and set your vault path:
 ```env
 VAULT_PATH=/path/to/your/obsidian/vault
 # Optional:
-# READ_ONLY=true            # prevent all writes
+# READ_ONLY=true            # safe default for network Compose deployments
+# READ_PATHS=Notes/,Inbox/  # restrict all reads to specific rooted scopes
 # WRITE_PATHS=Notes/,Inbox/ # restrict writes to specific folders
+# DENY_READ_PATHS=.obsidian/,.trash/ # security boundary for all reads
+# DENY_WRITE_PATHS=.obsidian/,.trash/,_AI_INSTRUCTIONS.md
+# ALLOW_PERMANENT_DELETE=false
 # TRANSPORT=stdio           # stdio (default), http (recommended for network use), or sse (legacy)
 ```
+
+Slash-suffixed policy entries such as `Notes/` cover that directory and its
+descendants. An entry without a trailing slash grants or denies only the exact
+path. For compatibility, native configuration still permits unrestricted
+writes when both `READ_ONLY=false` and `WRITE_PATHS` is empty; choose that
+combination explicitly, not as a network default. Use a case-sensitive
+filesystem for authoritative path scopes.
+
+> **Docker upgrade note:** this Compose configuration now defaults
+> `READ_ONLY=true`, while a native `Config` invocation retains its historical
+> `false` default. Existing Docker deployments that intentionally write must
+> explicitly set `READ_ONLY=false`; pair it with a narrow `WRITE_PATHS` value.
+> For a nested scope such as `deep/nested/`, create `deep/` beforehand. MCP may
+> create the configured `nested/` scope and descendants, but never ancestors
+> above the configured write boundary.
+
+`READ_PATHS` is an optional allowlist using the same rooted exact/recursive
+syntax. When set, direct reads, listings, search, index construction, and
+resources are limited to those scopes; `DENY_READ_PATHS` still takes
+precedence. Ancestor directories may be traversed only to reach an allowed
+scope and do not expose sibling content.
+
+`EXCLUDE_PATHS` uses those same rooted exact/recursive matching rules, but is
+only a discovery filter—not an access-control boundary. For example,
+`private/` hides that root directory and its descendants, while it does not
+hide `Projects/private/`.
+
+The best-effort JSONL audit log is application state, not vault content. It
+defaults beneath `LOCK_PATH` for native runs and to `/data/audit.jsonl` in
+Docker. `AUDIT_LOG_PATH` must remain outside `VAULT_PATH`; the final log file
+is opened without following symlinks.
+
+New files and directories use the normal `0666`/`0777` creation modes filtered
+by the MCP process umask. Atomic overwrites preserve the existing file's
+permission bits. In a shared sync deployment, run the MCP and sync daemon with
+compatible UID/GID and umask settings so both can continue reading and updating
+new notes; the home-server profile exposes these as `PUID` and `PGID`.
 
 Full list of variables — including `API_KEY`, `PUBLIC_BASE_URL`, and the
 `OAUTH_GITHUB_*` variables for the optional second auth variant — is
@@ -92,11 +133,22 @@ for the two auth variants in detail.
 # ENABLE_EXCALIDRAW=true  # *.excalidraw.md file tools
 # ENABLE_KANBAN=true      # Kanban board tools
 # ENABLE_BASES=true       # .base file tools (Obsidian core plugin, 1.9.0+)
+
+# High-impact mutations are absent from the MCP tool list unless enabled.
+# ENABLE_MOVE=true             # move_note_tool
+# ENABLE_FOLDER_RENAME=true    # rename_folder_tool
+# ENABLE_BULK_REPLACE=true     # find_replace_in_vault_tool
+# ENABLE_DELETE=true           # delete_note_tool and delete_folder_tool
 ```
 
 Each defaults to `false`. A disabled group's tools aren't just refused at
 call time — they're never registered, so they don't appear in the tool list
 at all.
+
+The high-impact mutation groups are similarly opt-in: set `ENABLE_MOVE`,
+`ENABLE_FOLDER_RENAME`, `ENABLE_BULK_REPLACE`, or `ENABLE_DELETE` to register
+the corresponding tools. Their underlying Python functions remain available
+for local/unit-test use and future transactional implementations.
 
 ## Usage with Claude Code
 
@@ -146,9 +198,49 @@ docker compose up -d
 
 The `docker-compose.yml` pulls the pre-built image from GHCR — no cloning or building required. To build locally instead, swap `image:` for `build: .` in the compose file.
 
-If you enable GitHub OAuth (see [Option B](#option-b-github-oauth-claudeai-webmobile-custom-connector)), uncomment the `fastmcp-data` volume in `docker-compose.yml` so logins survive container restarts.
+GitHub OAuth state is stored under `/data/fastmcp` by default, inside the
+Compose `mcp-data` volume, so logins survive container restarts.
 
-The image has a built-in `HEALTHCHECK` against `GET /health` (unauthenticated, no vault content — just `{status, vault_path, index_ready}`), visible in `docker ps`/`docker compose ps`. Only meaningful for `TRANSPORT=http`/`sse`; a no-op for `stdio`.
+The image has a built-in `HEALTHCHECK` against `GET /health` (unauthenticated, no vault content or filesystem paths — just `{status, index_ready}`), visible in `docker ps`/`docker compose ps`. Only meaningful for `TRANSPORT=http`/`sse`; a no-op for `stdio`.
+
+### Hardened home-server Compose profile
+
+For a home server where Cloudflare Tunnel is the only network entry point,
+use [`docker-compose.home-server.yml`](docker-compose.home-server.yml). It
+builds the MCP image from the checked-out source, bind-mounts the complete
+vault read-only, overlays only the two configured AI memory/output directories
+read-write, sets matching `WRITE_PATHS`, runs as the configured non-root
+UID/GID, and publishes no host port. The MCP service is only on an internal
+network; `cloudflared` has that network plus a separate normal egress network
+so it can reach Cloudflare without making MCP externally reachable.
+
+Create the nested writable directories before starting it, set
+`HOST_VAULT_PATH`, `AI_MEMORY_PATH`, `AI_OUTPUT_PATH`, `PUID`, `PGID`,
+`MCP_DATA_PATH`, `API_KEY`, `CLOUDFLARE_TUNNEL_TOKEN`, and a digest-pinned
+`CLOUDFLARED_IMAGE` (for example,
+`cloudflare/cloudflared@sha256:<digest>`) in `.env`. Create the data directory
+and make it owned by `PUID:PGID`; it stores `/data/locks` and application state.
+Cloudflare Access Managed OAuth authenticates the edge, but it does not inject
+this application's bearer API key. Clients must still send `API_KEY` to the
+origin; trusted-proxy header injection is a future phase, not part of this
+profile. Then run:
+
+```bash
+docker compose -f docker-compose.home-server.yml up -d
+```
+
+Folder/note trash and restore are intentionally unavailable in this nested-bind
+profile: moving from a writable overlay into the read-only parent vault's
+`.trash` would cross mounts. Keep `ENABLE_DELETE=false` (hard-coded here) and
+do not enable folder restore in this topology.
+
+The static Compose checks are covered by the test suite. A real deployment
+test (Docker mount precedence, host UID/GID permissions, and the Cloudflare
+Tunnel route) remains environment-specific and must be run on the target
+server before relying on it. To update Cloudflared, choose a reviewed release,
+resolve its immutable `RepoDigest`, update `CLOUDFLARED_IMAGE`, then recreate
+the sidecar; rebuild the MCP service after source changes with
+`docker compose -f docker-compose.home-server.yml build --pull`.
 
 ### Health-Check Cron (Frontmatter Schema)
 
@@ -164,10 +256,15 @@ To run it weekly via cron against the running container:
 ```cron
 # crontab -e (on the Docker host)
 0 6 * * 1 docker exec obsidian-mcp-obsidian-mcp-1 \
-  env VAULT_PATH=/vault HEALTH_CHECK_INBOX=00-Inbox python scripts/health_check.py
+  env VAULT_PATH=/vault READ_ONLY=false WRITE_PATHS=00-Inbox/ \
+  HEALTH_CHECK_INBOX=00-Inbox python scripts/health_check.py
 ```
 
-Swap the container name for whatever `docker compose ps` shows, and `HEALTH_CHECK_INBOX` for your vault's actual inbox folder (default `Inbox`).
+Swap the container name for whatever `docker compose ps` shows, and set both
+`HEALTH_CHECK_INBOX` and `WRITE_PATHS` to your vault's actual inbox folder
+(default `Inbox`). The command must have write access because it creates a
+report when violations are found. With the home-server profile, choose an
+inbox inside one of its writable nested mounts (for example `AI-Output/`).
 
 ## Remote Setup (Recommended)
 
@@ -271,14 +368,16 @@ Keep the vault synced on the server with Syncthing, git+cron, rclone, or Obsidia
 By default obsidian-mcp serves one vault (`VAULT_PATH`). If you need several
 completely separate vaults from one deployment — e.g. a private vault and a
 work vault, each only reachable by its own identity — set `VAULTS_CONFIG` to
-the path of a JSON file instead, and every `VAULT_PATH`/`WRITE_PATHS`/
-`EXCLUDE_PATHS`/`API_KEY`/`OAUTH_GITHUB_ALLOWED_LOGINS` setting is ignored in
-favor of it. See [`vaults.json.example`](vaults.json.example):
+the path of a JSON file instead. Vault path-policy settings (`VAULT_PATH`,
+`READ_PATHS`, `WRITE_PATHS`, `DENY_READ_PATHS`, `DENY_WRITE_PATHS`, and
+`EXCLUDE_PATHS`) and identity settings (`API_KEY` and
+`OAUTH_GITHUB_ALLOWED_LOGINS`) then come from that file. See
+[`vaults.json.example`](vaults.json.example):
 
 ```json
 {
   "vaults": {
-    "private": {"path": "/vaults/private", "exclude_paths": ["private", ".obsidian"]},
+    "private": {"path": "/vaults/private", "exclude_paths": ["private/", ".obsidian/", ".trash/"]},
     "monari":  {"path": "/vaults/monari",  "write_paths": ["02-Areas/monari/"]}
   },
   "identities": [
@@ -287,6 +386,12 @@ favor of it. See [`vaults.json.example`](vaults.json.example):
   ]
 }
 ```
+
+Each vault entry can set `read_paths`, `write_paths`, `deny_read_paths`,
+`deny_write_paths`, `exclude_paths`, and `read_only` independently. Path rules
+are rooted: a trailing slash includes descendants, while a rule without one
+matches only that exact path. `exclude_paths` controls discovery/indexing;
+the read/write/deny fields are the access-control boundary.
 
 ```env
 VAULT_PATH=              # unused — vaults.json defines paths instead
@@ -310,10 +415,10 @@ scoped to that identity's vault(s) — there is no way to reach a vault an
 identity isn't listed for.
 
 An identity with more than one entry in `"vaults"` can switch between them:
-every tool accepts an optional `vault=<name>` argument for that one call
-(defaults to `"default"` if omitted — set it explicitly whenever an
-identity has several vaults, or every call without `vault=` fails asking
-for one). `list_vaults_tool()` returns `[{name, description, is_default}]`
+every tool accepts an optional `vault=<name>` argument for that one call. If
+omitted, it uses the identity's configured `"default"`; an identity with
+several vaults and no default must pass `vault=` explicitly.
+`list_vaults_tool()` returns `[{name, description, is_default}]`
 for whichever identity is calling, so an MCP client can discover what it's
 allowed to pass — the built-in instructions tell Claude to call it first
 and pass `vault=` when the conversation clearly points at a non-default
@@ -369,8 +474,8 @@ and any workflow rules.
 | Category | Tools |
 |---|---|
 | **Read** | `list_notes`, `read_note`, `search_notes`, `render_note`, `get_note_outline` |
-| **Write** | `write_note`, `patch_note`, `delete_note`, `restore_note`, `append_to_note`, `patch_frontmatter`, `manage_tags`, `move_note`, `find_replace_in_vault` |
-| **Folders** | `list_folder`, `create_folder`, `delete_folder`, `restore_folder`, `rename_folder`, `list_trash` |
+| **Write** | `write_note`, `patch_note`, `delete_note`*, `restore_note`*, `append_to_note`, `patch_frontmatter`, `manage_tags`, `move_note`, `find_replace_in_vault` |
+| **Folders** | `list_folder`, `create_folder`, `delete_folder`*, `restore_folder`*, `rename_folder`, `list_trash`* |
 | **Query** | `query_notes`, `get_backlinks`, `get_broken_links`, `get_orphans`, `get_link_graph`, `get_vault_stats`, `get_tasks`, `resolve_alias` |
 | **Tags** | `get_notes_by_tag`, `get_tag_tree`, `list_all_tags` |
 | **Periodic** | `get_daily_note`, `get_periodic_note` |
@@ -381,6 +486,8 @@ and any workflow rules.
 | **Attachments** | `list_attachments`, `read_attachment`, `add_attachment` |
 | **Templates** | `list_templates`, `create_from_template` |
 
+\* Delete, restore, and trash-listing tools are registered only when `ENABLE_DELETE=true`.
+
 Canvas, Excalidraw, Kanban, and Bases are each opt-in (see [Optional plugin-format tools](#optional-plugin-format-tools-canvas--excalidraw--kanban--bases) above) — their tools only appear once the matching `ENABLE_*` flag is set.
 
 Full parameter documentation is embedded in the server and shown automatically to connected AI clients.
@@ -389,15 +496,15 @@ Full parameter documentation is embedded in the server and shown automatically t
 
 ```
 src/obsidian_mcp/
-├── config.py          # env-based config (VAULT_PATH, READ_ONLY, WRITE_PATHS)
+├── config.py          # env-based config and read/write security boundaries
 ├── server.py          # FastMCP entry point, tool and resource registrations
 ├── domain/
 │   ├── models.py      # Note dataclass (frontmatter, tags, wikilinks, tasks, …)
 │   ├── parser.py      # Markdown parser (YAML frontmatter, wikilinks, block refs, …)
 │   └── index.py       # VaultIndex — alias resolution, backlinks, tag tree, BFS
 ├── storage/
-│   ├── filesystem.py  # atomic writes (temp + os.replace), path validation
-│   ├── locking.py     # per-file filelock to prevent concurrent write conflicts
+│   ├── filesystem.py  # VaultStorage authorization and atomic writes
+│   ├── locking.py     # hashed locks outside the synced vault
 │   └── watcher.py     # watchdog-based vault change detection (polling fallback)
 └── tools/
     ├── read.py        # read_note, search_notes, render_note, get_note_outline
@@ -416,9 +523,32 @@ src/obsidian_mcp/
 ## Development
 
 ```bash
-uv run pytest                  # run tests (330 tests)
-uv run ruff check src/ tests/  # lint
+uv run pytest -q       # complete automated suite
+uv run ruff check src/ tests/ scripts/run_local_smoke_test.py scripts/smoke_test_mcp.py
 ```
+
+### Local HTTP functional smoke test
+
+The automated suite exercises most behavior in process. This command also
+starts the installed server entry point and connects a real authenticated MCP
+client over HTTP:
+
+```bash
+uv run python scripts/run_local_smoke_test.py
+```
+
+The runner chooses a free localhost port, creates a disposable vault and API
+key, starts and health-checks the server, then invokes `smoke_test_mcp.py`. The
+client lists tools, creates and reads a uniquely named note, overwrites it,
+verifies the bytes on disk, and confirms that a write outside `WRITE_PATHS` is
+rejected. The runner always stops the server and removes successful test data;
+pass `--keep` to retain the disposable vault and server log for inspection.
+
+Use `smoke_test_mcp.py` directly for an already-running local, containerized,
+or remote server. It reads the bearer token from `OBSIDIAN_MCP_API_KEY` (or
+prompts securely), so secrets do not need to appear in command history or
+process arguments. Its denied-write probe is opt-in via `--denied-note PATH`;
+only provide a path known to be outside that server's configured write scope.
 
 ## License
 

@@ -3,13 +3,13 @@
     "private": {
       "path": "/vaults/private",
       "description": "Personal PARA vault (00-Inbox, 01-Projects, ...)",
-      "exclude_paths": ["private", ".obsidian"]
+      "exclude_paths": ["private/", ".obsidian/", ".trash/"]
     },
     "monari": {
       "path": "/vaults/monari",
       "description": "Work vault for the monari shopfitting company",
       "write_paths": ["02-Areas/monari/"],
-      "exclude_paths": [".obsidian"],
+      "exclude_paths": [".obsidian/", ".trash/"],
       "read_only": false
     }
   },

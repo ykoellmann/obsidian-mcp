@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
+import obsidian_mcp.tools.write as write_module
 from obsidian_mcp.tools.write import (
     WritePermissionError,
     append_to_note,
@@ -235,8 +236,15 @@ def test_patch_note_text_missing_note_raises(vault_factory):
 
 # ── delete_note ───────────────────────────────────────────────────────────
 
-def test_delete_note_to_trash(tmp_path, vault_factory):
+def test_delete_note_to_trash_is_narrow_exception_to_denied_write(
+    tmp_path, vault_factory, monkeypatch
+):
+    monkeypatch.setenv("DENY_WRITE_PATHS", ".trash/")
     vault_factory({"note.md": "content"})
+
+    with pytest.raises(WritePermissionError, match="protected"):
+        write_note(".trash/direct.md", "blocked")
+
     result = delete_note("note.md", trash=True)
     assert result["status"] == "deleted"
     assert not (tmp_path / "note.md").exists()
@@ -245,8 +253,9 @@ def test_delete_note_to_trash(tmp_path, vault_factory):
 
 def test_delete_note_permanent(tmp_path, vault_factory):
     vault_factory({"note.md": "content"})
-    delete_note("note.md", trash=False)
-    assert not (tmp_path / "note.md").exists()
+    with pytest.raises(Exception, match="Permanent deletion is disabled"):
+        delete_note("note.md", trash=False)
+    assert (tmp_path / "note.md").exists()
     assert not (tmp_path / ".trash").exists()
 
 
@@ -591,3 +600,28 @@ def test_find_replace_updates_index(vault_factory):
     find_replace_in_vault("old", "new", dry_run=False, index=idx)
     assert "a.md" in idx.get_notes_by_tag("new")
     assert "a.md" not in idx.get_notes_by_tag("old")
+
+
+def test_find_replace_releases_partial_lock_set(vault_factory, monkeypatch):
+    vault_factory({"a.md": "needle", "b.md": "needle"})
+
+    class FakeLock:
+        released = False
+
+        def release(self):
+            self.released = True
+
+    first = FakeLock()
+    calls = 0
+
+    def acquire_then_fail(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return first
+        raise RuntimeError("injected lock failure")
+
+    monkeypatch.setattr(write_module, "acquire_lock", acquire_then_fail)
+    with pytest.raises(RuntimeError, match="injected"):
+        find_replace_in_vault("needle", "changed", dry_run=False)
+    assert first.released is True
