@@ -155,15 +155,14 @@ unless explicitly enabled. Existing name-based clients therefore keep helpers
 such as `get_daily_note_tool` without an additional profile setting.
 
 Set `TOOL_PROFILE=focused` to opt into the smaller curated surface. It permits
-these 33 base tools (31 are registered by default; move and folder rename still
-require their flags):
+these 31 base tools:
 
 ```text
 list_vaults_tool, get_vault_conventions_tool, list_notes_tool,
 list_folder_tool, read_note_tool, get_note_outline_tool, search_notes_tool,
 find_similar_notes_tool, query_notes_tool, write_note_tool, patch_note_tool,
 patch_note_text_tool, append_to_note_tool, patch_frontmatter_tool,
-manage_tags_tool, move_note_tool, create_folder_tool, rename_folder_tool,
+manage_tags_tool, create_folder_tool,
 get_backlinks_tool, get_broken_links_tool, get_orphans_tool,
 get_link_graph_tool, get_tasks_tool, get_periodic_note_tool, lint_schema_tool,
 get_vault_stats_tool, list_all_tags_tool, list_templates_tool,
@@ -171,15 +170,13 @@ create_from_template_tool, list_attachments_tool, read_attachment_tool,
 add_attachment_tool, create_attachment_token_tool
 ```
 
-The focused profile hides uncommon administrative, destructive, batch, audit,
-rendered-read, and alias convenience tools; their Python implementations and
-the full profile remain available. Profiles only reduce what the model sees:
+The focused base omits uncommon administrative, batch, audit, rendered-read,
+and alias convenience tools; their Python implementations and the full profile
+remain available. Profiles only reduce what the model sees:
 `READ_ONLY`, authentication, `WRITE_PATHS`, and `EXCLUDE_PATHS` still control
-access. Each explicitly enabled optional format group is added to either
-profile. High-impact feature gates and profiles intersect: enabling a tool
-does not expose it if the selected profile also hides it. In particular,
-`ENABLE_DELETE` and `ENABLE_BULK_REPLACE` require `TOOL_PROFILE=full`, while
-move and folder rename are permitted by either profile when enabled.
+access. Each explicitly enabled optional format or high-impact mutation group
+is added to either profile. This keeps profile selection (the ordinary base
+surface) independent from explicit capability gates such as `ENABLE_DELETE`.
 
 Clients intentionally switching to focused should replace
 `get_daily_note_tool(date=...)` with
@@ -207,8 +204,8 @@ If a documented capability is missing, check `TOOL_PROFILE` and the relevant
 # High-impact mutations are absent from the MCP tool list unless enabled.
 # ENABLE_MOVE=true             # move_note_tool
 # ENABLE_FOLDER_RENAME=true    # rename_folder_tool
-# ENABLE_BULK_REPLACE=true     # find_replace_in_vault_tool (full profile only)
-# ENABLE_DELETE=true           # delete/trash tools (full profile only)
+# ENABLE_BULK_REPLACE=true     # find_replace_in_vault_tool
+# ENABLE_DELETE=true           # delete/trash tools
 ```
 
 Each defaults to `false`. A disabled group's tools aren't just refused at
@@ -217,9 +214,9 @@ at all.
 
 The high-impact mutation groups are similarly opt-in: set `ENABLE_MOVE`,
 `ENABLE_FOLDER_RENAME`, `ENABLE_BULK_REPLACE`, or `ENABLE_DELETE` to permit
-registration of the corresponding tools. Bulk replacement and delete/trash
-also require the full profile. Their underlying Python functions remain
-available for local/unit-test use and future transactional implementations.
+registration of the corresponding tools under either profile. Their underlying
+Python functions remain available for local/unit-test use and future
+transactional implementations.
 
 ## Usage with Claude Code
 

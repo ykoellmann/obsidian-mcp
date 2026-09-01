@@ -31,9 +31,7 @@ FOCUSED_TOOL_NAMES: Final[frozenset[str]] = frozenset(
         "append_to_note_tool",
         "patch_frontmatter_tool",
         "manage_tags_tool",
-        "move_note_tool",
         "create_folder_tool",
-        "rename_folder_tool",
         # Semantic vault operations.
         "get_backlinks_tool",
         "get_broken_links_tool",
@@ -79,12 +77,29 @@ OPTIONAL_FORMAT_TOOL_NAMES: Final[frozenset[str]] = frozenset(
     }
 )
 
+# High-impact mutations are also independently enabled. Their feature flags
+# decide whether they are registered; profile selection must not silently
+# override that explicit operator choice.
+OPTIONAL_MUTATION_TOOL_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "move_note_tool",
+        "rename_folder_tool",
+        "find_replace_in_vault_tool",
+        "delete_note_tool",
+        "restore_note_tool",
+        "delete_folder_tool",
+        "restore_folder_tool",
+        "list_trash_tool",
+    }
+)
+
 
 def is_tool_visible(name: str, profile: ToolProfile) -> bool:
     return (
         profile == "full"
         or name in FOCUSED_TOOL_NAMES
         or name in OPTIONAL_FORMAT_TOOL_NAMES
+        or name in OPTIONAL_MUTATION_TOOL_NAMES
     )
 
 

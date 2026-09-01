@@ -150,39 +150,37 @@ tool names.
 13. `append_to_note_tool`
 14. `patch_frontmatter_tool`
 15. `manage_tags_tool`
-16. `move_note_tool`
-17. `create_folder_tool`
-18. `rename_folder_tool`
+16. `create_folder_tool`
 
 #### Semantic vault operations
 
-19. `get_backlinks_tool`
-20. `get_broken_links_tool`
-21. `get_orphans_tool`
-22. `get_link_graph_tool`
-23. `get_tasks_tool`
-24. `get_periodic_note_tool`
-25. `lint_schema_tool`
-26. `get_vault_stats_tool`
-27. `list_all_tags_tool`
+17. `get_backlinks_tool`
+18. `get_broken_links_tool`
+19. `get_orphans_tool`
+20. `get_link_graph_tool`
+21. `get_tasks_tool`
+22. `get_periodic_note_tool`
+23. `lint_schema_tool`
+24. `get_vault_stats_tool`
+25. `list_all_tags_tool`
 
 #### Templates
 
-28. `list_templates_tool`
-29. `create_from_template_tool`
+26. `list_templates_tool`
+27. `create_from_template_tool`
 
 #### Attachments
 
-30. `list_attachments_tool`
-31. `read_attachment_tool`
-32. `add_attachment_tool`
-33. `create_attachment_token_tool`
+28. `list_attachments_tool`
+29. `read_attachment_tool`
+30. `add_attachment_tool`
+31. `create_attachment_token_tool`
 
 This profile is intentionally conservative:
 
-- It omits deletion, trash, restore, vault-wide replacement, and batch
-  mutation tools. Those are higher-risk and less common in an AI memory/output
-  workflow.
+- High-impact move, rename, deletion, restore, trash, and vault-wide replacement
+  tools are absent by default but added to either profile when an operator
+  explicitly enables their capability group.
 - It omits audit inspection, explicit alias resolution, rendered/transcluded
   reads, generic file discovery, and uncommon folder administration. Their
   capabilities remain in `full`.
@@ -228,9 +226,9 @@ behavioural risk. Consolidation can then be tested one family at a time.
    repeated as ad hoc `if` blocks around dozens of functions.
 4. Preserve direct Python wrappers for tests and internal callers; the profile
    should affect FastMCP registration only.
-5. Ensure existing optional-format flags compose with the profile in one
-   predictable order: base profile first, explicitly enabled formats added
-   second.
+5. Ensure existing optional-format and high-impact mutation flags compose with
+   the profile in one predictable order: base profile first, explicitly enabled
+   capability groups added second.
 6. Do not use profile selection as a security boundary. `READ_ONLY`, path
    policy, and authentication remain authoritative.
 
@@ -280,12 +278,13 @@ Add tests that verify:
 3. The three true aliases are absent from `focused` and present in `full`.
 4. Unknown profiles fail clearly at startup/import.
 5. Each optional format flag adds only its own group under both profiles.
-6. Multi-vault middleware still supplies and strips the `vault` argument for
+6. Each high-impact mutation flag adds only its own group under both profiles.
+7. Multi-vault middleware still supplies and strips the `vault` argument for
    every registered tool.
-7. Read-only and write-path behaviour is identical under both profiles.
-8. Profile-specific server instructions mention only registered tools.
-9. Prompts do not prescribe unavailable tools.
-10. Reloading the server under different environment settings does not leak
+8. Read-only and write-path behaviour is identical under both profiles.
+9. Profile-specific server instructions mention only registered tools.
+10. Prompts do not prescribe unavailable tools.
+11. Reloading the server under different environment settings does not leak
     registrations between tests.
 
 Retain the existing tool-function tests: a hidden tool in `focused` still has
@@ -364,6 +363,8 @@ branch prototype actual consolidation:
   the first implementation.
 - Focused instructions and prompts reference only tools the client can see.
 - Optional format groups remain opt-in and compose correctly with both
+  profiles.
+- High-impact mutation groups remain opt-in and compose correctly with both
   profiles.
 - Authorization and mutation semantics are unchanged.
 - Full tests, lint, package build, and scripted MCP smoke tests pass.

@@ -99,7 +99,7 @@ async def test_explicit_full_profile_has_exact_documented_surface(monkeypatch):
 def test_documented_profile_cardinalities():
     assert len(BASE_FULL_TOOL_NAMES) == 48
     assert len(DEFAULT_FULL_TOOL_NAMES) == 40
-    assert len(FOCUSED_TOOL_NAMES) == 33
+    assert len(FOCUSED_TOOL_NAMES) == 31
     assert len(DEFAULT_FOCUSED_TOOL_NAMES) == 31
 
 
@@ -138,15 +138,12 @@ async def test_optional_groups_compose_with_both_profiles(monkeypatch, profile, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("profile", ["full", "focused"])
 @pytest.mark.parametrize("group", sorted(HIGH_RISK_GROUPS))
-async def test_high_risk_groups_are_also_filtered_by_profile(monkeypatch, profile, group):
+async def test_high_risk_groups_compose_with_both_profiles(monkeypatch, profile, group):
     server = _reload_server(monkeypatch, profile, **{group: True})
     expected_base = (
         DEFAULT_FULL_TOOL_NAMES if profile == "full" else DEFAULT_FOCUSED_TOOL_NAMES
     )
-    expected_group = set(HIGH_RISK_GROUPS[group])
-    if profile == "focused":
-        expected_group &= FOCUSED_TOOL_NAMES
-    assert await _tool_names(server) == expected_base | expected_group
+    assert await _tool_names(server) == expected_base | HIGH_RISK_GROUPS[group]
 
 
 def test_unknown_profile_fails_during_server_import(monkeypatch):
