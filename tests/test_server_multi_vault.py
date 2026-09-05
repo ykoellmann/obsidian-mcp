@@ -16,9 +16,9 @@ from obsidian_mcp.server import (
     VaultResolutionMiddleware,
     _APIKeyAuthProvider,
     _identities_from_env,
+    _list_vaults,
     _resolve_identity,
     _select_vault,
-    list_vaults_tool,
 )
 
 
@@ -81,14 +81,13 @@ def test_shared_server_instructions_do_not_expose_default_vault_conventions(
     with monkeypatch.context() as profile_env:
         profile_env.setenv("VAULTS_CONFIG", str(config_path))
         profile_env.setenv("TRANSPORT", "sse")
-        profile_env.setenv("TOOL_PROFILE", "focused")
         profile_env.delenv("VAULT_PATH", raising=False)
         profile_env.setattr(cfg_mod, "_config", None)
         server = importlib.reload(server_mod)
 
         instructions = server._load_instructions()
 
-        assert instructions == server._FOCUSED_INSTRUCTIONS
+        assert instructions == server._INSTRUCTIONS
         assert "private default-vault instructions" not in instructions
 
     cfg_mod._config = None
@@ -359,11 +358,11 @@ async def test_middleware_allows_vault_discovery_without_default(tmp_path, monke
     )
 
     async def call_next(context):
-        return list_vaults_tool()
+        return _list_vaults()
 
     middleware = VaultResolutionMiddleware()
     context = MiddlewareContext(
-        message=_FakeMessage(arguments={}, name="list_vaults_tool")
+        message=_FakeMessage(arguments={}, name="list_vaults")
     )
     result = await middleware.on_call_tool(context, call_next)
 
@@ -371,16 +370,16 @@ async def test_middleware_allows_vault_discovery_without_default(tmp_path, monke
     assert not any(item["is_default"] for item in result)
 
 
-# ── list_vaults_tool ─────────────────────────────────────────────────────
+# ── _list_vaults ─────────────────────────────────────────────────────
 
-def test_list_vaults_tool_single_vault_mode(vault_factory):
+def test__list_vaults_single_vault_mode(vault_factory):
     vault_factory({})
-    result = list_vaults_tool()
+    result = _list_vaults()
     assert len(result) == 1
     assert result[0]["is_default"] is True
 
 
-def test_list_vaults_tool_multi_vault_mode(tmp_path, monkeypatch):
+def test__list_vaults_multi_vault_mode(tmp_path, monkeypatch):
     cfg = _cfg_with_vaults(
         tmp_path, monkeypatch,
         extra_identities=[
@@ -394,7 +393,7 @@ def test_list_vaults_tool_multi_vault_mode(tmp_path, monkeypatch):
         lambda: AccessToken(token="sk-both", client_id="sk-both", scopes=[]),
     )
 
-    result = list_vaults_tool()
+    result = _list_vaults()
     names = {v["name"]: v["is_default"] for v in result}
     assert names == {"private": True, "monari": False}
 

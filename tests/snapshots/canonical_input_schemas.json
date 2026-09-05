@@ -1,0 +1,832 @@
+{
+  "add_attachment": {
+    "additionalProperties": false,
+    "properties": {
+      "contentBase64": {
+        "type": "string"
+      },
+      "path": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "path",
+      "contentBase64"
+    ],
+    "type": "object"
+  },
+  "append_file": {
+    "additionalProperties": false,
+    "properties": {
+      "content": {
+        "type": "string"
+      },
+      "expectedRevision": {
+        "anyOf": [
+          {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "path": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "path",
+      "content"
+    ],
+    "type": "object"
+  },
+  "create_file": {
+    "additionalProperties": false,
+    "properties": {
+      "content": {
+        "type": "string"
+      },
+      "path": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "path",
+      "content"
+    ],
+    "type": "object"
+  },
+  "edit_file": {
+    "additionalProperties": false,
+    "properties": {
+      "content": {
+        "type": "string"
+      },
+      "expectedRevision": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "path": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "path",
+      "content",
+      "expectedRevision"
+    ],
+    "type": "object"
+  },
+  "get_backlinks": {
+    "additionalProperties": false,
+    "properties": {
+      "path": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "type": "object"
+  },
+  "get_file_outline": {
+    "additionalProperties": false,
+    "properties": {
+      "path": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "type": "object"
+  },
+  "get_tasks": {
+    "additionalProperties": false,
+    "properties": {
+      "due_after": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "due_before": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "folder": {
+        "default": "",
+        "type": "string"
+      },
+      "status": {
+        "default": "open",
+        "type": "string"
+      },
+      "tag": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  },
+  "list_attachments": {
+    "additionalProperties": false,
+    "properties": {
+      "cursor": {
+        "anyOf": [
+          {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "limit": {
+        "default": 50,
+        "maximum": 100,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "prefix": {
+        "default": "",
+        "maxLength": 1024,
+        "type": "string"
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  },
+  "list_files": {
+    "additionalProperties": false,
+    "properties": {
+      "cursor": {
+        "anyOf": [
+          {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "limit": {
+        "default": 50,
+        "maximum": 100,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "prefix": {
+        "default": "",
+        "maxLength": 1024,
+        "type": "string"
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  },
+  "list_vaults": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  },
+  "patch_file": {
+    "additionalProperties": false,
+    "properties": {
+      "expectedRevision": {
+        "anyOf": [
+          {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "newText": {
+        "type": "string"
+      },
+      "oldText": {
+        "type": "string"
+      },
+      "path": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+      },
+      "replaceAll": {
+        "default": false,
+        "type": "boolean"
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "path",
+      "oldText",
+      "newText"
+    ],
+    "type": "object"
+  },
+  "patch_frontmatter": {
+    "additionalProperties": false,
+    "properties": {
+      "expectedRevision": {
+        "anyOf": [
+          {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "path": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+      },
+      "remove": {
+        "anyOf": [
+          {
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "updates": {
+        "additionalProperties": {},
+        "propertyNames": {
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "type": "object"
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "path",
+      "updates"
+    ],
+    "type": "object"
+  },
+  "read_attachment": {
+    "additionalProperties": false,
+    "properties": {
+      "path": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "type": "object"
+  },
+  "read_file": {
+    "additionalProperties": false,
+    "properties": {
+      "endLine": {
+        "anyOf": [
+          {
+            "minimum": 1,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "expectedRevision": {
+        "anyOf": [
+          {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "path": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+      },
+      "startLine": {
+        "anyOf": [
+          {
+            "minimum": 1,
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "type": "object"
+  },
+  "read_files": {
+    "additionalProperties": false,
+    "properties": {
+      "files": {
+        "items": {
+          "additionalProperties": false,
+          "properties": {
+            "endLine": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "expectedRevision": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "path": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "startLine": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "maxItems": 10,
+        "minItems": 1,
+        "type": "array"
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "files"
+    ],
+    "type": "object"
+  },
+  "read_frontmatter": {
+    "additionalProperties": false,
+    "properties": {
+      "path": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "path"
+    ],
+    "type": "object"
+  },
+  "search_files": {
+    "additionalProperties": false,
+    "properties": {
+      "cursor": {
+        "anyOf": [
+          {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "filters": {
+        "anyOf": [
+          {
+            "items": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "operator": {
+                      "enum": [
+                        "eq",
+                        "ne",
+                        "contains"
+                      ],
+                      "type": "string"
+                    },
+                    "property": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "value": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "property",
+                    "operator",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "operator": {
+                      "const": "exists",
+                      "type": "string"
+                    },
+                    "property": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "property",
+                    "operator",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "operator": {
+                      "enum": [
+                        "lt",
+                        "lte",
+                        "gt",
+                        "gte"
+                      ],
+                      "type": "string"
+                    },
+                    "property": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "type": {
+                      "enum": [
+                        "number",
+                        "date"
+                      ],
+                      "type": "string"
+                    },
+                    "value": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "number"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "property",
+                    "operator",
+                    "type",
+                    "value"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "limit": {
+        "default": 20,
+        "maximum": 50,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "pathPrefix": {
+        "default": "",
+        "maxLength": 1024,
+        "type": "string"
+      },
+      "properties": {
+        "anyOf": [
+          {
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "query": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "vault": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

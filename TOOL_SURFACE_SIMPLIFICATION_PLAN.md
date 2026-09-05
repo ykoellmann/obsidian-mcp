@@ -1,3 +1,5 @@
+> Historical plan, superseded by [the implemented canonical surface](docs/mcp-surface-harmonization.md). Profiles and legacy MCP aliases have been removed.
+
 # Tool Surface Simplification Plan
 
 Status: proposed implementation plan  

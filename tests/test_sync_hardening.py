@@ -197,23 +197,23 @@ async def test_scripted_mcp_calls_return_revision_and_error_conflict(tmp_path, m
     _configured_storage(tmp_path, monkeypatch)
     index = VaultIndex(tmp_path)
     index.build()
-    monkeypatch.setattr(server, "_index", index)
+    monkeypatch.setattr(server, "_indices", {"default": index})
 
     async with Client(server.mcp) as client:
-        read_result = await client.call_tool("read_note_tool", {"path": "note.md"})
+        read_result = await client.call_tool("read_file", {"path": "note.md"})
         revision = read_result.data["revision"]
         await client.call_tool(
-            "append_to_note_tool",
-            {"path": "note.md", "content": "second", "expected_revision": revision},
+            "append_file",
+            {"path": "note.md", "content": "second", "expectedRevision": revision},
         )
         conflict = await client.call_tool(
-            "append_to_note_tool",
-            {"path": "note.md", "content": "second", "expected_revision": revision},
+            "append_file",
+            {"path": "note.md", "content": "second", "expectedRevision": revision},
             raise_on_error=False,
         )
 
     assert conflict.is_error is True
-    assert conflict.structured_content["error"] == "revision_conflict"
+    assert conflict.structured_content["error"]["code"] == "revision_conflict"
 
 
 def test_create_only_probe_cleans_up(tmp_path):

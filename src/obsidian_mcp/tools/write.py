@@ -417,8 +417,10 @@ def _parse_frontmatter(raw: str) -> tuple[dict, str]:
     if m:
         try:
             fm: dict = yaml.safe_load(m.group(1)) or {}
-        except Exception:
-            fm = {}
+        except Exception as exc:
+            raise ValueError("Invalid YAML frontmatter; refusing to discard metadata") from exc
+        if not isinstance(fm, dict):
+            raise ValueError("YAML frontmatter must be a mapping")
         return fm, raw[m.end():]
     return {}, raw
 

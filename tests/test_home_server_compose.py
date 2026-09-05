@@ -22,9 +22,8 @@ def test_home_server_compose_has_read_only_vault_and_nested_write_overlays():
     assert service["environment"]["WRITE_PATHS"] == "${AI_MEMORY_PATH:-AI-Memory}/,${AI_OUTPUT_PATH:-AI-Output}/"
     assert service["environment"]["DENY_WRITE_PATHS"] == ".obsidian/,.trash/,_AI_INSTRUCTIONS.md"
     assert service["environment"]["EXCLUDE_PATHS"] == "private/,.obsidian/,.trash/"
-    for flag in ("ENABLE_MOVE", "ENABLE_FOLDER_RENAME", "ENABLE_BULK_REPLACE"):
-        assert service["environment"][flag] == "${" + flag + ":-false}"
-    assert service["environment"]["ENABLE_DELETE"] == "false"
+    assert "ENABLE_DELETE" not in service["environment"]
+
     assert service["environment"]["REQUIRE_WRITE_PRECONDITIONS"] == (
         "${REQUIRE_WRITE_PRECONDITIONS:-true}"
     )

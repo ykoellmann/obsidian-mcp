@@ -22,25 +22,16 @@ The intended setup is to host obsidian-mcp on a server or NAS where your vault i
 
 ## Features
 
-- **Read & Search** — read notes, search full-text (exact/regex/fuzzy, optionally combined with a frontmatter filter or scoped to filenames), render embedded transclusions, inspect note outlines, list every file in the vault regardless of type
-- **Duplicate prevention** — `find_similar_notes_tool` ranks notes by TF-IDF similarity so a new note doesn't duplicate an existing one under different wording
-- **Schema linting** — `lint_schema_tool` validates frontmatter against the enums declared in your own `_AI_INSTRUCTIONS.md`, plus an optional cron-friendly health-check script
-- **Write** — create/overwrite notes (with automatic frontmatter preservation, dry-run previews, and unified diffs), patch sections or anchor-less body text, append content, update frontmatter (single or batch), manage tags, move notes with automatic wikilink rewriting
-- **Folders** — list (optionally recursive with a full tree dump), create, delete, rename folders; renaming rewrites path-based wikilinks vault-wide
-- **Query & Graph** — backlinks, broken links, orphan detection, BFS link graph, vault stats, task collection across vault
-- **Dataview-like queries** — filter notes by tags, status, frontmatter fields (exact match or `$ne`/`$in`/`$nin`/`$exists` operators), or inline fields (`key:: value`)
-- **Audit log** — every write-tool call is recorded ({timestamp, tool, path, summary}); `get_audit_log_tool`/`get_note_history_tool` query it
-- **Periodic Notes** — read/preview daily, weekly, monthly, quarterly, yearly journal notes from templates
-- **Canvas** *(opt-in via `ENABLE_CANVAS`)* — read, create, and patch Obsidian Canvas (`.canvas`) files
-- **Excalidraw** *(opt-in via `ENABLE_EXCALIDRAW`)* — read, create, and patch Obsidian Excalidraw (`*.excalidraw.md`) drawings
-- **Kanban** *(opt-in via `ENABLE_KANBAN`)* — read, create, and manipulate Obsidian Kanban boards (columns and cards)
-- **Bases** *(opt-in via `ENABLE_BASES`)* — read, create, and patch Obsidian Bases (`.base`) files — YAML-defined table/cards/list views over existing frontmatter properties
-- **Attachments** — list, read (text or base64), and add binary files
-- **Two auth variants** — a static API key (Claude Code, Desktop, curl) and, optionally, GitHub OAuth (claude.ai Web/Mobile Custom Connector) — usable independently or at the same time
-- **Multi-vault** *(opt-in via `VAULTS_CONFIG`)* — serve several fully isolated vaults from one deployment, each identity (API key or GitHub login) mapped to only the vault(s) it may access
-- **Templates** — render Obsidian templates with built-in (`{{date}}`, `{{title}}`, …) and custom variables
-- **MCP Resources** — expose vault notes, stats, and tags as MCP resources for direct context injection
-- **MCP Prompts** — `weekly_review`, `daily_note` starting points for common workflows
+- Raw Markdown reads, section outlines and bounded batch reads.
+- Paginated file/attachment discovery and literal AND search with typed YAML filters.
+- Create-only writes, revision-required full replacements, exact patches and literal appends.
+- Targeted frontmatter updates, backlinks, tasks and create-only attachment uploads.
+- Read/write path policies, audit logging, multi-vault identity isolation and API-key/GitHub authentication.
+- Optional Canvas, Excalidraw, Kanban and Bases tool groups.
+- Daily-note and weekly-review prompts guided by user-authored vault conventions.
+
+This branch is a clean MCP interface break: **17 base tools, no profiles or legacy
+aliases**. Reconnect clients to refresh discovery. See the [interface contract](docs/mcp-surface-harmonization.md).
 
 ## Installation
 
@@ -75,10 +66,9 @@ VAULT_PATH=/path/to/your/obsidian/vault
 # DENY_READ_PATHS=.obsidian/,.trash/ # security boundary for all reads
 # DENY_WRITE_PATHS=.obsidian/,.trash/,_AI_INSTRUCTIONS.md
 # ALLOW_PERMANENT_DELETE=false
-# REQUIRE_WRITE_PRECONDITIONS=true # require read revision before full overwrite
+# REQUIRE_WRITE_PRECONDITIONS=true # strict replacements for optional format tools
 # INDEX_RECONCILE_INTERVAL=900     # full Markdown hash sweep every 15 minutes
 # TRANSPORT=stdio           # stdio (default), http (recommended for network use), or sse (legacy)
-# TOOL_PROFILE=full         # opt into the larger compatibility surface
 ```
 
 Slash-suffixed policy entries such as `Notes/` cover that directory and its
@@ -107,12 +97,12 @@ only a discovery filter—not an access-control boundary. For example,
 `private/` hides that root directory and its descendants, while it does not
 hide `Projects/private/`.
 
-Revision-aware note mutation tools must read the target to determine existence,
-preserve frontmatter, calculate diffs, or derive an incremental edit. They
+Note mutation tools require read access to validate revisions and derive
+incremental edits. They
 therefore reject paths covered by `DENY_READ_PATHS` even if `WRITE_PATHS` also
 contains the path. Avoid overlapping those scopes for note workflows. The
 storage policy can still support intentionally write-only capabilities that do
-not inspect existing content, but `write_note_tool` is not one of them.
+not inspect existing content, but the canonical note tools are not among them.
 
 The best-effort JSONL audit log is application state, not vault content. It
 defaults beneath `LOCK_PATH` for native runs and to `/data/audit.jsonl` in
@@ -128,10 +118,9 @@ compatible UID/GID and umask settings so both can continue reading and updating
 new notes; the home-server profile exposes these as `PUID` and `PGID`.
 
 Direct note reads return an opaque `sha256:...` revision. Pass it as
-`expected_revision` when replacing or appending to an existing note so an edit
+`expectedRevision` when replacing or appending to an existing note so an edit
 landed by Obsidian Sync during the client's think time is reported as a conflict
-instead of silently overwritten. Network Compose configurations enable strict
-full-overwrite preconditions by default. Incremental patch/tag/frontmatter tools
+instead of silently overwritten. Canonical whole-file replacement always requires the read revision. Incremental patch/frontmatter tools
 always protect the exact version they read internally. This is optimistic
 concurrency, not exactly-once execution: after a lost append response, re-read
 and verify the result before retrying without the old revision.
@@ -147,69 +136,11 @@ Full list of variables — including `API_KEY`, `PUBLIC_BASE_URL`, and the
 documented with inline comments in `.env.example`; see [Remote Setup](#remote-setup-recommended)
 for the two auth variants in detail.
 
-### Tool profiles
+### Optional format tools
 
-`TOOL_PROFILE=focused` is the default. It permits these 33 base tools (31 are
-registered by default; move and folder rename still require their flags):
-
-```text
-list_vaults_tool, get_vault_conventions_tool, list_notes_tool,
-list_folder_tool, read_note_tool, get_note_outline_tool, search_notes_tool,
-find_similar_notes_tool, query_notes_tool, write_note_tool, patch_note_tool,
-patch_note_text_tool, append_to_note_tool, patch_frontmatter_tool,
-manage_tags_tool, move_note_tool, create_folder_tool, rename_folder_tool,
-get_backlinks_tool, get_broken_links_tool, get_orphans_tool,
-get_link_graph_tool, get_tasks_tool, get_periodic_note_tool, lint_schema_tool,
-get_vault_stats_tool, list_all_tags_tool, list_templates_tool,
-create_from_template_tool, list_attachments_tool, read_attachment_tool,
-add_attachment_tool, create_attachment_token_tool
-```
-
-Set `TOOL_PROFILE=full` to opt into the larger compatibility surface. It
-permits all 48 base tools; the separate high-impact mutation gates described
-below leave 40 registered unless explicitly enabled.
-
-The focused profile hides uncommon administrative, destructive, batch, audit,
-rendered-read, and alias convenience tools; their Python implementations and
-the full profile remain available. Profiles only reduce what the model sees:
-`READ_ONLY`, authentication, `WRITE_PATHS`, and `EXCLUDE_PATHS` still control
-access. Each explicitly enabled optional format group is added to either
-profile. High-impact feature gates and profiles intersect: enabling a tool
-does not expose it if the selected profile also hides it.
-
-If a documented capability is missing, check `TOOL_PROFILE` and the relevant
-`ENABLE_*` flag, then reconnect the MCP client so it refreshes
-`tools/list`.
-
-### Optional plugin-format tools (Canvas / Excalidraw / Kanban / Bases)
-
-> [!WARNING]
-> **Breaking change:** as of this version, the Canvas, Excalidraw, and Kanban
-> tool groups are disabled by default, alongside the new Bases tools. If you
-> already rely on any of them, set the matching flag(s) below — otherwise
-> those tools disappear from your client's tool list after upgrading.
-
-```env
-# ENABLE_CANVAS=true      # .canvas file tools
-# ENABLE_EXCALIDRAW=true  # *.excalidraw.md file tools
-# ENABLE_KANBAN=true      # Kanban board tools
-# ENABLE_BASES=true       # .base file tools (Obsidian core plugin, 1.9.0+)
-
-# High-impact mutations are absent from the MCP tool list unless enabled.
-# ENABLE_MOVE=true             # move_note_tool
-# ENABLE_FOLDER_RENAME=true    # rename_folder_tool
-# ENABLE_BULK_REPLACE=true     # find_replace_in_vault_tool
-# ENABLE_DELETE=true           # delete_note_tool and delete_folder_tool
-```
-
-Each defaults to `false`. A disabled group's tools aren't just refused at
-call time — they're never registered, so they don't appear in the tool list
-at all.
-
-The high-impact mutation groups are similarly opt-in: set `ENABLE_MOVE`,
-`ENABLE_FOLDER_RENAME`, `ENABLE_BULK_REPLACE`, or `ENABLE_DELETE` to register
-the corresponding tools. Their underlying Python functions remain available
-for local/unit-test use and future transactional implementations.
+Set `ENABLE_CANVAS`, `ENABLE_EXCALIDRAW`, `ENABLE_KANBAN` or `ENABLE_BASES` to `true`
+to register the corresponding format group. All default to false. There is no
+focused/full selection. Delete, move, folder and bulk-edit MCP tools are not exposed.
 
 ## Usage with Claude Code
 
@@ -294,10 +225,7 @@ profile. Then run:
 docker compose -f docker-compose.home-server.yml up -d
 ```
 
-Folder/note trash and restore are intentionally unavailable in this nested-bind
-profile: moving from a writable overlay into the read-only parent vault's
-`.trash` would cross mounts. Keep `ENABLE_DELETE=false` (hard-coded here) and
-do not enable folder restore in this topology.
+Folder/note trash, restore and move tools are not exposed by this interface.
 
 The static Compose checks are covered by the test suite. A real deployment
 test (Docker mount precedence, host UID/GID permissions, and the Cloudflare
@@ -306,30 +234,6 @@ server before relying on it. To update Cloudflared, choose a reviewed release,
 resolve its immutable `RepoDigest`, update `CLOUDFLARED_IMAGE`, then recreate
 the sidecar; rebuild the MCP service after source changes with
 `docker compose -f docker-compose.home-server.yml build --pull`.
-
-### Health-Check Cron (Frontmatter Schema)
-
-Separate from the `/health` liveness check above: `scripts/health_check.py` runs `lint_schema_tool`'s logic directly (no MCP client needed) and, only if it finds notes whose frontmatter violates the enums declared in your `_AI_INSTRUCTIONS.md`, drops a report note into your vault's inbox folder. Silent when the vault is clean — no note, no noise.
-
-```bash
-# One-off / manual run:
-VAULT_PATH=/path/to/vault HEALTH_CHECK_INBOX=00-Inbox python scripts/health_check.py
-```
-
-To run it weekly via cron against the running container:
-
-```cron
-# crontab -e (on the Docker host)
-0 6 * * 1 docker exec obsidian-mcp-obsidian-mcp-1 \
-  env VAULT_PATH=/vault READ_ONLY=false WRITE_PATHS=00-Inbox/ \
-  HEALTH_CHECK_INBOX=00-Inbox python scripts/health_check.py
-```
-
-Swap the container name for whatever `docker compose ps` shows, and set both
-`HEALTH_CHECK_INBOX` and `WRITE_PATHS` to your vault's actual inbox folder
-(default `Inbox`). The command must have write access because it creates a
-report when violations are found. With the home-server profile, choose an
-inbox inside one of its writable nested mounts (for example `AI-Output/`).
 
 ## Remote Setup (Recommended)
 
@@ -485,7 +389,7 @@ An identity with more than one entry in `"vaults"` can switch between them:
 every tool accepts an optional `vault=<name>` argument for that one call. If
 omitted, it uses the identity's configured `"default"`; an identity with
 several vaults and no default must pass `vault=` explicitly.
-`list_vaults_tool()` returns `[{name, description, is_default}]`
+`list_vaults()` returns `{vaults: [{name, description, is_default}]}`
 for whichever identity is calling, so an MCP client can discover what it's
 allowed to pass — the built-in instructions tell Claude to call it first
 and pass `vault=` when the conversation clearly points at a non-default
@@ -496,11 +400,9 @@ re-selected on every call, same as any other argument.
 multi-vault-aware: a plain `Authorization: Bearer` request resolves to that
 identity's default vault, or pass `?vault=<name>` in the URL to pick a
 different one of its allowed vaults (same rule as the `vault=` tool
-argument). `create_attachment_token_tool`'s short-lived scoped tokens
-(`?exp=&sig=`) work too, signed against the calling identity's own key and
-bound to a specific vault — but only for **api_key** identities, since a
-GitHub login has no static secret of its own to sign with; use a plain
-`Authorization: Bearer` request for those instead.
+argument). Existing signed transfer URLs remain valid; token minting is no longer
+an MCP tool.
+
 
 > **Known limitation:** `/health` doesn't go through per-request auth/vault
 > resolution — it always reports on the first vault listed in
@@ -527,44 +429,40 @@ Create `_AI_INSTRUCTIONS.md` in your vault root to teach the AI how your specifi
 - Every note needs a created: date in frontmatter
 ```
 
-In single-vault mode, the server loads this file at startup and sends it to
-the AI as system instructions. Without it, built-in generic Obsidian syntax
-guidance is used. Multi-vault servers always use the generic startup
-instructions because MCP server instructions are shared by every identity;
-use `get_vault_conventions_tool(vault=...)` to load the selected vault's
-conventions after authorization. The `_AI_INSTRUCTIONS.md` is the right place
-for everything vault-specific — folder layout, tag schema, naming conventions,
-and any workflow rules.
+The model reads this file through `read_file` after selecting and authorizing the
+vault. Its contents are user context, not privileged server instructions. When
+conventions are absent, the model asks for daily-note paths/timezones rather than
+inventing them.
 
 ## Tool Reference
 
-| Category | Tools |
+| Intent | Tools |
 |---|---|
-| **Read** | `list_notes`, `read_note`, `search_notes`, `render_note`, `get_note_outline` |
-| **Write** | `write_note`, `patch_note`, `delete_note`*, `restore_note`*, `append_to_note`, `patch_frontmatter`, `manage_tags`, `move_note`, `find_replace_in_vault` |
-| **Folders** | `list_folder`, `create_folder`, `delete_folder`*, `restore_folder`*, `rename_folder`, `list_trash`* |
-| **Query** | `query_notes`, `get_backlinks`, `get_broken_links`, `get_orphans`, `get_link_graph`, `get_vault_stats`, `get_tasks`, `resolve_alias` |
-| **Tags** | `get_notes_by_tag`, `get_tag_tree`, `list_all_tags` |
-| **Periodic** | `get_daily_note`, `get_periodic_note` |
-| **Canvas** | `list_canvases`, `read_canvas`, `write_canvas`, `patch_canvas` |
-| **Excalidraw** | `list_excalidraw`, `read_excalidraw`, `write_excalidraw`, `patch_excalidraw` |
-| **Kanban** | `read_kanban`, `create_kanban_board`, `add_kanban_card`, `move_kanban_card`, `delete_kanban_card` |
-| **Bases** | `list_bases`, `read_base`, `write_base`, `patch_base` |
-| **Attachments** | `list_attachments`, `read_attachment`, `add_attachment` |
-| **Templates** | `list_templates`, `create_from_template` |
+| Vault | `list_vaults` |
+| Discovery | `list_files`, `search_files`, `list_attachments` |
+| Read | `read_file`, `read_files`, `read_frontmatter`, `get_file_outline`, `read_attachment` |
+| Write | `create_file`, `edit_file`, `append_file`, `patch_file`, `patch_frontmatter`, `add_attachment` |
+| Semantic extras | `get_backlinks`, `get_tasks` |
 
-\* Delete, restore, and trash-listing tools are registered only when `ENABLE_DELETE=true`.
+`read_file` returns raw Markdown including YAML. `edit_file` replaces exactly that
+content and requires `expectedRevision`. Incremental writes accept an optional
+revision; pass the one read. `append_file` inserts no separators, and `patch_file`
+requires a unique literal match unless `replaceAll=true`. Frontmatter arrays replace;
+use `remove` for key deletion. Attachments are read as base64 and uploaded create-only.
 
-Canvas, Excalidraw, Kanban, and Bases are each opt-in (see [Optional plugin-format tools](#optional-plugin-format-tools-canvas--excalidraw--kanban--bases) above) — their tools only appear once the matching `ENABLE_*` flag is set.
-
-Full parameter documentation is embedded in the server and shown automatically to connected AI clients.
+Listing uses `prefix`, search uses `pathPrefix`; both accept `limit` and `cursor`.
+Follow cursors until absent for exhaustive results. Search supports typed YAML
+filters and selected properties, including queries without text. Regex/fuzzy and
+Dataview inline-field search are not exposed. See [schemas, examples, limits and
+pagination semantics](docs/mcp-surface-harmonization.md).
 
 ## Architecture
 
 ```
 src/obsidian_mcp/
 ├── config.py          # env-based config and read/write security boundaries
-├── server.py          # FastMCP entry point, tool and resource registrations
+├── server.py          # FastMCP entry point, authentication, optional formats
+├── canonical_server.py # the 17-tool MCP surface
 ├── domain/
 │   ├── models.py      # Note dataclass (frontmatter, tags, wikilinks, tasks, …)
 │   ├── parser.py      # Markdown parser (YAML frontmatter, wikilinks, block refs, …)
@@ -574,7 +472,8 @@ src/obsidian_mcp/
 │   ├── locking.py     # hashed locks outside the synced vault
 │   └── watcher.py     # watchdog-based vault change detection (polling fallback)
 └── tools/
-    ├── read.py        # read_note, search_notes, render_note, get_note_outline
+    ├── canonical.py   # raw Markdown, exact mutations and paginated search
+    ├── read.py        # internal parsing/search helpers
     ├── write.py       # write_note, patch_note, move_note, manage_tags, …
     ├── query.py       # graph tools, task aggregation, periodic notes, query_notes
     ├── folders.py     # folder management

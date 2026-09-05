@@ -38,12 +38,6 @@ services:
       ENABLE_EXCALIDRAW: "${ENABLE_EXCALIDRAW:-false}"
       ENABLE_KANBAN: "${ENABLE_KANBAN:-false}"
       ENABLE_BASES: "${ENABLE_BASES:-false}"
-      ENABLE_MOVE: "${ENABLE_MOVE:-false}"
-      ENABLE_FOLDER_RENAME: "${ENABLE_FOLDER_RENAME:-false}"
-      ENABLE_BULK_REPLACE: "${ENABLE_BULK_REPLACE:-false}"
-      # Trash requires a cross-mount rename into the read-only parent vault.
-      # It is deliberately unavailable in this nested-bind profile.
-      ENABLE_DELETE: "false"
     volumes:
       - "${HOST_VAULT_PATH:?set HOST_VAULT_PATH in .env}:/vault:ro"
       - "${HOST_VAULT_PATH:?}/${AI_MEMORY_PATH:-AI-Memory}:/vault/${AI_MEMORY_PATH:-AI-Memory}:rw"

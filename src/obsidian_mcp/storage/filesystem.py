@@ -160,10 +160,14 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[written:]
 
 
-def _read_all(fd: int) -> bytes:
+def _read_all(fd: int, max_bytes: int | None = None) -> bytes:
     chunks: list[bytes] = []
+    total = 0
     while True:
-        chunk = os.read(fd, 1024 * 1024)
+        chunk = os.read(fd, min(1024 * 1024, max_bytes - total + 1) if max_bytes is not None else 1024 * 1024)
+        total += len(chunk)
+        if max_bytes is not None and total > max_bytes:
+            raise OverflowError(f"File exceeds {max_bytes} bytes")
         if not chunk:
             return b"".join(chunks)
         chunks.append(chunk)
@@ -427,7 +431,7 @@ class VaultStorage:
         content, _ = self.read_bytes_with_revision(path)
         return content
 
-    def read_bytes_with_revision(self, path: str) -> tuple[bytes, FileRevision]:
+    def read_bytes_with_revision(self, path: str, *, max_bytes: int | None = None) -> tuple[bytes, FileRevision]:
         target = self.resolve_read(path)
         with _opened_parent(self.policy.root, target.relative) as (parent_fd, leaf):
             fd = os.open(leaf, _file_flags(), dir_fd=parent_fd)
@@ -437,7 +441,7 @@ class VaultStorage:
                     raise IsADirectoryError(
                         f"Target is not a regular file: {target.relative!r}"
                     )
-                content = _read_all(fd)
+                content = _read_all(fd, max_bytes)
                 info = os.fstat(fd)
                 return content, FileRevision.from_bytes(content, mtime_ns=info.st_mtime_ns)
             finally:

@@ -26,17 +26,12 @@ services:
       - LOCK_PATH=${LOCK_PATH:-/data/locks}
       - AUDIT_LOG_PATH=${AUDIT_LOG_PATH:-/data/audit.jsonl}
       - EXCLUDE_PATHS=${EXCLUDE_PATHS:-private/,.obsidian/,.trash/}
-      - TOOL_PROFILE=${TOOL_PROFILE:-focused}
       # Optional plugin-format tool groups — each disabled by default (opt-in).
       # See .env.example for details.
       - ENABLE_CANVAS=${ENABLE_CANVAS:-false}
       - ENABLE_EXCALIDRAW=${ENABLE_EXCALIDRAW:-false}
       - ENABLE_KANBAN=${ENABLE_KANBAN:-false}
       - ENABLE_BASES=${ENABLE_BASES:-false}
-      - ENABLE_MOVE=${ENABLE_MOVE:-false}
-      - ENABLE_FOLDER_RENAME=${ENABLE_FOLDER_RENAME:-false}
-      - ENABLE_BULK_REPLACE=${ENABLE_BULK_REPLACE:-false}
-      - ENABLE_DELETE=${ENABLE_DELETE:-false}
       - API_KEY=${API_KEY:-}
       - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
       # Optional second auth variant for the claude.ai Custom Connector (OAuth-only).

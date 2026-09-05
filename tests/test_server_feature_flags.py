@@ -45,8 +45,6 @@ _HIGH_RISK_TOOLS = {
 def _reload_server(monkeypatch, **flags: bool):
     for name in _FLAG_ENV:
         monkeypatch.delenv(name, raising=False)
-    # These tests isolate feature-gate behavior from profile filtering.
-    monkeypatch.setenv("TOOL_PROFILE", "full")
     for group, enabled in flags.items():
         monkeypatch.setenv(f"ENABLE_{group.upper()}", "true" if enabled else "false")
     cfg_mod._config = None
@@ -66,10 +64,10 @@ async def test_all_flags_disabled_by_default(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("flag, tools_for_flag", _HIGH_RISK_TOOLS.items())
-async def test_high_risk_flags_register_only_their_tools(monkeypatch, flag, tools_for_flag):
+async def test_removed_high_risk_flags_do_not_register_tools(monkeypatch, flag, tools_for_flag):
     server = _reload_server(monkeypatch, **{flag: True})
     names = {tool.name for tool in await server.mcp.list_tools()}
-    assert tools_for_flag <= names
+    assert names.isdisjoint(tools_for_flag)
     for other_flag, other_tools in _HIGH_RISK_TOOLS.items():
         if other_flag != flag:
             assert names.isdisjoint(other_tools)

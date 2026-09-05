@@ -25,16 +25,6 @@ class ConfigError(Exception):
     pass
 
 
-def get_tool_profile() -> str:
-    """Read and validate TOOL_PROFILE without requiring vault settings."""
-    value = os.environ.get("TOOL_PROFILE", "focused").strip().lower()
-    if value not in ("full", "focused"):
-        raise ConfigError(
-            f"Invalid TOOL_PROFILE={value!r}; expected 'full' or 'focused'"
-        )
-    return value
-
-
 def _path_rules(value: object, *, name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
     """Normalize JSON path rules without comma-delimited env parsing."""
     if value is None:
@@ -241,15 +231,9 @@ class Config:
     enable_excalidraw: bool = field(init=False)
     enable_kanban: bool = field(init=False)
     enable_bases: bool = field(init=False)
-    enable_move: bool = field(init=False)
-    enable_folder_rename: bool = field(init=False)
-    enable_bulk_replace: bool = field(init=False)
-    enable_delete: bool = field(init=False)
-    tool_profile: str = field(init=False)
 
     def __init__(self) -> None:
         set_value = object.__setattr__
-        set_value(self, "tool_profile", get_tool_profile())
         vaults_config_path = os.environ.get("VAULTS_CONFIG", "")
         set_value(self, "multi_vault", bool(vaults_config_path))
         set_value(
@@ -405,10 +389,6 @@ class Config:
             ("enable_excalidraw", "ENABLE_EXCALIDRAW"),
             ("enable_kanban", "ENABLE_KANBAN"),
             ("enable_bases", "ENABLE_BASES"),
-            ("enable_move", "ENABLE_MOVE"),
-            ("enable_folder_rename", "ENABLE_FOLDER_RENAME"),
-            ("enable_bulk_replace", "ENABLE_BULK_REPLACE"),
-            ("enable_delete", "ENABLE_DELETE"),
         ):
             set_value(
                 self,

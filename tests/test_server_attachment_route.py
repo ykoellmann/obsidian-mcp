@@ -13,7 +13,7 @@ import pytest
 from fastmcp.server.auth import AccessToken, TokenVerifier
 
 from obsidian_mcp import server
-from obsidian_mcp.tools.attachments import create_attachment_token, verify_attachment_token
+from obsidian_mcp.tools.attachments import create_attachment_token
 
 
 def _client():
@@ -497,46 +497,3 @@ async def test_scoped_token_route_multi_vault_isolates_correctly(tmp_path, monke
     assert (vault_b / "file.png").read_bytes() == b"data"
     assert resp_tampered.status_code == 401
     assert not (vault_a / "file.png").exists()
-
-
-def test_create_attachment_token_tool_rejects_github_login_identity(tmp_path, monkeypatch):
-    config_path, _vault_a, _vault_b = _write_vaults_config(tmp_path)
-    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
-    monkeypatch.setenv("TRANSPORT", "sse")
-    import obsidian_mcp.config as cfg_mod
-    cfg_mod._config = None
-    monkeypatch.setattr(
-        server, "get_access_token",
-        lambda: AccessToken(token="x", client_id="oauth", scopes=[], claims={"login": "octocat"}),
-    )
-
-    with pytest.raises(PermissionError, match="api_key identity"):
-        server.create_attachment_token_tool("file.png")
-
-
-def test_create_attachment_token_tool_multi_vault_signs_with_identity_key(tmp_path, monkeypatch):
-    config_path, _vault_a, vault_b = _write_vaults_config(tmp_path)
-    monkeypatch.setenv("VAULTS_CONFIG", str(config_path))
-    monkeypatch.setenv("TRANSPORT", "sse")
-    import obsidian_mcp.config as cfg_mod
-    cfg_mod._config = None
-    monkeypatch.setattr(
-        server, "get_access_token",
-        lambda: AccessToken(token="sk-both", client_id="sk-both", scopes=[]),
-    )
-
-    # Calling create_attachment_token_tool directly (not through FastMCP's
-    # tool dispatch) bypasses VaultResolutionMiddleware — set the vault
-    # context by hand to simulate what it would have done for vault="monari".
-    context_token = cfg_mod.set_current_vault("monari")
-    try:
-        token = server.create_attachment_token_tool("file.png", vault="monari")
-    finally:
-        cfg_mod.reset_current_vault(context_token)
-    assert token["vault"] == "monari"
-    assert not verify_attachment_token(
-        "wrong-key", "PUT", "file.png", "monari", token["expires_at"], token["sig"]
-    )
-    assert verify_attachment_token(
-        "sk-both", "PUT", "file.png", "monari", token["expires_at"], token["sig"]
-    )

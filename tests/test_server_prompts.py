@@ -22,7 +22,7 @@ async def test_weekly_review_prompt_mentions_get_tasks_tool():
         result = await client.get_prompt("weekly_review")
 
     text = result.messages[0].content.text
-    assert "get_tasks_tool" in text
+    assert "get_tasks" in text
 
 
 @pytest.mark.asyncio
@@ -32,7 +32,7 @@ async def test_daily_note_prompt_uses_date_arg():
 
     text = result.messages[0].content.text
     assert "2026-01-01" in text
-    assert "get_periodic_note_tool" in text
+    assert "read_file" in text
     assert "get_daily_note_tool" not in text
     assert "get_tasks_tool" not in text
     assert "done=false" in text
