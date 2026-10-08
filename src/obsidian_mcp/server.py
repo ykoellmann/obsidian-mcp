@@ -1310,11 +1310,11 @@ def get_audit_log_tool(
     since: str | None = None,
     limit: int = 50,
     vault: str | None = None,
-) -> list[dict]:
+) -> dict:
     """Query the append-only log of write-tool activity (who/what changed,
     not just the .trash/ state after the fact). Most recent first.
     path/tool/since are optional filters (since: ISO timestamp, inclusive).
-    Entries: {timestamp, tool, path, summary}. Covers the core note/folder
+    data.items is a list of {timestamp, tool, path, summary}. Covers the core note/folder
     write tools; canvas/kanban/excalidraw/bases writes aren't logged yet."""
     entries = get_audit_log(path=path, tool=tool, since=since, limit=limit)
     return list_result(entries, meta={"truncated": len(entries) >= limit})

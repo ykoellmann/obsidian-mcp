@@ -5,6 +5,15 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `get_audit_log_tool` advertised a wrapped array `outputSchema` (from a stale
+  `-> list[dict]` annotation) while returning the standard envelope, so clients
+  that validate structured content, such as Claude Code, rejected every call
+  ([#10](https://github.com/ykoellmann/obsidian-mcp/issues/10)).
+
 ## [2.1.0] - 2026-09-16
 
 ### Added — per-identity path policy overrides

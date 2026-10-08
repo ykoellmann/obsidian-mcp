@@ -91,6 +91,22 @@ async def test_all_flags_enabled(monkeypatch):
         assert group_tools <= names
 
 
+@pytest.mark.asyncio
+async def test_every_tool_advertises_the_envelope_object_schema(monkeypatch):
+    """Every tool returns the result envelope (a dict). A non-dict return
+    annotation makes FastMCP advertise a wrapped `{"result": ...}` schema that
+    validating clients reject against the envelope actually returned."""
+    server = _reload_server(
+        monkeypatch, canvas=True, excalidraw=True, kanban=True, bases=True,
+        move=True, folder_rename=True, bulk_replace=True, delete=True,
+    )
+    for tool in await server.mcp.list_tools():
+        schema = tool.output_schema
+        assert schema is not None, tool.name
+        assert schema.get("type") == "object", tool.name
+        assert not schema.get("x-fastmcp-wrap-result"), tool.name
+
+
 @pytest.fixture(autouse=True)
 def _restore_server_module():
     """Reload server.py once more after each test so later test modules
