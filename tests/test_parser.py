@@ -86,6 +86,42 @@ def test_inline_hash_inside_fenced_code_block_not_a_tag():
     assert "real-tag" in note.tags
 
 
+def test_heading_link_anchor_not_a_tag():
+    # The "#Heading" part of [[Note#Heading]] is a link anchor, not a tag —
+    # Obsidian doesn't index it as one. Same for embeds and aliased links.
+    raw = (
+        "See [[Calendar effects#Results 2021]] and [[Costs#Pitfalls|pitfalls]], "
+        "embed ![[Source#Important]], same-note [[#Local heading]]. #real-tag applies."
+    )
+    note = parse_note(raw, path="x.md")
+    assert note.tags == ["real-tag"]
+
+
+def test_tag_right_after_wikilink_still_counted():
+    raw = "Linked [[Note]] #after-link in prose."
+    note = parse_note(raw, path="x.md")
+    assert "after-link" in note.tags
+
+
+def test_wikilink_inside_code_span_does_not_swallow_real_tag():
+    raw = "Code `[[x#y]]` then #real-tag."
+    note = parse_note(raw, path="x.md")
+    assert note.tags == ["real-tag"]
+
+
+def test_hash_in_link_alias_not_a_tag():
+    raw = "See [[Note|#alias]] and #real-tag."
+    note = parse_note(raw, path="x.md")
+    assert note.tags == ["real-tag"]
+
+
+def test_tag_in_single_brackets_still_counted():
+    # Only [[...]] links are blanked; a lone "[" must not hide a tag.
+    raw = "Status [#todo] open."
+    note = parse_note(raw, path="x.md")
+    assert note.tags == ["todo"]
+
+
 def test_tags_from_frontmatter_string():
     raw = "---\ntags: alpha, beta\n---\nBody"
     note = parse_note(raw)

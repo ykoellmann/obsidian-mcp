@@ -43,6 +43,10 @@ _INLINE_FIELD_RE = re.compile(r"^([\w][\w /-]*)::[ \t]*(.+)$", re.MULTILINE)
 _CODE_BLOCK_RE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 
+# Any [[...]] wikilink or ![[...]] embed — the "#Heading" anchor inside
+# [[Note#Heading]] is part of the link, not a tag (Obsidian doesn't index it).
+_ANY_WIKILINK_RE = re.compile(r"!?\[\[[^\]\n]*\]\]")
+
 # A tag must contain at least one non-numeric character — Obsidian doesn't
 # treat purely-numeric strings like "#1" as valid tags, since that syntax is
 # commonly used for cross-references ("see point #9") rather than tagging.
@@ -101,7 +105,8 @@ def extract_tags(fm: dict, body: str) -> list[str]:
     if isinstance(fm_tags, list):
         tags.extend(str(t).strip().lstrip("#") for t in fm_tags if t)
 
-    for match in re.finditer(r"(?<!\[)#([\w/-]+)", _strip_code(body)):
+    scan = _ANY_WIKILINK_RE.sub(lambda m: " " * len(m.group(0)), _strip_code(body))
+    for match in re.finditer(r"#([\w/-]+)", scan):
         tag = match.group(1)
         if _PURELY_NUMERIC_RE.match(tag):
             continue
